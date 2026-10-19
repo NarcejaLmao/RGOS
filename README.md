@@ -3,7 +3,9 @@ RG OS is a completely free Debian based Linux emulation distribution for retro h
 
 # Supported Devices
 Anbernic RG34XXSP<br>
-Anbernic RG35XXSP
+Anbernic RG35XXSP<br>
+Anbernic RG34XX<br>
+TrimUI Smart Pro
 
 # Join the Discord!
 [Join our Discord](https://discord.gg/43gbr5uSBD) to get leaks, chats, support, and more.
