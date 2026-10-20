@@ -1,0 +1,6 @@
+{
+  "country": "",
+  "iface": "auto",
+  "firmware_dir": "/media/roms/firmware",
+  "modules": ["8821cs", "rtl8821cs", "rtw88_8821cs", "8723ds", "rtl8723ds", "8188fu", "xr819", "xradio_wlan", "brcmfmac", "8189fs", "8189es"]
+}

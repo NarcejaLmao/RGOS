@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "mountpoint": "/media/roms2",
+  "fs": ["exfat", "vfat", "ext4", "ntfs"],
+  "min_mb": 8,
+  "create_folders": true,
+  "readonly": false
+}

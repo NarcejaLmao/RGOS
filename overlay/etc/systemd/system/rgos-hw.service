@@ -1,0 +1,15 @@
+[Unit]
+Description=RG OS hardware (power key, brightness, battery)
+After=systemd-udevd.service rgos-sticks.service
+Before=rgos.service
+
+[Service]
+# exits 0 at once on devices without /etc/rgos/hw-<device>.json (the RG34XX-SP)
+ExecStart=/usr/bin/python3 /opt/rgos/rgos-hw
+Restart=on-failure
+RestartSec=2
+StandardOutput=append:/var/log/rgos-hw-daemon.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

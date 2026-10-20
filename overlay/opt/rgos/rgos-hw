@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""RG OS hardware daemon (TrimUI Smart Pro): power key, backlight, battery, screen sleep, low-battery shutdown.
+
+Service `rgos-hw`. It exits at once on a device without /etc/rgos/hw-<device>.json (the RG34XX-SP), so that device
+behaves exactly as before. Settings: /etc/rgos/hw-tsp.json, overrides in /var/lib/rgos/hw.json (see README).
+
+What it does
+  * POWER KEY (KEY_POWER, read straight from /dev/input/event*; the build tells systemd-logind to ignore the key):
+      short press  = screen off / on ("screen"; default) - the backlight goes dark, the running game is paused
+                     (SIGSTOP; ports too) and RetroArch stops making sound. Any power press wakes it.
+      hold ~1.5 s  = clean power off (rgos-poweroff), with a short buzz as feedback.
+    conf power_key.short: "screen" | "poweroff" | "none".
+  * BRIGHTNESS: hold SELECT and press VOL+ / VOL- (conf bright_combo: "select" | "menu" | "none"; the volume daemon
+    ignores the volume keys while SELECT is held). The level is remembered in /var/lib/rgos/brightness and shown by
+    the menu (/run/rgos/brightness) or as a RetroArch message in-game.
+  * BATTERY: /run/rgos/battery = "<percent> <status> <stamp>" every 10 s. Low (conf battery.low_pct, default 15%) shows a
+    warning, at 5% steps below that again; at critical_pct (3%) on battery (status must read Discharging, twice in a
+    row) it shows "shutting down" and powers off cleanly after critical_grace_s seconds unless a charger shows up.
+  * AUDIO: switches on playback switches the codec leaves muted after boot (volume levels are rgos-volume's job).
+
+CLI (for tests and ports):  rgos-hw brightness [N|+N|-N]   rgos-hw screen on|off   rgos-hw rumble [ms]
+                            rgos-hw status   rgos-hw prepoweroff   (run as root; `screen` only switches the backlight)
+"""
+import os, signal, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import hwctl
+from evpad import EvPads, EV_KEY
+
+RUN = "/run/rgos"
+BRIGHT_SAVED, BRIGHT_SHOWN = "/var/lib/rgos/brightness", RUN + "/brightness"
+BATT_FILE, LOWFLAG, SCREENOFF, ACTIVE = RUN + "/battery", RUN + "/battery-low", RUN + "/screenoff", RUN + "/hw-active"
+PORT_PID = RUN + "/port.pid"
+KEY_VOLDOWN, KEY_VOLUP, KEY_POWER = 114, 115, 116
+BTN_SELECT, BTN_MODE = 0x13a, 0x13c
+STOP = False
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def _stop(*_):
+    global STOP
+    STOP = True
+
+
+class Hw:
+    def __init__(self, conf):
+        self.conf = conf
+        self.bl, self.bat, self.motor = hwctl.Backlight(conf), hwctl.Battery(conf), hwctl.Motor(conf)
+        bc = conf.get("backlight", {})
+        self.step = max(1, int(bc.get("step_pct", 10)))
+        self.level = self._saved_level(int(bc.get("default_pct", 70)))
+        self.screen_on = True
+        self.osd_port = int(conf.get("osd_port", 55355) or 0)
+        pk = conf.get("power_key", {})
+        self.long_s = max(0.3, float(pk.get("long_ms", 1500)) / 1000.0)
+        self.short = pk.get("short", "screen")
+        self.power_codes = set(int(c) for c in pk.get("codes", [KEY_POWER]))
+        self.combo = conf.get("bright_combo", "select")
+        self.pause_game = bool(conf.get("pause_game_on_screen_off", True))
+        b = conf.get("battery", {})
+        self.low, self.crit = int(b.get("low_pct", 15)), int(b.get("critical_pct", 3))
+        self.grace = float(b.get("critical_grace_s", 30))
+        self.crit_since = None          # time the critical countdown started
+        self.crit_hits = 0
+        self.last_low_warn = 101
+        self.paused = []                # pids / process groups we SIGSTOPped for screen-off
+
+    # ---- brightness
+    def _saved_level(self, default):
+        try:
+            return max(1, min(100, int(hwctl.rd(BRIGHT_SAVED))))
+        except (OSError, ValueError):
+            return default
+
+    def set_level(self, pct, show=True):
+        self.level = max(self.bl.min_pct, min(100, int(pct)))
+        if self.screen_on:
+            self.bl.set(self.level)
+        hwctl.write_run(BRIGHT_SHOWN, "%d %d" % (self.level, time.time() * 1000))
+        try:
+            os.makedirs(os.path.dirname(BRIGHT_SAVED), exist_ok=True)
+            with open(BRIGHT_SAVED, "w") as f:
+                f.write(str(self.level))
+        except OSError:
+            pass
+        if show and self.osd_port:
+            n = (self.level + 5) // 10
+            hwctl.retroarch_msg("Brightness %3d%%  [%s%s]" % (self.level, "#" * n, "-" * (10 - n)), self.osd_port)
+
+    # ---- screen sleep
+    def _signal_game(self, sig):
+        if sig == signal.SIGSTOP:
+            self.paused = []
+            try:
+                out = subprocess.run(["pidof", "retroarch"], capture_output=True, text=True, timeout=3).stdout.split()
+            except Exception:
+                out = []
+            for p in out:
+                self.paused.append(("pid", int(p)))
+            try:
+                self.paused.append(("grp", int(hwctl.rd(PORT_PID))))
+            except (OSError, ValueError):
+                pass
+        for kind, n in self.paused:
+            try:
+                (os.killpg if kind == "grp" else os.kill)(n, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if sig == signal.SIGCONT:
+            self.paused = []
+
+    def screen(self, on):
+        if on == self.screen_on:
+            return
+        self.screen_on = on
+        if on:
+            self.bl.set(self.level)
+            try:
+                os.unlink(SCREENOFF)
+            except OSError:
+                pass
+            if self.pause_game:
+                self._signal_game(signal.SIGCONT)
+        else:
+            hwctl.write_run(SCREENOFF, str(int(time.time())))
+            if self.pause_game:
+                self._signal_game(signal.SIGSTOP)
+            self.bl.set(0)
+        log("screen", "on" if on else "off")
+
+    # ---- power off
+    def poweroff(self, reason):
+        log("power off:", reason)
+        self.motor.pulse(150)
+        subprocess.Popen(["/opt/rgos/rgos-poweroff"], stdin=subprocess.DEVNULL)
+
+    # ---- battery
+    def battery_tick(self):
+        r = self.bat.read()
+        if r is None:
+            return
+        hwctl.write_run(BATT_FILE, "%d %s %d" % (r["pct"], r["status"].replace(" ", "_"), time.time()))
+        low = r["pct"] <= self.low and not r["plugged"]
+        if low:
+            hwctl.write_run(LOWFLAG, "1")
+        else:
+            self.last_low_warn = 101
+            try:
+                os.unlink(LOWFLAG)
+            except OSError:
+                pass
+        if low and r["pct"] <= self.last_low_warn - 5:        # first warning at low_pct, then every 5 points lower
+            self.last_low_warn = r["pct"]
+            hwctl.retroarch_msg("Battery low: %d%%" % r["pct"], self.osd_port or 55355)
+            log("battery low", r["pct"])
+        # critical: needs an explicit "Discharging" reading, twice in a row, so a gauge glitch cannot power us off
+        if r["pct"] <= self.crit and r["discharging"]:
+            self.crit_hits += 1
+            if self.crit_hits >= 2 and self.crit_since is None:
+                self.crit_since = time.time()
+                hwctl.retroarch_msg("Battery critical - shutting down in %d s" % self.grace, self.osd_port or 55355)
+                log("battery critical", r["pct"], "-> power off in", self.grace, "s")
+            if self.crit_since is not None and time.time() - self.crit_since >= self.grace:
+                self.poweroff("battery critical (%d%%)" % r["pct"])
+                self.crit_since = time.time() + 3600      # do not spawn it again while the system goes down
+        else:
+            self.crit_hits, self.crit_since = 0, None
+
+    def status_line(self):
+        r = self.bat.read()
+        return ("backlight: %s level %d%% (%s)\nbattery: %s\nmotor: %s\nscreen: %s" % (
+            self.bl.describe(), self.level, "on" if self.screen_on else "off",
+            "none" if r is None else "%d%% %s%s" % (r["pct"], r["status"], " (estimated from voltage)" if r["estimated"] else ""),
+            self.motor.describe(), "on" if self.screen_on else "off"))
+
+
+def daemon():
+    conf = hwctl.load_conf()
+    if conf is None:
+        log("no hardware config for this device: nothing to do")
+        return 0
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    os.makedirs(RUN, exist_ok=True)
+    hw = Hw(conf)
+    log("backlight:", hw.bl.describe(), "| battery:", hw.bat.node or "none", "| motor:", hw.motor.describe(),
+        "| power key short=%s long=%.1fs combo=%s" % (hw.short, hw.long_s, hw.combo))
+    if hw.bl.available:
+        hw.set_level(hw.level, show=False)
+    hwctl.write_run(ACTIVE, hw.combo)
+    pads = EvPads()
+    held = set()
+    t_power = None                      # when the power key went down (None = up)
+    long_done = False
+    next_batt, next_audio, audio_tries = 0.0, 0.0, 0
+    audio_conf = conf.get("audio", {})
+    try:
+        while not STOP:
+            now = time.time()
+            if audio_conf.get("enable_switches", True) and audio_tries < 20 and now >= next_audio:
+                next_audio, audio_tries = now + 3.0, audio_tries + 1      # the card can show up late; stop trying after a minute
+                done = hwctl.audio_enable(audio_conf.get("card", hwctl.audio_card()), audio_conf.get("extra_switches", ()))
+                if done:
+                    log("audio switches on:", ", ".join(done))
+                    audio_tries = 99
+            if now >= next_batt:
+                next_batt = now + 10.0
+                hw.battery_tick()
+            for t, c, v in pads.read():
+                if t != EV_KEY:
+                    continue
+                if c in hw.power_codes:
+                    if v == 1 and t_power is None:
+                        t_power, long_done = time.time(), False
+                    elif v == 0 and t_power is not None:
+                        if not long_done:
+                            if hw.short == "screen":
+                                hw.screen(not hw.screen_on)
+                            elif hw.short == "poweroff":
+                                hw.poweroff("short press")
+                        t_power = None
+                    continue
+                if v in (1, 2) and c in (KEY_VOLUP, KEY_VOLDOWN):
+                    mod = BTN_SELECT if hw.combo == "select" else BTN_MODE if hw.combo == "menu" else None
+                    if mod is not None and mod in held and hw.screen_on and hw.bl.available:
+                        hw.set_level(hw.level + (hw.step if c == KEY_VOLUP else -hw.step))
+                elif c in (BTN_SELECT, BTN_MODE):
+                    held.add(c) if v else held.discard(c)
+            if t_power is not None and not long_done and time.time() - t_power >= hw.long_s:
+                long_done = True
+                hw.poweroff("power key held")
+            time.sleep(0.03)
+    finally:
+        if not hw.screen_on:
+            hw.screen(True)
+        for p in (ACTIVE, SCREENOFF, LOWFLAG):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+    return 0
+
+
+def cli(argv):
+    conf = hwctl.load_conf() or {}
+    hw = Hw(conf)
+    cmd = argv[0]
+    if cmd == "brightness":
+        if len(argv) > 1:
+            a = argv[1]
+            hw.set_level(hw.level + int(a) if a[0] in "+-" else int(a), show=False)
+        print(hw.level)
+    elif cmd == "screen":                 # backlight only: pausing games on screen-off is the daemon's job
+        if len(argv) > 1:
+            hw.bl.set(hw.level if argv[1] == "on" else 0)
+            if argv[1] == "on":
+                try:
+                    os.unlink(SCREENOFF)
+                except OSError:
+                    pass
+        print("backlight set" if len(argv) > 1 else "usage: rgos-hw screen on|off")
+    elif cmd == "rumble":
+        hw.motor.pulse(int(argv[1]) if len(argv) > 1 else 300)
+    elif cmd == "status":
+        print(hw.status_line())
+    elif cmd == "prepoweroff":
+        # called by rgos-poweroff: panel dark and motor quiet before the kernel goes down (no effect without hw config)
+        if conf:
+            hw.motor.set(False)
+            hw.bl.set(0)
+    else:
+        print(__doc__)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]) if len(sys.argv) > 1 else daemon())

@@ -1,0 +1,7 @@
+# RG OS second SD card (/opt/rgos/rgos-sdcard). Any mmcblk disk/partition appearing, changing or going away re-syncs the
+# card-2 mount. systemd-run keeps udev's worker short; rgos-sdcard serialises concurrent runs with a lock.
+SUBSYSTEM!="block", GOTO="rgos_sdcard_end"
+KERNEL!="mmcblk[0-9]*", GOTO="rgos_sdcard_end"
+KERNEL=="mmcblk[0-9]*boot[0-9]*|mmcblk[0-9]*rpmb", GOTO="rgos_sdcard_end"
+ACTION=="add|remove|change", RUN+="/usr/bin/systemd-run --no-block --quiet /opt/rgos/rgos-sdcard sync --settle"
+LABEL="rgos_sdcard_end"

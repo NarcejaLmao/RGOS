@@ -1,0 +1,99 @@
+#!/bin/bash
+# First boot: create and format the ROMS partition (exFAT; FAT32 when the kernel has no exFAT driver) (p3) in all the free space after the root partition.
+# The flashed image only has the boot + root partitions; ROMS does not exist until this runs.
+#
+# This script must NEVER fail the boot: every problem is written to the log and we exit 0.
+# If anything goes wrong the flag file is not written, so it simply retries on the next boot.
+FLAG=/var/lib/rgos/firstboot.done
+LOG=/var/log/rgos-firstboot.log
+mkdir -p /var/lib/rgos /var/log 2>/dev/null
+# if /var/log is not writable for any reason, fall back to /run so the script still runs
+{ : >>"$LOG"; } 2>/dev/null || LOG=/run/rgos-firstboot.log
+exec >>"$LOG" 2>&1
+echo "=== rgos-firstboot $(date) ==="
+
+# The SD card is whichever disk holds the root partition (default mmcblk0).
+DEV=/dev/mmcblk0
+src=$(findmnt -n -o SOURCE / 2>/dev/null)
+case "$src" in /dev/mmcblk[0-9]p2) DEV=${src%p2} ;; esac
+d=${DEV#/dev/}
+# ROMS found by label, but only on THIS card (a second SD card may carry a ROMS partition too); numbers are not fixed
+PART=$(blkid -o device -t LABEL=ROMS 2>/dev/null | grep -E "^/dev/${d}p[0-9]+$" | head -n 1)
+echo "device=$DEV part=${PART:-<none yet>}"
+
+finish() { echo "--- done (rc=0) ---"; exit 0; }
+sysval() { cat "/sys/block/$d/$1" 2>/dev/null; }
+
+# 1. Create partition 3 in ALL the free space after partition 2 (if it does not exist yet).
+disk=$(sysval size); p2start=$(sysval ${d}p2/start); p2size=$(sysval ${d}p2/size)
+if [ -z "$disk" ] || [ -z "$p2start" ] || [ -z "$p2size" ]; then
+    echo "cannot read partition geometry from sysfs (disk='$disk' p2start='$p2start' p2size='$p2size'); will retry next boot"
+    finish
+fi
+p2end=$(( p2start + p2size ))
+
+if [ -z "$PART" ]; then
+    before=$(ls /sys/block/$d | grep "^${d}p")
+    # Start = end of p2 rounded up to 1 MiB (2048 sectors); size = everything up to the end of the card.
+    # The start MUST be explicit: with ",,7" sfdisk fills the FIRST free hole on the disk (the gap before p1).
+    p3start=$(( (p2end + 2047) / 2048 * 2048 ))
+    p3size=$(( (disk - p3start - 64) / 2048 * 2048 ))      # leave room for the backup GPT ("last usable GPT sector" error otherwise)
+    # MBR stores sector counts in 32 bits: cap at 2 TiB
+    [ $(( p3start + p3size )) -le 4294967295 ] || p3size=$(( 4294967295 - p3start ))
+    echo "disk=$disk p2end=$p2end p3start=$p3start p3size=$p3size sectors"
+    if [ "$p3size" -lt 131072 ]; then                  # < 64 MiB: nothing worth making a partition of
+        echo "no free space after the root partition (SD card no bigger than the image?); will retry next boot"
+        finish
+    fi
+    ptype=7; [ "$(blkid -o value -s PTTYPE "$DEV" 2>/dev/null)" = gpt ] && ptype=EBD0A0A2-B9E5-4433-87C0-68B6B72699C7   # GPT wants a GUID
+    if ! echo "start=$p3start, size=$p3size, type=$ptype" | timeout 60 sfdisk --append --no-reread "$DEV"; then
+        echo "sfdisk FAILED; will retry next boot"; finish
+    fi
+    # tell the running kernel about the new partition (root is mounted, so a full re-read is not possible)
+    timeout 30 partx -u "$DEV" || timeout 30 partx -a "$DEV" || echo "partx failed (continuing)"
+    timeout 30 udevadm settle --timeout=20 || true
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        new=$(comm -13 <(echo "$before" | sort) <(ls /sys/block/$d | grep "^${d}p" | sort) | head -n 1)
+        [ -n "$new" ] && break; sleep 1
+    done
+    PART=/dev/$new
+    [ -n "$new" ] && [ -b "$PART" ] || { echo "new partition did not appear; will retry next boot"; finish; }
+    wipefs -a "$PART" >/dev/null 2>&1                  # drop any stale signatures from earlier data on the card
+    echo "created $PART ($(( p3size / 2048 )) MiB)"
+fi
+
+# 2. Format it unless it already holds a filesystem (e.g. an earlier run got that far).
+#    exFAT when the kernel has it (or can load it), otherwise FAT32. ROMS_FS in /var/lib/rgos/romsfs or /etc/rgos/romsfs
+#    (exfat|vfat|auto, written by the image build) can force one.
+ROMSFS=$(cat /var/lib/rgos/romsfs /etc/rgos/romsfs 2>/dev/null | head -n 1)
+fstype=$(blkid -o value -s TYPE "$PART" 2>/dev/null)
+if [ -z "$fstype" ]; then
+    modprobe exfat 2>/dev/null
+    if [ "$ROMSFS" = vfat ] || { [ "$ROMSFS" != exfat ] && ! grep -qw exfat /proc/filesystems; }; then
+        echo "formatting ROMS as FAT32 (no exFAT driver in this kernel, or ROMS_FS=vfat)"
+        mkfs_cmd="mkfs.vfat -F 32 -n ROMS"
+    else
+        mkfs_cmd="mkfs.exfat -L ROMS"
+    fi
+    if timeout 300 $mkfs_cmd "$PART"; then
+        echo "ROMS formatted"
+    else
+        echo "$mkfs_cmd FAILED; will retry next boot"; finish
+    fi
+    fstype=$(blkid -o value -s TYPE "$PART" 2>/dev/null)
+else
+    echo "$PART already has a '$fstype' filesystem; leaving it alone"
+fi
+case "$fstype" in vfat|exfat) ;; *) echo "unexpected ROMS filesystem '$fstype'; will retry next boot"; finish ;; esac
+echo "$fstype" > /var/lib/rgos/romsfs.detected 2>/dev/null
+
+# 3. Mount it and create the standard folders so the menu and ports find them.
+mkdir -p /media/roms
+if mountpoint -q /media/roms || timeout 60 mount -t "$fstype" -o noatime,umask=000 "$PART" /media/roms; then
+    mkdir -p /media/roms/roms/ports /media/roms/saves/ports /media/roms/update
+    touch "$FLAG"
+    echo "ROMS ready ($fstype)"
+else
+    echo "could not mount $PART on /media/roms ($fstype driver missing?); will retry next boot"
+fi
+finish

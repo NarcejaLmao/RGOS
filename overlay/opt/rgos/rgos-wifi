@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+"""RG OS Wi-Fi command line / daemon entry point (the logic is in wifictl.py). Try:  rgos-wifi status | scan | connect SSID PASSWORD"""
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import wifictl
+sys.exit(wifictl.cli(sys.argv[1:]))

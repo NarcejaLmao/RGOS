@@ -1,0 +1,20 @@
+#!/bin/bash
+# Hardware report for the TrimUI Smart Pro -> /var/log/rgos-hw.log (run at session start; read it first if brightness,
+# battery, power key, sound or rumble do nothing). Everything it lists is what the kernel really exposes.
+LOG=/var/log/rgos-hw.log
+{
+echo "== $(date)  device $(cat /etc/rgos-device 2>/dev/null)  kernel $(uname -r)"
+echo "-- hwctl discovery:"; (cd /opt/rgos && python3 -c "import hwctl; print(hwctl.report())" 2>&1)
+echo "-- /sys/class/backlight:"; for d in /sys/class/backlight/*; do [ -e "$d" ] && echo "$d: $(cat $d/brightness 2>&1) / max $(cat $d/max_brightness 2>&1)"; done; ls /sys/class/backlight 2>&1 | head -3
+echo "-- disp debugfs (Allwinner BSP):"; ls /sys/kernel/debug/dispdbg /sys/class/disp 2>&1 | head -20
+echo "-- power supplies:"
+for d in /sys/class/power_supply/*; do [ -e "$d" ] || continue; echo "[$d]"
+  for f in type status capacity voltage_now current_now present online health technology; do [ -r "$d/$f" ] && echo "  $f=$(cat $d/$f 2>&1)"; done; done
+echo "-- input devices (look for the power key: KEY bit 116; force feedback: EV bit 0x200000):"
+awk 'BEGIN{RS="";FS="\n"} {n="";h="";e="";k=""; for(i=1;i<=NF;i++){ if($i~/^N:/)n=$i; if($i~/^H:/)h=$i; if($i~/^B: EV=/)e=$i; if($i~/^B: KEY=/)k=$i } print n; print "   " h; print "   " e; print "   " k}' /proc/bus/input/devices
+echo "-- sound cards:"; cat /proc/asound/cards 2>&1
+for c in $(sed -n 's/^ *\([0-9]\+\) \[.*/\1/p' /proc/asound/cards); do echo "-- amixer card $c scontrols:"; amixer -c $c scontrols 2>&1; echo "-- amixer card $c contents (first 120 lines):"; amixer -c $c contents 2>&1 | head -120; done
+echo "-- gpio / vibrator candidates:"; ls /sys/class/gpio 2>&1 | head -20; ls /sys/class/timed_output /sys/class/leds 2>&1 | head -20
+echo "-- dmesg (axp/battery/backlight/pwm/vibrator/motor/codec/sound/lcd):"
+dmesg 2>/dev/null | grep -iE 'axp|battery|backlight|pwm|vibr|motor|rumble|codec|sound|snd|audio|lcd|power key|pek' | tail -60
+} > "$LOG" 2>&1

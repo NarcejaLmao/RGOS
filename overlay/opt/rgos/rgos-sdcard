@@ -1,0 +1,3 @@
+#!/bin/sh
+# RG OS second SD card: see sdcard.py (sync | status | roots | bootdisk)
+exec python3 /opt/rgos/sdcard.py "$@"

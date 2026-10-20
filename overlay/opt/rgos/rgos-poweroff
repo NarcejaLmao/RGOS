@@ -1,0 +1,20 @@
+#!/bin/bash
+# Clean power off with fallbacks. usage: rgos-poweroff [reboot]
+# The stock 4.9 BSP kernel of the TrimUI Smart Pro may not cut the power through the normal systemd path, so after
+# `systemctl poweroff` this escalates (forced poweroff, then sysrq) instead of leaving a dead-but-lit screen.
+# Used by the menu's power-off (rgos-session), the power key and the low-battery shutdown (rgos-hw).
+ACTION=poweroff; [ "${1:-}" = reboot ] && ACTION=reboot
+mkdir -p /run/rgos
+[ -e /run/rgos/poweroff.lock ] && exit 0           # already on its way down
+touch /run/rgos/poweroff.lock
+logger -t rgos-poweroff "$ACTION requested" 2>/dev/null
+# panel dark + motor quiet (does nothing on a device without /etc/rgos/hw-<device>.json)
+python3 /opt/rgos/rgos-hw prepoweroff 2>/dev/null
+sync
+systemctl --no-block "$ACTION" 2>/dev/null
+sleep 15
+sync; "$ACTION" -f 2>/dev/null          # systemd did not get there: force it
+sleep 10
+if [ "$ACTION" = reboot ]; then echo b > /proc/sysrq-trigger; else echo o > /proc/sysrq-trigger; fi
+sleep 5
+rm -f /run/rgos/poweroff.lock           # still alive: allow another attempt

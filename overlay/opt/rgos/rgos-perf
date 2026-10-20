@@ -1,0 +1,64 @@
+#!/bin/bash
+# RG OS port performance profile.  usage: rgos-perf on | off
+#   on   remember the current settings, then: CPU + GPU/DRAM devfreq governors -> performance, bigger SD read-ahead,
+#        quiet kernel console, and the background helpers (stick hub, volume daemon) pinned to CPU0 at high priority
+#        so their wakeups stay off the game's cores.
+#   off  put everything back exactly as it was (also run at every session start, in case a port died mid-way).
+# Tunables: /etc/rgos/ports.conf.  Every write is best-effort: a missing knob is skipped, never an error.
+STATE=/run/rgos/perf.saved
+CONF=/etc/rgos/ports.conf
+GOVERNOR=performance; DEVFREQ_GOVERNOR=performance; READ_AHEAD_KB=2048; QUIET_CONSOLE=1; PIN_HELPERS=1
+[ -r "$CONF" ] && . "$CONF"
+mkdir -p /run/rgos
+
+w() { [ -w "$1" ] && echo "$2" > "$1" 2>/dev/null; }          # w <file> <value>
+save() { echo "$1|$2" >> "$STATE"; }                            # save <file> <old value>
+set_knob() {                                                    # set_knob <file> <value>: save old value, then write
+    local f=$1 v=$2 old
+    [ -r "$f" ] && [ -w "$f" ] || return 0
+    old=$(cat "$f" 2>/dev/null) || return 0
+    [ "$old" = "$v" ] && return 0
+    save "$f" "$old"; w "$f" "$v"
+}
+helpers() { for u in rgos-sticks rgos-volume rgos-hw; do systemctl show -p MainPID --value "$u" 2>/dev/null; done; }
+
+on() {
+    [ -e "$STATE" ] && off                                      # never stack two saves
+    : > "$STATE"
+    local f av
+    for f in /sys/devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor; do
+        av=$(cat "${f%/*}/scaling_available_governors" 2>/dev/null)
+        case " $av " in *" $GOVERNOR "*) set_knob "$f" "$GOVERNOR" ;; esac
+    done
+    for f in /sys/class/devfreq/*/governor; do                  # GPU, DRAM bus, ... whatever the kernel exposes
+        av=$(cat "${f%/*}/available_governors" 2>/dev/null)
+        case " $av " in *" $DEVFREQ_GOVERNOR "*) set_knob "$f" "$DEVFREQ_GOVERNOR" ;; esac
+    done
+    for f in /sys/block/mmcblk[0-9]/queue/read_ahead_kb; do set_knob "$f" "$READ_AHEAD_KB"; done
+    if [ "$QUIET_CONSOLE" = 1 ] && [ -r /proc/sys/kernel/printk ]; then
+        set_knob /proc/sys/kernel/printk "1	$(cut -f2- /proc/sys/kernel/printk)"
+    fi
+    if [ "$PIN_HELPERS" = 1 ]; then
+        for p in $(helpers); do
+            [ "${p:-0}" -gt 1 ] 2>/dev/null || continue
+            taskset -a -p -c 0 "$p" >/dev/null 2>&1 && save "pin" "$p"
+            renice -n -10 -p "$p" >/dev/null 2>&1 && save "nice" "$p"
+        done
+    fi
+}
+
+off() {
+    [ -e "$STATE" ] || return 0
+    local ncpu; ncpu=$(nproc --all 2>/dev/null || echo 1)
+    while IFS='|' read -r k v; do
+        case "$k" in
+            pin)  taskset -a -p -c "0-$((ncpu - 1))" "$v" >/dev/null 2>&1 ;;
+            nice) renice -n 0 -p "$v" >/dev/null 2>&1 ;;
+            /*)   w "$k" "$v" ;;
+        esac
+    done < "$STATE"
+    rm -f "$STATE"
+}
+
+case "$1" in on) on ;; off) off ;; *) echo "usage: rgos-perf on|off" >&2; exit 2 ;; esac
+exit 0

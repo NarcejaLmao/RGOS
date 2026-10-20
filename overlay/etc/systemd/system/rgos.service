@@ -1,0 +1,16 @@
+[Unit]
+Description=RG OS frontend
+After=systemd-user-sessions.service rgos-sticks.service getty@tty1.service   # NOT after rgos-firstboot: a slow/hung ROMS format must never hold the screen
+Wants=rgos-sticks.service
+Conflicts=getty@tty1.service
+
+[Service]
+ExecStart=/opt/rgos/rgos-session
+Restart=always
+StandardInput=tty-force
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+[Install]
+WantedBy=multi-user.target
