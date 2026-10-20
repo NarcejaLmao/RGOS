@@ -226,7 +226,7 @@ rootfs() {
   sudo rm -rf "$WORK/rootfs"
   # non-free-firmware is for firmware-realtek (Wi-Fi)
   sudo debootstrap --arch=arm64 --variant=minbase --components=main,non-free-firmware \
-    --include=systemd-sysv,udev,kmod,util-linux,fdisk,exfatprogs,dosfstools,alsa-utils,python3,python3-pygame,unzip,xz-utils,curl,wget,jq,wpasupplicant,iw,iproute2,wireless-regdb,firmware-realtek,systemd-timesyncd,libopenal1,libsdl2-image-2.0-0,libsdl2-mixer-2.0-0,libsdl2-ttf-2.0-0,libsdl2-net-2.0-0,fonts-dejavu-core,ca-certificates,libgl1-mesa-dri,libegl1,libgles2,libgbm1,libdrm2,procps,nano,busybox-static,retroarch,libretro-mgba,libretro-core-info \
+    --include=systemd-sysv,udev,kmod,util-linux,fdisk,exfatprogs,dosfstools,alsa-utils,python3,python3-pygame,unzip,xz-utils,curl,wget,jq,wpasupplicant,iw,iproute2,wireless-regdb,firmware-realtek,systemd-timesyncd,libopenal1,libsdl2-image-2.0-0,libsdl2-mixer-2.0-0,libsdl2-ttf-2.0-0,libsdl2-net-2.0-0,fonts-dejavu-core,ca-certificates,libgl1-mesa-dri,libegl1,libgles2,libgbm1,libdrm2,procps,nano,busybox-static,retroarch,libretro-mgba,libretro-mesen,libretro-core-info \
     "$SUITE" "$WORK/rootfs" http://deb.debian.org/debian || {
       echo; echo "debootstrap FAILED. Last lines of its log ($WORK/rootfs/debootstrap/debootstrap.log):"
       sudo tail -n 30 "$WORK/rootfs/debootstrap/debootstrap.log" 2>/dev/null

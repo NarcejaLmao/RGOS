@@ -19,7 +19,9 @@ except Exception:
 ROMS_ROOT = os.environ.get("RGOS_ROMS", "/media/roms")
 # (folder name, short tag, runner, accepted extensions, full name)
 # Ports: native Linux games started by a launcher script (roms/ports/<Name>.sh, data in a sub-folder); rgos-session runs the script itself.
-SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"), ("ports", "PORT", "native", (".sh",), "Ports")]
+SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
+           ("nes", "NES", "retroarch", (".nes", ".unf", ".unif"), "Nintendo Entertainment System"),
+           ("ports", "PORT", "native", (".sh",), "Ports")]
 ROMS_DIR = os.path.join(ROMS_ROOT, "roms")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
 STATE_FILE = os.environ.get("RGOS_STATE", "/var/lib/rgos/state.json")
@@ -1334,8 +1336,8 @@ def main():
         elif view == "systems":
             if not vsys:
                 for i, m in enumerate(["No games found.",
-                                       "Put ROMs in  roms/gba/  or launcher scripts (Name.sh)",
-                                       "in  roms/ports/  on the ROMS partition, then press X (B = back)."]):
+                                       "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/,",
+                                       "or launcher scripts in roms/ports/, then press X (B = back)."]):
                     canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                                 (40, 150 + i * 34))
             sys_rows = 6                       # rows that fit between the header and the hint line
@@ -1376,8 +1378,8 @@ def main():
                        "(B = back)"]
             else:
                 msg = ["No games found.",
-                       "Put ROMs in  roms/gba/  or launcher scripts (Name.sh)",
-                       "in  roms/ports/  on the ROMS partition, then X (B = back)."]
+                       "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/,",
+                       "or launcher scripts in roms/ports/, then X (B = back)."]
             for i, m in enumerate(msg):
                 canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                             (40, 150 + i * 34))

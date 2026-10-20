@@ -30,7 +30,7 @@ MENULOG=/var/log/rgos-menu.log
 timeout 30 /opt/rgos/rgos-sdcard sync --settle 2>/dev/null
 # make sure the folders exist (cards set up by older versions lack them)
 if mountpoint -q /media/roms; then
-    mkdir -p /media/roms/roms/ports /media/roms/roms/gba /media/roms/saves/ports /media/roms/saves/gba /media/roms/firmware 2>/dev/null
+    mkdir -p /media/roms/roms/ports /media/roms/roms/gba /media/roms/roms/nes /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/nes /media/roms/firmware 2>/dev/null
 fi
 /opt/rgos/rgos-perf off 2>/dev/null     # undo a port profile left behind if the session was killed mid-port
 mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null   # for devices_deferred
@@ -187,6 +187,7 @@ while true; do
             @tool:retroarch) run_retroarch_ui ;;
             */roms/ports/*) run_port "$rom" ;;
             */roms/gba/*) run_retroarch mgba "$rom" ;;
+            */roms/nes/*) run_retroarch mesen "$rom" ;;
             *) echo "cannot launch: '$rom'" >> "$PORTLOG" ;;
           esac ;;
       20) /opt/rgos/rgos-poweroff; sleep 30 ;;       # sync, then systemctl poweroff, forced poweroff / sysrq if the kernel needs it
