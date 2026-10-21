@@ -248,6 +248,14 @@ rootfs() {
   sudo unzip -o "$GENESIS_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract Genesis Plus GX core"; exit 1; }
   sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/genesis_plus_gx_libretro.so" || { echo "Downloaded archive did not contain genesis_plus_gx_libretro.so"; exit 1; }
   rm -f "$GENESIS_ZIP"
+  # Snes9x provides Super Nintendo / Super Famicom emulation on ARM64.
+  SNES9X_ZIP="$WORK/snes9x_libretro.so.zip"
+  curl -fL --retry 3 --retry-delay 2 \
+    "https://buildbot.libretro.com/nightly/linux/aarch64/latest/snes9x_libretro.so.zip" \
+    -o "$SNES9X_ZIP" || { echo "Failed to download the official ARM64 Snes9x core"; exit 1; }
+  sudo unzip -o "$SNES9X_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract Snes9x core"; exit 1; }
+  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/snes9x_libretro.so" || { echo "Downloaded archive did not contain snes9x_libretro.so"; exit 1; }
+  rm -f "$SNES9X_ZIP"
   apply_overlay
   sudo cp -a "$WORK/modules/lib/modules" "$WORK/rootfs/lib/"
   # make sure module dependency/alias maps exist so udev auto-loads the joypad/ADC/PWM drivers at boot
