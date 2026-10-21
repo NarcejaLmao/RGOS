@@ -126,7 +126,7 @@ class MenuScan(unittest.TestCase):
         menu.sdcard = types.SimpleNamespace(extra_roots=lambda: [c2])
         g = menu.scan_roms()
         self.assertEqual([(x["title"], x["card"]) for x in g if x["sid"] == "ports"], [("Alpha", 1), ("Beta", 2)])
-        self.assertEqual({x["sid"] for x in g}, {"ports", "gba"})   # ports + GBA (RetroArch mGBA); other emulator folders are not scanned
+        self.assertEqual({x["sid"] for x in g}, {"ports", "gba", "nes"})   # include every supported system with a recognized ROM; NES is supported too
         menu.sdcard = None
         self.assertEqual([x["title"] for x in menu.scan_roms()], ["Alpha"])
 
