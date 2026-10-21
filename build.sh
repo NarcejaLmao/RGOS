@@ -226,13 +226,20 @@ rootfs() {
   sudo rm -rf "$WORK/rootfs"
   # non-free-firmware is for firmware-realtek (Wi-Fi)
   sudo debootstrap --arch=arm64 --variant=minbase --components=main,non-free-firmware \
-    --include=systemd-sysv,udev,kmod,util-linux,fdisk,exfatprogs,dosfstools,alsa-utils,python3,python3-pygame,unzip,xz-utils,curl,wget,jq,wpasupplicant,iw,iproute2,wireless-regdb,firmware-realtek,systemd-timesyncd,libopenal1,libsdl2-image-2.0-0,libsdl2-mixer-2.0-0,libsdl2-ttf-2.0-0,libsdl2-net-2.0-0,fonts-dejavu-core,ca-certificates,libgl1-mesa-dri,libegl1,libgles2,libgbm1,libdrm2,procps,nano,busybox-static,retroarch,libretro-mgba,libretro-fceumm,libretro-core-info \
+    --include=systemd-sysv,udev,kmod,util-linux,fdisk,exfatprogs,dosfstools,alsa-utils,python3,python3-pygame,unzip,xz-utils,curl,wget,jq,wpasupplicant,iw,iproute2,wireless-regdb,firmware-realtek,systemd-timesyncd,libopenal1,libsdl2-image-2.0-0,libsdl2-mixer-2.0-0,libsdl2-ttf-2.0-0,libsdl2-net-2.0-0,fonts-dejavu-core,ca-certificates,libgl1-mesa-dri,libegl1,libgles2,libgbm1,libdrm2,procps,nano,busybox-static,retroarch,libretro-mgba,libretro-core-info \
     "$SUITE" "$WORK/rootfs" http://deb.debian.org/debian || {
       echo; echo "debootstrap FAILED. Last lines of its log ($WORK/rootfs/debootstrap/debootstrap.log):"
       sudo tail -n 30 "$WORK/rootfs/debootstrap/debootstrap.log" 2>/dev/null
       echo; echo "disk space:"; df -h "$WORK"; exit 1; }
-  # Use Debian's prebuilt FCEUmm Libretro core for NES emulation.
-  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/fceumm_libretro.so" || { echo "FCEUmm core package did not install fceumm_libretro.so"; exit 1; }
+  # Debian Trixie does not package libretro-fceumm; fetch the official prebuilt ARM64 core.
+  FCEUMM_ZIP="$WORK/fceumm_libretro.so.zip"
+  curl -fL --retry 3 --retry-delay 2 \
+    "https://buildbot.libretro.com/nightly/linux/aarch64/latest/fceumm_libretro.so.zip" \
+    -o "$FCEUMM_ZIP" || { echo "Failed to download the prebuilt ARM64 FCEUmm core"; exit 1; }
+  sudo install -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro"
+  sudo unzip -o "$FCEUMM_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract FCEUmm core"; exit 1; }
+  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/fceumm_libretro.so" || { echo "Downloaded archive did not contain fceumm_libretro.so"; exit 1; }
+  rm -f "$FCEUMM_ZIP"
   apply_overlay
   sudo cp -a "$WORK/modules/lib/modules" "$WORK/rootfs/lib/"
   # make sure module dependency/alias maps exist so udev auto-loads the joypad/ADC/PWM drivers at boot
