@@ -1276,7 +1276,7 @@ def main():
             gap = 20
             bw, bh = min(320, (W - 20 - gap) // 2), 160
             x0 = (W - (2 * bw + gap)) // 2
-            subs = {"games": "%d port%s" % (len(all_games), "" if len(all_games) == 1 else "s"),
+            subs = {"games": "%d games" % len(all_games),
                     "recents": "%d recent" % len(recent_games()),
                     "tools": "RetroArch",
                     "settings": "Theme, Wi-Fi, info, sticks, buttons"}
