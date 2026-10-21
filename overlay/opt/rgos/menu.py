@@ -49,11 +49,12 @@ def _device():
         return ""
 
 
-# Canvas size: 720x480 (3:2), the RG34XX-SP's panel. RGOS_DEVICE only changes the device id shown in Settings > Information.
+# Keep the established 720x480 logical canvas; fbout scales it to the device framebuffer.
+# The RG35XX-SP has no analog sticks, so it skips stick calibration and stick-specific settings.
 DEVICE_ID = os.environ.get("RGOS_DEVICE") or _device() or "rg34xx-sp"
 W, H = 720, 480
 DX = 0                                         # horizontal layout offset (kept so every screen's coordinates stay as they were)
-HAS_STICKS = True
+HAS_STICKS = DEVICE_ID != "rg35xx-sp"
 
 # Colour themes (Settings > Theme). Every screen draws with the module-level BG / PANEL / SEL_BG / ACCENT / TEXT / DIM below;
 # apply_theme() swaps them, so the whole menu changes at once. BG = screen, PANEL = header and cards, SEL_BG = selected row,

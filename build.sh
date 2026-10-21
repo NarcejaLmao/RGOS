@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# RG OS image builder for the Anbernic RG34XX-SP (Allwinner H700): ROCKNIX U-Boot/kernel + Debian root + RG OS menu.
+# RG OS image builder for supported Anbernic H700 handhelds: ROCKNIX boot files + Debian root + RG OS menu.
 # Run on an x86-64 or arm64 Debian/Ubuntu host with internet access, as a normal user with sudo.
-# Usage: ./build.sh                 (everything for the RG34XX-SP; same as ./build.sh rg34xxsp)
-#        ./build.sh tfa|uboot|kernel|rootfs|image   (single stage)
+# Usage: ./build.sh rg34xxsp [stage]  (default device; stage defaults to all)
+#        ./build.sh rg35xxsp [stage]  (Anbernic RG35XX SP; stage defaults to all)
+#        ./build.sh tfa|uboot|kernel|rootfs|image (single stage for the default RG34XX-SP)
 #        ./build.sh update          re-apply overlay/ to the existing rootfs and build ONLY out/rgos-update-<id>.tar
 # ./build.sh (image stage) also writes out/rgos-update-<BUILD_ID>.tar: copy it into the "update" folder on the
 # ROMS (exFAT) partition and reboot the device to install it (kernel, initramfs, DTB and the whole root filesystem;
@@ -11,13 +12,20 @@ set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
 
-# The only supported device is the Anbernic RG34XX-SP. "./build.sh rg34xxsp [stage]" is accepted for convenience.
+# Select a device before choosing per-device work/output paths. This prevents a cached rootfs or DTB from
+# one handheld accidentally being packaged for the other.
 case "${1:-}" in
-  rg34xxsp|rg34xx-sp)         shift; [ $# -gt 0 ] || set -- all ;;
+  rg34xxsp|rg34xx-sp) shift; DEVICE=rg34xx-sp; [ $# -gt 0 ] || set -- all ;;
+  rg35xxsp|rg35xx-sp) shift; DEVICE=rg35xx-sp; [ $# -gt 0 ] || set -- all ;;
+  *) DEVICE=rg34xx-sp ;;
 esac
-DEVICE=rg34xx-sp
 export DEVICE
-WORK=${WORK:-$ROOT/work}; OUT=${OUT:-$ROOT/out}
+if [ "$DEVICE" = rg35xx-sp ]; then
+  WORK_DEFAULT=$ROOT/work-rg35xxsp; OUT_DEFAULT=$ROOT/out-rg35xxsp
+else
+  WORK_DEFAULT=$ROOT/work; OUT_DEFAULT=$ROOT/out
+fi
+WORK=${WORK:-$WORK_DEFAULT}; OUT=${OUT:-$OUT_DEFAULT}
 TFA_TAG=${TFA_TAG:-v2.12.0}
 UBOOT_TAG=${UBOOT_TAG:-v2025.07}
 KERNEL_TAG=${KERNEL_TAG:-v6.15}
@@ -33,9 +41,14 @@ KERNEL_IMAGE=${KERNEL_IMAGE:-}; KERNEL_MODULES=${KERNEL_MODULES:-}; UBOOT_BIN=${
 #   ROCKNIX_DDR=4|3             RAM type of your unit; 4 = DDR4 image (default). If nothing boots, try 3.
 #   ROCKNIX_URL=...             exact .img.gz URL (skips the GitHub "latest release" lookup)
 BOOT_SRC=${BOOT_SRC:-rocknix}; ROCKNIX_DDR=${ROCKNIX_DDR:-4}; ROCKNIX_URL=${ROCKNIX_URL:-}
-# Firmware DTB: dtb/sun50i-h700-anbernic-rg34xx-sp.dtb (shipped). RGOS_DTB=/path/to.dtb overrides it.
-RGOS_DTB=${RGOS_DTB:-$ROOT/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb}
+# Use the shipped RG34XX-SP DTB; for RG35XX-SP, extract its matching DTB from the official ROCKNIX H700
+# boot partition so it matches the kernel being reused. RGOS_DTB=/path/to/dtb overrides either.
 ROCKNIX_DIR=${ROCKNIX_DIR:-$WORK/rocknix}
+if [ "$DEVICE" = rg35xx-sp ]; then
+  RGOS_DTB=${RGOS_DTB:-$ROCKNIX_DIR/sun50i-h700-anbernic-rg35xx-sp.dtb}
+else
+  RGOS_DTB=${RGOS_DTB:-$ROOT/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb}
+fi
 UBOOT_DEFCONFIG=${UBOOT_DEFCONFIG:-anbernic_rg35xx_h700_defconfig}
 SUITE=${SUITE:-trixie}
 #   ROMS_FS=auto|exfat|vfat   filesystem for the ROMS partition made at first boot. auto = exFAT when the running kernel has it.
@@ -81,7 +94,7 @@ for a in json.load(sys.stdin).get("assets", []):
 
 rocknix_fetch() {
   local R="$ROCKNIX_DIR" img START LOOP K
-  [ -f "$R/uboot.bin" ] && [ -f "$R/KERNEL" ] && [ -f "$R/modules.done" ] && return 0
+  [ -f "$R/uboot.bin" ] && [ -f "$R/KERNEL" ] && [ -f "$R/modules.done" ] && [ -f "$RGOS_DTB" ] && return 0
   need curl gzip losetup sfdisk python3 dd file
   mkdir -p "$R/mnt"
   rocknix_download
@@ -97,6 +110,16 @@ rocknix_fetch() {
   K=$(sudo find "$R/mnt" -maxdepth 1 -type f \( -name KERNEL -o -name Image -o -name 'Image.*' \) | head -1)
   [ -n "$K" ] || { echo "no kernel found on ROCKNIX p1; contents:"; sudo ls -la "$R/mnt"; exit 1; }
   sudo cp "$K" "$R/KERNEL"
+  # The RG35XX-SP has its own panel/button wiring. Never reuse the RG34XX-SP DTB for it.
+  if [ "$DEVICE" = rg35xx-sp ] && [ ! -f "$RGOS_DTB" ]; then
+    DTB_NAME=sun50i-h700-anbernic-rg35xx-sp.dtb
+    DTB=$(sudo find "$R/mnt" -type f \( -path "*/device_trees/$DTB_NAME" -o -name "$DTB_NAME" \) | head -1)
+    [ -n "$DTB" ] || { echo "missing $DTB_NAME in ROCKNIX H700 image; cannot safely build for RG35XX-SP"; exit 1; }
+    mkdir -p "$(dirname "$RGOS_DTB")"
+    sudo cp "$DTB" "$RGOS_DTB"
+    sudo chown "$(id -u):$(id -g)" "$RGOS_DTB"
+    echo "using RG35XX-SP DTB: $RGOS_DTB"
+  fi
   # ROCKNIX keeps its kernel modules (joypad, ADC, PWM, audio, ...) inside the SYSTEM squashfs, NOT in the
   # kernel image. Without them the buttons never appear, so pull them out and ship them in the rootfs.
   need unsquashfs
@@ -568,5 +591,5 @@ need git make gcc sfdisk; [ -n "$CROSS" ] && need ${CROSS}gcc
 case "${1:-all}" in
   tfa) tfa;; uboot) uboot;; kernel) kernel;; rootfs) rootfs;; image) image;; update) update;;
   all) tfa; uboot; kernel; rootfs; image;;
-  *) echo "unknown stage"; exit 1;;
+  *) echo "unknown stage/device: ${1:-}"; echo "usage: ./build.sh [rg34xxsp|rg35xxsp] [all|tfa|uboot|kernel|rootfs|image|update]"; exit 1;;
 esac

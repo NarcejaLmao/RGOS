@@ -1,7 +1,8 @@
 #!/bin/bash
 # Turn any video into an RG OS startup splash (needs ffmpeg, run it on a PC).
 #
-#   tools/make-splash my-intro.mp4 rg34xx-sp          # sized for the device (720x480)
+#   tools/make-splash my-intro.mp4 rg34xx-sp          # 720x480
+#   tools/make-splash my-intro.mp4 rg35xx-sp          # 640x480
 #   tools/make-splash my-intro.mp4 640x480 out-dir    # or any size, and a different output folder (default: ./splash)
 #
 # Writes splash.mjpg (the video), splash.json (frame rate) and splash.wav (its sound, only if the video has audio) into the
@@ -13,6 +14,7 @@ IN=$1; DEV=${2:-}; OUT=${3:-splash}
 [ -f "$IN" ] && [ -n "$DEV" ] || { sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
 case "$DEV" in
   rg34xx-sp) SIZE=720x480;;
+  rg35xx-sp) SIZE=640x480;;
   [0-9]*x[0-9]*) SIZE=$DEV;;
   *) echo "unknown device/size: $DEV"; exit 1;;
 esac

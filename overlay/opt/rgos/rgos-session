@@ -1,8 +1,7 @@
 #!/bin/bash
 # RG OS session: menu -> port -> menu ...
-# The H700 RG34XX-SP panel can leave the SDL KMSDRM scanout buffer grey after the splash
-# animation. Render the menu through the kernel framebuffer instead; use a single buffer
-# and no vsync/pan ioctls because the panel exposes only a 720x480 virtual framebuffer.
+# H700 handheld panels can leave SDL KMSDRM scanout grey after the splash animation. Render the menu
+# through the kernel framebuffer instead; use a single buffer and no vsync/pan ioctls.
 export RGOS_VIDEO=fb
 export RGOS_FB_DBUF=0
 export RGOS_FB_VSYNC=0
