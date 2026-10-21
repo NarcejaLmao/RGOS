@@ -666,11 +666,28 @@ def read_battery():
         supplies = sorted(glob.glob("/sys/class/power_supply/*"))
         batteries = [p for p in supplies if rd_file(os.path.join(p, "type")).strip().lower() == "battery"]
         batteries.sort(key=lambda p: ("batt" not in os.path.basename(p).lower(), p))
+
+        # Some handheld kernels leave the battery's status stuck at "Charging"
+        # after USB power is removed. If an external supply exposes an "online"
+        # flag, use it to validate that state before showing the charging label.
+        external = [p for p in supplies
+                    if rd_file(os.path.join(p, "type")).strip().lower()
+                    in ("mains", "usb", "usb_c", "wireless", "usb_pd")]
+        online_flags = [rd_file(os.path.join(p, "online")).strip()
+                        for p in external
+                        if rd_file(os.path.join(p, "online")).strip() in ("0", "1")]
+        external_online = any(v == "1" for v in online_flags) if online_flags else None
+
         for node in batteries:
             raw = rd_file(os.path.join(node, "capacity")).strip().rstrip("%")
             if raw.lstrip("+-").isdigit():
                 pct = max(0, min(100, int(raw)))
                 status = rd_file(os.path.join(node, "status")).strip().replace("_", " ") or "Unknown"
+                if status.lower() == "charging" and external_online is False:
+                    current = rd_file(os.path.join(node, "current_now")).strip()
+                    # Negative current means the battery is supplying power; otherwise
+                    # report Not charging rather than claiming a disconnected charger.
+                    status = "Discharging" if current.lstrip("-").isdigit() and int(current) < 0 else "Not charging"
                 return pct, status
     except (OSError, ValueError):
         pass
