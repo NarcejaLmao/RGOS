@@ -70,8 +70,70 @@ find_core() {
     done
     return 1
 }
+# Run one RetroArch process under the port killswitch (rgos-portkey) and the hang guard (rgos-raguard).
+#   ra_run_once <label> <safe:0|1> <append-lines> <retroarch args...>
+# Sets RA_HUNG=1 when the guard had to kill a RetroArch whose main loop stopped answering.
+ra_run_once() {
+    local label=$1 safe=$2 lines=$3 pid kpid gpid pin appendcfg rc
+    shift 3
+    appendcfg=$(mktemp /run/rgos/retroarch-append.XXXXXX) || { echo "Could not create RetroArch append config" >> "$PORTLOG"; return 1; }
+    printf '%b' "$lines" > "$appendcfg"
+    # Safe profile (used after a hang): SDL2 video driver (SDL KMSDRM + GLES2 is the path the native ports use), no threads.
+    [ "$safe" = 1 ] && printf '%s\n' 'video_driver = "sdl2"' 'video_threaded = "false"' 'video_vsync = "false"' 'audio_driver = "alsathread"' >> "$appendcfg"
+    rm -f /run/rgos/ra-hung
+    echo "=== $(date)  retroarch ($label)$([ "$safe" = 1 ] && echo ' [safe video profile]')" >> "$PORTLOG"
+    sync        # a hard freeze must not eat the logs written so far
+    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1
+    # Take the text console off the screen while RetroArch owns KMS: fbcon redrawing (cursor, kernel messages) into a
+    # framebuffer RetroArch is scanning out/page-flipping can wedge the display pipe on this panel.
+    ra_graphics 1
+    (
+        unset SDL_VIDEODRIVER
+        export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
+        export HOME=/var/lib/rgos/retroarch XDG_CONFIG_HOME=/var/lib/rgos/retroarch
+        exec setsid retroarch --verbose --config /etc/rgos/retroarch.cfg --appendconfig "$appendcfg" "$@" >> "$PORTLOG" 2>&1 < /dev/null
+    ) &
+    pid=$!
+    echo "$pid" > /run/rgos/port.pid
+    if [ "${PIN_HELPERS:-0}" = 1 ]; then pin="taskset -c 0 nice -n -10"; else pin=; fi
+    $pin python3 /opt/rgos/rgos-portkey "$pid" >> "$PORTLOG" 2>&1 &
+    kpid=$!
+    python3 /opt/rgos/rgos-raguard "$pid" >> "$PORTLOG" 2>&1 &
+    gpid=$!
+    wait "$pid"; rc=$?
+    echo "--- retroarch exited (rc=$rc)" >> "$PORTLOG"
+    kill "$kpid" "$gpid" 2>/dev/null
+    kill -KILL -- "-$pid" 2>/dev/null
+    rm -f /run/rgos/port.pid "$appendcfg"
+    ra_graphics 0
+    /opt/rgos/rgos-perf off >> "$PORTLOG" 2>&1
+    RA_HUNG=0; [ -e /run/rgos/ra-hung ] && RA_HUNG=1
+    rm -f /run/rgos/ra-hung
+    return 0
+}
+# Run RetroArch; if its main loop hangs (rgos-raguard killed it), try once more with the safe video profile.
+ra_run() {
+    local label=$1 lines=$2; shift 2
+    ra_run_once "$label" 0 "$lines" "$@"
+    if [ "$RA_HUNG" = 1 ]; then
+        echo "RetroArch hung (no answer on its command port): retrying with the safe video profile" >> "$PORTLOG"
+        printf '\nRetroArch stopped responding. Retrying with safe video settings...\n' > /dev/tty1 2>/dev/null
+        sleep 2
+        ra_run_once "$label" 1 "$lines" "$@"
+        if [ "$RA_HUNG" = 1 ]; then
+            echo "RetroArch hung again with the safe profile; giving up" >> "$PORTLOG"
+            printf '\nRetroArch hung twice. See rgos-port-logs.txt on the boot partition.\n' > /dev/tty1 2>/dev/null
+            sleep 4
+        fi
+    fi
+    dump_port_logs "retroarch $label"
+}
+ra_graphics() {     # 1 = tty1 into graphics mode (kernel console stops drawing), 0 = back to text
+    python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import fbout; fbout.set_graphics(sys.argv[1] == "1")' "$1" 2>/dev/null
+    return 0
+}
 run_retroarch() {
-    local core=$1 rom=$2 corepath pid kpid pin sysname
+    local core=$1 rom=$2 corepath sysname
     sysname=$(basename "$(dirname "$rom")")
     corepath=$(find_core "$core") || {
         echo "RetroArch core '$core' not found" >> "$PORTLOG"
@@ -81,57 +143,20 @@ run_retroarch() {
         echo "retroarch is not installed" >> "$PORTLOG"
         printf '\nRetroArch is not installed.\n' > /dev/tty1 2>/dev/null
         sleep 4; return 0; }
-    mkdir -p "/media/roms/saves/$sysname" "/media/roms/states/$sysname" /media/roms/firmware /var/lib/rgos/retroarch 2>/dev/null
-    echo "=== $(date)  retroarch: $core  $rom" >> "$PORTLOG"
-    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1
-    (
-        export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
-        export HOME=/var/lib/rgos/retroarch XDG_CONFIG_HOME=/var/lib/rgos/retroarch
-        exec setsid retroarch --config /etc/rgos/retroarch.cfg \
-            --appendconfig <(printf 'savefile_directory = "/media/roms/saves/%s"\nsavestate_directory = "/media/roms/states/%s"\n' "$sysname" "$sysname") \
-            -L "$corepath" "$rom" >> "$PORTLOG" 2>&1 < /dev/null
-    ) &
-    pid=$!
-    echo "$pid" > /run/rgos/port.pid
-    if [ "${PIN_HELPERS:-1}" = 1 ]; then pin="taskset -c 0 nice -n -10"; else pin=; fi
-    $pin python3 /opt/rgos/rgos-portkey "$pid" >> "$PORTLOG" 2>&1 &
-    kpid=$!
-    wait "$pid"
-    echo "--- retroarch exited (rc=$?)" >> "$PORTLOG"
-    kill "$kpid" 2>/dev/null
-    kill -KILL -- "-$pid" 2>/dev/null
-    rm -f /run/rgos/port.pid
-    /opt/rgos/rgos-perf off >> "$PORTLOG" 2>&1
-    dump_port_logs "$rom"
+    mkdir -p "/media/roms/saves/$sysname" "/media/roms/states/$sysname" /media/roms/firmware /var/lib/rgos/retroarch /run/rgos 2>/dev/null
+    # Use a real file for the append config: RetroArch cannot reliably reopen Bash process-substitution paths (/dev/fd/N).
+    ra_run "$core $rom" "savefile_directory = \"/media/roms/saves/$sysname\"\nsavestate_directory = \"/media/roms/states/$sysname\"\n" \
+        -L "$corepath" "$rom"
     return 0
 }
 # Tools > RetroArch: the RetroArch menu itself (no core, no content); load cores/content from inside it.
 run_retroarch_ui() {
-    local pid kpid pin
     command -v retroarch >/dev/null 2>&1 || {
         echo "retroarch is not installed" >> "$PORTLOG"
         printf '\nRetroArch is not installed.\n' > /dev/tty1 2>/dev/null
         sleep 4; return 0; }
-    mkdir -p /media/roms/saves /media/roms/states /media/roms/firmware /var/lib/rgos/retroarch 2>/dev/null
-    echo "=== $(date)  retroarch: menu" >> "$PORTLOG"
-    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1
-    (
-        export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
-        export HOME=/var/lib/rgos/retroarch XDG_CONFIG_HOME=/var/lib/rgos/retroarch
-        exec setsid retroarch --config /etc/rgos/retroarch.cfg --menu >> "$PORTLOG" 2>&1 < /dev/null
-    ) &
-    pid=$!
-    echo "$pid" > /run/rgos/port.pid
-    if [ "${PIN_HELPERS:-1}" = 1 ]; then pin="taskset -c 0 nice -n -10"; else pin=; fi
-    $pin python3 /opt/rgos/rgos-portkey "$pid" >> "$PORTLOG" 2>&1 &
-    kpid=$!
-    wait "$pid"
-    echo "--- retroarch exited (rc=$?)" >> "$PORTLOG"
-    kill "$kpid" 2>/dev/null
-    kill -KILL -- "-$pid" 2>/dev/null
-    rm -f /run/rgos/port.pid
-    /opt/rgos/rgos-perf off >> "$PORTLOG" 2>&1
-    dump_port_logs "retroarch menu"
+    mkdir -p /media/roms/saves /media/roms/states /media/roms/firmware /var/lib/rgos/retroarch /run/rgos 2>/dev/null
+    ra_run "menu" "" --menu
     return 0
 }
 run_port() {
@@ -142,7 +167,7 @@ run_port() {
         echo "=== $(date)  port: $script"
     } >> "$PORTLOG"
     mkdir -p /media/roms/saves/ports/data /media/roms/saves/ports/config /var/lib/rgos/shader-cache 2>/dev/null
-    local PORT_NICE=-5 MESA_NO_ERROR=1 MESA_GLTHREAD=true PIN_HELPERS=1
+    local PORT_NICE=-5 MESA_NO_ERROR=1 MESA_GLTHREAD=false PIN_HELPERS=0
     [ -r /etc/rgos/ports.conf ] && . /etc/rgos/ports.conf
     /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1          # performance profile, undone below
     (

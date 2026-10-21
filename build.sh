@@ -183,7 +183,7 @@ apply_overlay() {
   echo "$DEVICE" | sudo tee "$WORK/rootfs/etc/rgos-device" >/dev/null   # tools/rgos-update refuses updates built for another device
   sudo chmod 755 "$WORK/rootfs/usr/local/sbin/rgos-firstboot" "$WORK/rootfs/opt/rgos/rgos-session" \
                  "$WORK/rootfs/opt/rgos/menu.py" "$WORK/rootfs/opt/rgos/rgos-volume" \
-                 "$WORK/rootfs/opt/rgos/rgos-portkey" "$WORK/rootfs/opt/rgos/rgos-sticks" \
+                 "$WORK/rootfs/opt/rgos/rgos-portkey" "$WORK/rootfs/opt/rgos/rgos-raguard" "$WORK/rootfs/opt/rgos/rgos-sticks" \
                  "$WORK/rootfs/opt/rgos/rgos-perf" "$WORK/rootfs/opt/rgos/rgos-videoprobe" \
                  "$WORK/rootfs/opt/rgos/rgos-hw" "$WORK/rootfs/opt/rgos/rgos-hwprobe" "$WORK/rootfs/opt/rgos/rgos-poweroff" \
                  "$WORK/rootfs/opt/rgos/rgos-inputprobe" "$WORK/rootfs/opt/rgos/rgos-wifi" "$WORK/rootfs/opt/rgos/rgos-wifi-dhcp" \
