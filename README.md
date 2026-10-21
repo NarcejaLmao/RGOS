@@ -6,3 +6,6 @@ Anbernic RG34XXSP
 
 # Join the Discord!
 [Join our Discord](https://discord.gg/43gbr5uSBD) to get leaks, chats, support, and more.
+
+# Release date
+RGOS is set to release in late November depending on how development goes.
