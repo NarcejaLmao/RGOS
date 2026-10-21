@@ -231,6 +231,15 @@ rootfs() {
       echo; echo "debootstrap FAILED. Last lines of its log ($WORK/rootfs/debootstrap/debootstrap.log):"
       sudo tail -n 30 "$WORK/rootfs/debootstrap/debootstrap.log" 2>/dev/null
       echo; echo "disk space:"; df -h "$WORK"; exit 1; }
+  # Gambatte provides Game Boy and Game Boy Color emulation through one libretro core.
+  GAMBATTE_ZIP="$WORK/gambatte_libretro.so.zip"
+  curl -fL --retry 3 --retry-delay 2 \
+    "https://buildbot.libretro.com/nightly/linux/aarch64/latest/gambatte_libretro.so.zip" \
+    -o "$GAMBATTE_ZIP" || { echo "Failed to download the official ARM64 Gambatte core"; exit 1; }
+  sudo install -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro"
+  sudo unzip -o "$GAMBATTE_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract Gambatte core"; exit 1; }
+  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/gambatte_libretro.so" || { echo "Downloaded archive did not contain gambatte_libretro.so"; exit 1; }
+  rm -f "$GAMBATTE_ZIP"
   # Debian Trixie does not package libretro-fceumm; fetch the official prebuilt ARM64 core.
   FCEUMM_ZIP="$WORK/fceumm_libretro.so.zip"
   curl -fL --retry 3 --retry-delay 2 \

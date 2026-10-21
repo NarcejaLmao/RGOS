@@ -21,6 +21,8 @@ ROMS_ROOT = os.environ.get("RGOS_ROMS", "/media/roms")
 # (folder name, short tag, runner, accepted extensions, full name)
 # Ports: native Linux games started by a launcher script (roms/ports/<Name>.sh, data in a sub-folder); rgos-session runs the script itself.
 SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
+           ("gb", "GB", "retroarch", (".gb",), "Game Boy"),
+           ("gbc", "GBC", "retroarch", (".gbc",), "Game Boy Color"),
            ("nes", "NES", "retroarch", (".nes", ".unf", ".unif"), "Nintendo Entertainment System"),
            ("snes", "SNES", "retroarch", (".sfc", ".smc", ".swc", ".fig", ".bs"), "Super Nintendo Entertainment System"),
            # Genesis Plus GX-supported Sega platforms. Each has its own ROM folder so
@@ -279,7 +281,7 @@ def installed_cores():
 
 
 def default_core(sid):
-    return {"gba": "mgba", "nes": "fceumm", "snes": "snes9x", "genesis": "genesis_plus_gx",
+    return {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "fceumm", "snes": "snes9x", "genesis": "genesis_plus_gx",
             "mastersystem": "genesis_plus_gx", "gamegear": "genesis_plus_gx",
             "sg1000": "genesis_plus_gx", "segacd": "genesis_plus_gx",
             "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx"}.get(sid, "")
