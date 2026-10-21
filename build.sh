@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # RG OS image builder for supported Anbernic H700 handhelds: ROCKNIX boot files + Debian root + RG OS menu.
 # Run on an x86-64 or arm64 Debian/Ubuntu host with internet access, as a normal user with sudo.
-# Usage: ./build.sh rg34xxsp [stage]  (default device; stage defaults to all)
+# Usage: ./build all                 (build images for every supported device)
+#        ./build.sh all               (same as ./build all)
+#        ./build.sh rg34xxsp [stage]  (default device; stage defaults to all)
 #        ./build.sh rg35xxsp [stage]  (Anbernic RG35XX SP; stage defaults to all)
 #        ./build.sh tfa|uboot|kernel|rootfs|image (single stage for the default RG34XX-SP)
 #        ./build.sh update          re-apply overlay/ to the existing rootfs and build ONLY out/rgos-update-<id>.tar
@@ -11,6 +13,25 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT=$PWD
+
+# "all" is a device selector: build each supported device independently so their cached
+# root filesystems, device trees, and output images never overlap. An optional stage is
+# forwarded to both builds (for example, ./build all image).
+if [ "${1:-}" = all ]; then
+  shift
+  STAGE=${1:-all}
+  case "$STAGE" in
+    all|tfa|uboot|kernel|rootfs|image|update) ;;
+    *) echo "unknown stage for all-device build: $STAGE"; echo "usage: ./build all [all|tfa|uboot|kernel|rootfs|image|update]"; exit 1 ;;
+  esac
+  for device in rg34xxsp rg35xxsp; do
+    echo
+    echo "========== RG OS build: $device (stage: $STAGE) =========="
+    # Clear path overrides to preserve each device's separate default work/output directories.
+    env -u WORK -u OUT "$ROOT/build.sh" "$device" "$STAGE"
+  done
+  exit 0
+fi
 
 # Select a device before choosing per-device work/output paths. This prevents a cached rootfs or DTB from
 # one handheld accidentally being packaged for the other.
@@ -592,5 +613,5 @@ need git make gcc sfdisk; [ -n "$CROSS" ] && need ${CROSS}gcc
 case "${1:-all}" in
   tfa) tfa;; uboot) uboot;; kernel) kernel;; rootfs) rootfs;; image) image;; update) update;;
   all) tfa; uboot; kernel; rootfs; image;;
-  *) echo "unknown stage/device: ${1:-}"; echo "usage: ./build.sh [rg34xxsp|rg35xxsp] [all|tfa|uboot|kernel|rootfs|image|update]"; exit 1;;
+  *) echo "unknown stage/device: ${1:-}"; echo "usage: ./build all | ./build.sh [rg34xxsp|rg35xxsp] [all|tfa|uboot|kernel|rootfs|image|update]"; exit 1;;
 esac
