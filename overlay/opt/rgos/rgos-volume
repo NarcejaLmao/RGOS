@@ -98,11 +98,25 @@ def osd(vol):
 
 
 def apply(vol, controls):
-    ok = False
+    """Apply exact endpoints: 0 is hard-muted; 100 is mixer maximum and unmuted.
+
+    Set the volume value and switch separately. Some ALSA controls ignore a switch
+    argument when it is combined with a percentage argument, which could leave
+    audible output at 0% or leave the output muted at 100%.
+    """
+    if not controls:
+        return False
     for c in controls:
-        amixer("-q", "sset", c, "%d%%" % vol, "unmute" if vol else "mute")
-        ok = True
-    return ok
+        if vol <= 0:
+            amixer("-q", "sset", c, "0%")
+            amixer("-q", "sset", c, "mute")
+        elif vol >= 100:
+            amixer("-q", "sset", c, "100%")
+            amixer("-q", "sset", c, "unmute")
+        else:
+            amixer("-q", "sset", c, "%d%%" % vol)
+            amixer("-q", "sset", c, "unmute")
+    return True
 
 
 def main():
