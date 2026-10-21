@@ -288,6 +288,30 @@ def default_core(sid):
             "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx"}.get(sid, "")
 
 
+# Only offer cores known to support the selected system. The list is intersected
+# with installed_cores(), so unavailable cores never appear in the UI.
+SYSTEM_CORE_COMPATIBILITY = {
+    "gba": ("mgba", "gpsp", "vbam", "mednafen_gba"),
+    "gb": ("gambatte", "sameboy", "gearboy", "mgba", "vbam", "mednafen_gb"),
+    "gbc": ("gambatte", "sameboy", "gearboy", "mgba", "vbam", "mednafen_gb"),
+    "nes": ("fceumm", "nestopia", "quicknes", "mesen", "mesen_s"),
+    "snes": ("snes9x", "bsnes", "bsnes_hd_beta", "bsnes2014_accuracy", "bsnes2014_balanced", "bsnes2014_performance", "bsnes_mercury_accuracy", "bsnes_mercury_balanced", "bsnes_mercury_performance"),
+    "genesis": ("genesis_plus_gx", "picodrive"),
+    "mastersystem": ("genesis_plus_gx", "picodrive"),
+    "gamegear": ("genesis_plus_gx", "picodrive"),
+    "sg1000": ("genesis_plus_gx",),
+    "segacd": ("genesis_plus_gx", "picodrive"),
+    "sega32x": ("genesis_plus_gx", "picodrive"),
+    "segapico": ("genesis_plus_gx",),
+}
+
+
+def compatible_cores(sid, cores=None):
+    """Return installed cores known to support this system, in preferred order."""
+    installed = set(installed_cores() if cores is None else cores)
+    return [core for core in SYSTEM_CORE_COMPATIBILITY.get(sid, ()) if core in installed]
+
+
 def fit(font, text, width):
     if font.size(text)[0] <= width:
         return text
@@ -1091,18 +1115,19 @@ def main():
                     else:                      # guided button mapping
                         bmap, view = ButtonMap(), "bmap"
             elif view == "emulators":
-                emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch"]
-                cores = installed_cores()
+                emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch" and compatible_cores(sy[0])]
                 if a in ("up", "down"):
                     emu_idx = (emu_idx + (1 if a == "down" else -1)) % max(1, len(emu_systems))
-                elif a in ("left", "right") and emu_systems and cores:
+                elif a in ("left", "right") and emu_systems:
                     sid = emu_systems[emu_idx][0]
-                    current = state.get("emulators", {}).get(sid, default_core(sid))
-                    if current not in cores:
-                        current = default_core(sid) if default_core(sid) in cores else cores[0]
-                    pos = cores.index(current)
-                    state.setdefault("emulators", {})[sid] = cores[(pos + (1 if a == "right" else -1)) % len(cores)]
-                    save_state(state)
+                    cores = compatible_cores(sid)
+                    if cores:
+                        current = state.get("emulators", {}).get(sid, default_core(sid))
+                        if current not in cores:
+                            current = default_core(sid) if default_core(sid) in cores else cores[0]
+                        pos = cores.index(current)
+                        state.setdefault("emulators", {})[sid] = cores[(pos + (1 if a == "right" else -1)) % len(cores)]
+                        save_state(state)
                 elif a == "b":
                     view = "settings"
             elif view == "info":
@@ -1301,17 +1326,17 @@ def main():
             hint = ("Left/Right Change theme   " if SETTINGS_ROWS[set_idx] == "theme" else
                     "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else "A Open   ") + "B Back   START+SELECT Power off"
         elif view == "emulators":
-            emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch"]
-            cores = installed_cores()
+            emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch" and compatible_cores(sy[0])]
             pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
             first_emu = min(max(0, emu_idx - 3), max(0, len(emu_systems) - 7))
             for slot, sy in enumerate(emu_systems[first_emu:first_emu + 7]):
                 i = first_emu + slot
                 sid, _tag, _runner, _ext, fullname = sy
+                cores = compatible_cores(sid)
                 chosen = state.get("emulators", {}).get(sid, default_core(sid))
                 if chosen not in cores:
-                    chosen = default_core(sid) if default_core(sid) in cores else (cores[0] if cores else "No cores found")
-                y = top_y + 8 + i * 44
+                    chosen = default_core(sid) if default_core(sid) in cores else (cores[0] if cores else "No compatible core")
+                y = top_y + 8 + slot * 44
                 sel = i == emu_idx
                 if sel:
                     pygame.draw.rect(canvas, SEL_BG, (list_x + 8, y, W - 2 * list_x - 16, 40), border_radius=8)
@@ -1319,9 +1344,9 @@ def main():
                 canvas.blit(f_small.render(fit(f_small, fullname, 300), True, TEXT if sel else DIM), (list_x + 20, y + 3))
                 core_label = chosen.replace("_", " ")
                 canvas.blit(f_small.render(fit(f_small, "< " + core_label + " >", 190), True, ACCENT if sel else TEXT), (W - list_x - 205, y + 14))
-            if not cores:
-                canvas.blit(f_row.render("No installed RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
-            hint = "Up/Down System   Left/Right Change core   B Back"
+            if not any(compatible_cores(sy[0]) for sy in emu_systems):
+                canvas.blit(f_row.render("No installed compatible RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
+            hint = "Up/Down System   Left/Right Change compatible core   B Back"
         elif view == "info":
             pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
             info_rows = settings_info()
