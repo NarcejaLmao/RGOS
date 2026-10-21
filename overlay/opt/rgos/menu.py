@@ -1204,6 +1204,19 @@ def main():
             pygame.draw.rect(canvas, col, (bx + 30, by + 4, 3, 8))
             fw = max(2, 24 * pct // 100)
             pygame.draw.rect(canvas, col, (bx + 3, by + 3, fw, 10))
+            if status.lower() == "charging":
+                # Draw a clear lightning bolt inside the battery when charging.
+                # Use the header background as the cut-out color so it stays visible
+                # over both the battery fill and the unfilled portion.
+                bolt = [
+                    (bx + 17, by + 3),
+                    (bx + 11, by + 9),
+                    (bx + 15, by + 9),
+                    (bx + 12, by + 13),
+                    (bx + 21, by + 7),
+                    (bx + 17, by + 7),
+                ]
+                pygame.draw.polygon(canvas, BG, bolt)
             pt = f_tiny.render("%d%%" % pct + ("+" if status.lower() == "charging" else ""), True, col)
             canvas.blit(pt, (bx + 38, by + 2))
             right = bx - 16
