@@ -5,6 +5,7 @@ Lists the native Linux ports in <ROMS>/roms/ports/ (the .sh launchers) and on se
 /run/rgos/launch and exits with code 10 so the session loop can run it.
 Exit code 20 = power off.
 """
+import glob
 import io, json, math, os, re, subprocess, sys, threading, time
 import pygame
 from evpad import EvPads, CODES as EV_CODES, EV_KEY, EV_ABS
@@ -655,16 +656,32 @@ def read_brightness():
 
 
 def read_battery():
-    """(percent, status) written by rgos-hw, or None when there is no gauge / the daemon is not running."""
+    """Return (percent, status), preferring the live sysfs gauge over the optional daemon cache.
+
+    RG34XX-SP doesn't ship an rgos-hw device config, so relying only on /run/rgos/battery
+    made Settings > Information report n/a even when Linux exposed the battery gauge.
+    """
+    # Read Linux's live power_supply interface first. This works independently of rgos-hw.
+    try:
+        supplies = sorted(glob.glob("/sys/class/power_supply/*"))
+        batteries = [p for p in supplies if rd_file(os.path.join(p, "type")).strip().lower() == "battery"]
+        batteries.sort(key=lambda p: ("batt" not in os.path.basename(p).lower(), p))
+        for node in batteries:
+            raw = rd_file(os.path.join(node, "capacity")).strip().rstrip("%")
+            if raw.lstrip("+-").isdigit():
+                pct = max(0, min(100, int(raw)))
+                status = rd_file(os.path.join(node, "status")).strip().replace("_", " ") or "Unknown"
+                return pct, status
+    except (OSError, ValueError):
+        pass
+
+    # Fallback for devices whose battery is reported through rgos-hw.
     try:
         with open(BATT_FILE) as f:
             pct, status, stamp = f.read().split()[:3]
-        if time.time() - int(float(stamp)) > 60:  # stale: the daemon died
+        if time.time() - int(float(stamp)) > 60:
             return None
-        # Accept either a plain integer or a percentage token such as "85%".
-        # Keep the value in the valid range before rendering the UI.
-        pct = int(pct.rstrip("%"))
-        pct = max(0, min(100, pct))
+        pct = max(0, min(100, int(pct.rstrip("%"))))
         status = status.replace("_", " ").strip() or "Unknown"
         return pct, status
     except (OSError, ValueError):

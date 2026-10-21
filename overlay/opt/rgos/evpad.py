@@ -4,6 +4,7 @@ Button codes come from the RG34XX-SP device tree (rocknix-singleadc-joypad node)
 physical A = BTN_EAST (0x131), B = BTN_SOUTH (0x130), X = BTN_WEST (0x134), Y = BTN_NORTH (0x133)  (menu names follow the labels on the hardware: evdev's X/Y naming is Xbox-style, so swapped),
 L = BTN_TL (0x136), R = BTN_TR (0x137), SELECT = 0x13a, START = 0x13b, MENU/FN = BTN_MODE (0x13c), D-pad = BTN_DPAD_* (0x220-0x223).
 """
+import glob
 import fcntl, glob, os, struct, time
 
 EVFMT = struct.Struct("llHHi")          # struct input_event on 64-bit: sec, usec, type, code, value
