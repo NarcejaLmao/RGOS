@@ -76,6 +76,27 @@ find_core() {
     done
     return 1
 }
+# Read a per-system core override from the same persistent state file used by the menu.
+configured_core() {
+    local sid=$1 fallback=$2 selected
+    selected=$(python3 - "$sid" "$fallback" <<'PYCORE'
+import json, sys
+sid, fallback = sys.argv[1], sys.argv[2]
+try:
+    with open('/var/lib/rgos/state.json', encoding='utf-8') as f:
+        value = json.load(f).get('emulators', {}).get(sid, fallback)
+    if isinstance(value, str) and value.replace('_', '').replace('-', '').isalnum():
+        print(value)
+    else:
+        print(fallback)
+except Exception:
+    print(fallback)
+PYCORE
+)
+    # Only honor an override if its core is installed; otherwise use the system default.
+    find_core "$selected" >/dev/null 2>&1 && { echo "$selected"; return; }
+    echo "$fallback"
+}
 # Run one RetroArch process under the port killswitch (rgos-portkey) and the hang guard (rgos-raguard).
 #   ra_run_once <label> <safe:0|1> <append-lines> <retroarch args...>
 # Sets RA_HUNG=1 when the guard had to kill a RetroArch whose main loop stopped answering.
@@ -217,10 +238,15 @@ while true; do
           case "$rom" in
             @tool:retroarch) run_retroarch_ui ;;
             */roms/ports/*) run_port "$rom" ;;
-            */roms/gba/*) run_retroarch mgba "$rom" ;;
-            */roms/nes/*) run_retroarch fceumm "$rom" ;;
-            */roms/genesis/*|*/roms/mastersystem/*|*/roms/gamegear/*|*/roms/sg1000/*|*/roms/segacd/*|*/roms/sega32x/*|*/roms/segapico/*)
-                run_retroarch genesis_plus_gx "$rom" ;;
+            */roms/gba/*) core=$(configured_core gba mgba); run_retroarch "$core" "$rom" ;;
+            */roms/nes/*) core=$(configured_core nes fceumm); run_retroarch "$core" "$rom" ;;
+            */roms/genesis/*) core=$(configured_core genesis genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/mastersystem/*) core=$(configured_core mastersystem genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/gamegear/*) core=$(configured_core gamegear genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/sg1000/*) core=$(configured_core sg1000 genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/segacd/*) core=$(configured_core segacd genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/sega32x/*) core=$(configured_core sega32x genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/segapico/*) core=$(configured_core segapico genesis_plus_gx); run_retroarch "$core" "$rom" ;;
             *) echo "cannot launch: '$rom'" >> "$PORTLOG" ;;
           esac ;;
       20) /opt/rgos/rgos-poweroff; sleep 30 ;;       # sync, then systemctl poweroff, forced poweroff / sysrq if the kernel needs it

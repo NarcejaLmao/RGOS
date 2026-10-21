@@ -262,6 +262,28 @@ def save_state(st):
         pass
 
 
+def installed_cores():
+    """Return RetroArch core names actually installed on this device."""
+    dirs = ("/usr/lib/aarch64-linux-gnu/libretro", "/usr/lib/libretro",
+            "/usr/lib/aarch64-linux-gnu/retroarch/cores", "/usr/local/lib/libretro")
+    found = set()
+    for directory in dirs:
+        try:
+            for filename in os.listdir(directory):
+                if filename.endswith("_libretro.so"):
+                    found.add(filename[:-len("_libretro.so")])
+        except OSError:
+            pass
+    return sorted(found)
+
+
+def default_core(sid):
+    return {"gba": "mgba", "nes": "fceumm", "genesis": "genesis_plus_gx",
+            "mastersystem": "genesis_plus_gx", "gamegear": "genesis_plus_gx",
+            "sg1000": "genesis_plus_gx", "segacd": "genesis_plus_gx",
+            "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx"}.get(sid, "")
+
+
 def fit(font, text, width):
     if font.size(text)[0] <= width:
         return text
@@ -289,7 +311,7 @@ HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("tools", "Tools"), ("
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
 TOOLS = [("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
 # rows of Settings, in order (ids)
-SETTINGS_ROWS = ["theme", "splash", "calib", "bmap", "wifi", "info"]
+SETTINGS_ROWS = ["theme", "splash", "emulators", "calib", "bmap", "wifi", "info"]
 RECENT_MAX = 20
 
 
@@ -826,6 +848,7 @@ def main():
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
     cal = bmap = None
     set_idx, tool_idx, kb = 0, 0, None
+    emu_idx = 0
     wconf, wscan, wf_idx, wf_msg, wf_msg_until, wf_pending = wifictl.load_conf(), wifictl.Scanner(), 0, "", 0.0, ("", False)
 
     def wf_do(fn, msg, *args):
@@ -1051,6 +1074,8 @@ def main():
                     elif row == "splash":      # A steps on -> silent -> off
                         state["splash"] = splash.MODES[(splash.MODES.index(splash.mode_of(state)) + 1) % len(splash.MODES)]
                         save_state(state)
+                    elif row == "emulators":
+                        emu_idx, view = 0, "emulators"
                     elif row == "wifi":
                         wconf, wf_idx, wf_msg, wf_msg_until = wifictl.load_conf(), 0, "", 0.0
                         wscan.kick()
@@ -1061,6 +1086,21 @@ def main():
                         cal, view = StickCal(), "calib"
                     else:                      # guided button mapping
                         bmap, view = ButtonMap(), "bmap"
+            elif view == "emulators":
+                emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch"]
+                cores = installed_cores()
+                if a in ("up", "down"):
+                    emu_idx = (emu_idx + (1 if a == "down" else -1)) % max(1, len(emu_systems))
+                elif a in ("left", "right") and emu_systems and cores:
+                    sid = emu_systems[emu_idx][0]
+                    current = state.get("emulators", {}).get(sid, default_core(sid))
+                    if current not in cores:
+                        current = default_core(sid) if default_core(sid) in cores else cores[0]
+                    pos = cores.index(current)
+                    state.setdefault("emulators", {})[sid] = cores[(pos + (1 if a == "right" else -1)) % len(cores)]
+                    save_state(state)
+                elif a == "b":
+                    view = "settings"
             elif view == "info":
                 if a == "b":
                     view = "settings"
@@ -1178,6 +1218,8 @@ def main():
             info = "Settings   %s" % clk
         elif view == "info":
             info = "Settings > Information   %s" % clk
+        elif view == "emulators":
+            info = "Settings > Emulators   %s" % clk
         elif view == "wifi" or (view == "kbd" and kb.field.startswith("wifi")):
             info = "Settings > Wi-Fi   %s" % clk
         else:
@@ -1232,6 +1274,7 @@ def main():
             spl = {"on": "On: video and sound", "silent": "On: video only", "off": "Off"}[splash.mode_of(state)]
             srows = {"theme": ("Theme", "%s   (%d of %d)   Left/Right changes it" % (THEMES[theme_index(theme_id)][1], theme_index(theme_id) + 1, len(THEMES))),
                      "splash": ("Startup splash", spl + "   (plays once at power on)   X previews"),
+                     "emulators": ("Emulators", "Choose the RetroArch core used for each system"),
                      "calib": ("Calibrate sticks", "Fixes swapped or mixed-up stick directions in menu, games and ports"),
                      "bmap": ("Map buttons", "Teach RG OS which physical button is A, B, D-pad, ... (if buttons are wrong)"),
                      "wifi": ("Wi-Fi", wifictl.status_text(wst)),
@@ -1253,6 +1296,28 @@ def main():
                 canvas.blit(f_small.render(fit(f_small, sub, sub_w), True, DIM), (list_x + 24, by + 24))
             hint = ("Left/Right Change theme   " if SETTINGS_ROWS[set_idx] == "theme" else
                     "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else "A Open   ") + "B Back   START+SELECT Power off"
+        elif view == "emulators":
+            emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch"]
+            cores = installed_cores()
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
+            first_emu = min(max(0, emu_idx - 3), max(0, len(emu_systems) - 7))
+            for slot, sy in enumerate(emu_systems[first_emu:first_emu + 7]):
+                i = first_emu + slot
+                sid, _tag, _runner, _ext, fullname = sy
+                chosen = state.get("emulators", {}).get(sid, default_core(sid))
+                if chosen not in cores:
+                    chosen = default_core(sid) if default_core(sid) in cores else (cores[0] if cores else "No cores found")
+                y = top_y + 8 + i * 44
+                sel = i == emu_idx
+                if sel:
+                    pygame.draw.rect(canvas, SEL_BG, (list_x + 8, y, W - 2 * list_x - 16, 40), border_radius=8)
+                    pygame.draw.rect(canvas, ACCENT, (list_x + 8, y, W - 2 * list_x - 16, 40), 2, border_radius=8)
+                canvas.blit(f_small.render(fit(f_small, fullname, 300), True, TEXT if sel else DIM), (list_x + 20, y + 3))
+                core_label = chosen.replace("_", " ")
+                canvas.blit(f_small.render(fit(f_small, "< " + core_label + " >", 190), True, ACCENT if sel else TEXT), (W - list_x - 205, y + 14))
+            if not cores:
+                canvas.blit(f_row.render("No installed RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
+            hint = "Up/Down System   Left/Right Change core   B Back"
         elif view == "info":
             pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
             info_rows = settings_info()
