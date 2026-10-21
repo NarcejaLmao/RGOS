@@ -563,7 +563,8 @@ image() {
   [ "$IMG_MB" = auto ] && IMG_MB=$(( 16 + BOOT_MB + ROOT_MB ))
   [ "$IMG_MB" -ge $(( 16 + BOOT_MB + ROOT_MB )) ] || { echo "IMG_MB=$IMG_MB is smaller than boot+root"; exit 1; }
   echo "sizes: rootfs ${need_mb} MB (${nfiles} files) -> root ${ROOT_MB} MiB, boot ${BOOT_MB} MiB, image ${IMG_MB} MiB (exFAT ROMS is created on the device at first boot)"
-  IMG="$OUT/rgos.img"; rm -f "$IMG"; truncate -s "${IMG_MB}M" "$IMG"
+  DEVICE_SLUG=${DEVICE//-/}
+  IMG="$OUT/rgos-${DEVICE_SLUG}.img"; rm -f "$IMG"; truncate -s "${IMG_MB}M" "$IMG"
   sfdisk "$IMG" <<PT
 label: dos
 start=16MiB, size=${BOOT_MB}MiB, type=c, bootable
