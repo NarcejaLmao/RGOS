@@ -25,13 +25,13 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            ("snes", "SNES", "retroarch", (".sfc", ".smc", ".swc", ".fig", ".bs"), "Super Nintendo Entertainment System"),
            # Genesis Plus GX-supported Sega platforms. Each has its own ROM folder so
            # games are grouped correctly even though they all use the same libretro core.
-           ("genesis", "MEGA DRIVE", "retroarch", (".md", ".gen", ".smd", ".bin"), "Sega Mega Drive / Genesis"),
-           ("mastersystem", "MASTER SYSTEM", "retroarch", (".sms",), "Sega Master System / Mark III"),
-           ("gamegear", "GAME GEAR", "retroarch", (".gg",), "Sega Game Gear"),
-           ("sg1000", "SG-1000", "retroarch", (".sg", ".sc", ".sf"), "Sega SG-1000 / SC-3000"),
-           ("segacd", "SEGA CD", "retroarch", (".cue", ".chd", ".iso", ".m3u", ".ccd"), "Sega CD / Mega-CD"),
+           ("genesis", "MD", "retroarch", (".md", ".gen", ".smd", ".bin"), "Sega Mega Drive / Genesis"),
+           ("mastersystem", "SMS", "retroarch", (".sms",), "Sega Master System / Mark III"),
+           ("gamegear", "GG", "retroarch", (".gg",), "Sega Game Gear"),
+           ("sg1000", "SG", "retroarch", (".sg", ".sc", ".sf"), "Sega SG-1000 / SC-3000"),
+           ("segacd", "CD", "retroarch", (".cue", ".chd", ".iso", ".m3u", ".ccd"), "Sega CD / Mega-CD"),
            ("sega32x", "32X", "retroarch", (".32x", ".md", ".gen", ".smd", ".bin"), "Sega 32X"),
-           ("segapico", "SEGA PICO", "retroarch", (".pico", ".bin"), "Sega Pico"),
+           ("segapico", "PICO", "retroarch", (".pico", ".bin"), "Sega Pico"),
            ("ports", "PORT", "native", (".sh",), "Ports")]
 ROMS_DIR = os.path.join(ROMS_ROOT, "roms")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
