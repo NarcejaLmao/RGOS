@@ -187,7 +187,7 @@ while true; do
             @tool:retroarch) run_retroarch_ui ;;
             */roms/ports/*) run_port "$rom" ;;
             */roms/gba/*) run_retroarch mgba "$rom" ;;
-            */roms/nes/*) run_retroarch mesen "$rom" ;;
+            */roms/nes/*) run_retroarch fceumm "$rom" ;;
             *) echo "cannot launch: '$rom'" >> "$PORTLOG" ;;
           esac ;;
       20) /opt/rgos/rgos-poweroff; sleep 30 ;;       # sync, then systemctl poweroff, forced poweroff / sysrq if the kernel needs it

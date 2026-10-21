@@ -226,17 +226,13 @@ rootfs() {
   sudo rm -rf "$WORK/rootfs"
   # non-free-firmware is for firmware-realtek (Wi-Fi)
   sudo debootstrap --arch=arm64 --variant=minbase --components=main,non-free-firmware \
-    --include=systemd-sysv,udev,kmod,util-linux,fdisk,exfatprogs,dosfstools,alsa-utils,python3,python3-pygame,unzip,xz-utils,curl,wget,jq,wpasupplicant,iw,iproute2,wireless-regdb,firmware-realtek,systemd-timesyncd,libopenal1,libsdl2-image-2.0-0,libsdl2-mixer-2.0-0,libsdl2-ttf-2.0-0,libsdl2-net-2.0-0,fonts-dejavu-core,ca-certificates,libgl1-mesa-dri,libegl1,libgles2,libgbm1,libdrm2,procps,nano,busybox-static,retroarch,libretro-mgba,libretro-core-info,git,build-essential \
+    --include=systemd-sysv,udev,kmod,util-linux,fdisk,exfatprogs,dosfstools,alsa-utils,python3,python3-pygame,unzip,xz-utils,curl,wget,jq,wpasupplicant,iw,iproute2,wireless-regdb,firmware-realtek,systemd-timesyncd,libopenal1,libsdl2-image-2.0-0,libsdl2-mixer-2.0-0,libsdl2-ttf-2.0-0,libsdl2-net-2.0-0,fonts-dejavu-core,ca-certificates,libgl1-mesa-dri,libegl1,libgles2,libgbm1,libdrm2,procps,nano,busybox-static,retroarch,libretro-mgba,libretro-fceumm,libretro-core-info \
     "$SUITE" "$WORK/rootfs" http://deb.debian.org/debian || {
       echo; echo "debootstrap FAILED. Last lines of its log ($WORK/rootfs/debootstrap/debootstrap.log):"
       sudo tail -n 30 "$WORK/rootfs/debootstrap/debootstrap.log" 2>/dev/null
       echo; echo "disk space:"; df -h "$WORK"; exit 1; }
-  # Build Mesen Community Edition's Libretro core for the target ARM64 rootfs.
-  # Debian Trixie does not provide a libretro-mesen package; upstream core output is
-  # named mesen2_libretro.so, while RGOS's launcher expects mesen_libretro.so.
-  echo "Building Mesen Libretro core for ARM64 (this may take several minutes)..."
-  sudo chroot "$WORK/rootfs" /bin/bash -ec '    apt-get update;     git clone --depth 1 https://github.com/libretro/MesenCE.git /tmp/MesenCE;     cd /tmp/MesenCE;     make -f Makefile.libretro -j2;     install -D -m 0644 mesen2_libretro.so /usr/lib/aarch64-linux-gnu/libretro/mesen_libretro.so;     cd /; rm -rf /tmp/MesenCE;     apt-get purge -y git build-essential gcc g++ cpp make dpkg-dev;     apt-get autoremove -y; apt-get clean; rm -rf /var/lib/apt/lists/*'
-  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/mesen_libretro.so" || { echo "Mesen core build failed: mesen_libretro.so was not created"; exit 1; }
+  # Use Debian's prebuilt FCEUmm Libretro core for NES emulation.
+  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/fceumm_libretro.so" || { echo "FCEUmm core package did not install fceumm_libretro.so"; exit 1; }
   apply_overlay
   sudo cp -a "$WORK/modules/lib/modules" "$WORK/rootfs/lib/"
   # make sure module dependency/alias maps exist so udev auto-loads the joypad/ADC/PWM drivers at boot
