@@ -345,7 +345,7 @@ def settings_info():
     vol, bat, bri = read_volume(), read_battery(), read_brightness()
     return [("RG OS build", build or "unknown"), ("Device", DEVICE_ID), ("Kernel", os.uname().release),
             ("ROMS partition", space), ("SD card 2", card2_info()), ("Volume", "%d%%" % vol[0] if vol else "n/a"),
-            ("Battery", ("%d%% %s" % (bat[0], bat[1].replace("_", " ").lower())) if bat else "n/a"),
+            ("Battery", ("%d%% %s" % (max(0, min(100, bat[0])), bat[1].lower())) if bat else "n/a"),
             ("Brightness", "%d%%" % bri[0] if bri else "n/a"),
             ] + ([("Sticks", "calibrated" if os.path.exists(STICK_MAP) else "default wiring")] if HAS_STICKS else []) + [
             ("Buttons", "mapped" if os.path.exists(BTN_MAP) else "default codes")]
@@ -659,9 +659,14 @@ def read_battery():
     try:
         with open(BATT_FILE) as f:
             pct, status, stamp = f.read().split()[:3]
-        if time.time() - int(stamp) > 60:         # stale: the daemon died
+        if time.time() - int(float(stamp)) > 60:  # stale: the daemon died
             return None
-        return int(pct), status
+        # Accept either a plain integer or a percentage token such as "85%".
+        # Keep the value in the valid range before rendering the UI.
+        pct = int(pct.rstrip("%"))
+        pct = max(0, min(100, pct))
+        status = status.replace("_", " ").strip() or "Unknown"
+        return pct, status
     except (OSError, ValueError):
         return None
 
