@@ -30,7 +30,13 @@ MENULOG=/var/log/rgos-menu.log
 timeout 30 /opt/rgos/rgos-sdcard sync --settle 2>/dev/null
 # make sure the folders exist (cards set up by older versions lack them)
 if mountpoint -q /media/roms; then
-    mkdir -p /media/roms/roms/ports /media/roms/roms/gba /media/roms/roms/nes /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/nes /media/roms/firmware 2>/dev/null
+    mkdir -p /media/roms/roms/ports /media/roms/roms/gba /media/roms/roms/nes /media/roms/roms/genesis \
+      /media/roms/roms/mastersystem /media/roms/roms/gamegear /media/roms/roms/sg1000 \
+      /media/roms/roms/segacd /media/roms/roms/sega32x /media/roms/roms/segapico \
+      /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/nes /media/roms/saves/genesis \
+      /media/roms/saves/mastersystem /media/roms/saves/gamegear /media/roms/saves/sg1000 \
+      /media/roms/saves/segacd /media/roms/saves/sega32x /media/roms/saves/segapico \
+      /media/roms/states/genesis /media/roms/firmware 2>/dev/null
 fi
 /opt/rgos/rgos-perf off 2>/dev/null     # undo a port profile left behind if the session was killed mid-port
 mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null   # for devices_deferred
@@ -213,6 +219,8 @@ while true; do
             */roms/ports/*) run_port "$rom" ;;
             */roms/gba/*) run_retroarch mgba "$rom" ;;
             */roms/nes/*) run_retroarch fceumm "$rom" ;;
+            */roms/genesis/*|*/roms/mastersystem/*|*/roms/gamegear/*|*/roms/sg1000/*|*/roms/segacd/*|*/roms/sega32x/*|*/roms/segapico/*)
+                run_retroarch genesis_plus_gx "$rom" ;;
             *) echo "cannot launch: '$rom'" >> "$PORTLOG" ;;
           esac ;;
       20) /opt/rgos/rgos-poweroff; sleep 30 ;;       # sync, then systemctl poweroff, forced poweroff / sysrq if the kernel needs it

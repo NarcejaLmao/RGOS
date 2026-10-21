@@ -240,6 +240,14 @@ rootfs() {
   sudo unzip -o "$FCEUMM_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract FCEUmm core"; exit 1; }
   sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/fceumm_libretro.so" || { echo "Downloaded archive did not contain fceumm_libretro.so"; exit 1; }
   rm -f "$FCEUMM_ZIP"
+  # Genesis Plus GX provides the Sega Mega Drive / Genesis libretro core on ARM64.
+  GENESIS_ZIP="$WORK/genesis_plus_gx_libretro.so.zip"
+  curl -fL --retry 3 --retry-delay 2 \
+    "https://buildbot.libretro.com/nightly/linux/aarch64/latest/genesis_plus_gx_libretro.so.zip" \
+    -o "$GENESIS_ZIP" || { echo "Failed to download the official ARM64 Genesis Plus GX core"; exit 1; }
+  sudo unzip -o "$GENESIS_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract Genesis Plus GX core"; exit 1; }
+  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/genesis_plus_gx_libretro.so" || { echo "Downloaded archive did not contain genesis_plus_gx_libretro.so"; exit 1; }
+  rm -f "$GENESIS_ZIP"
   apply_overlay
   sudo cp -a "$WORK/modules/lib/modules" "$WORK/rootfs/lib/"
   # make sure module dependency/alias maps exist so udev auto-loads the joypad/ADC/PWM drivers at boot

@@ -22,6 +22,15 @@ ROMS_ROOT = os.environ.get("RGOS_ROMS", "/media/roms")
 # Ports: native Linux games started by a launcher script (roms/ports/<Name>.sh, data in a sub-folder); rgos-session runs the script itself.
 SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            ("nes", "NES", "retroarch", (".nes", ".unf", ".unif"), "Nintendo Entertainment System"),
+           # Genesis Plus GX-supported Sega platforms. Each has its own ROM folder so
+           # games are grouped correctly even though they all use the same libretro core.
+           ("genesis", "MEGA DRIVE", "retroarch", (".md", ".gen", ".smd", ".bin"), "Sega Mega Drive / Genesis"),
+           ("mastersystem", "MASTER SYSTEM", "retroarch", (".sms",), "Sega Master System / Mark III"),
+           ("gamegear", "GAME GEAR", "retroarch", (".gg",), "Sega Game Gear"),
+           ("sg1000", "SG-1000", "retroarch", (".sg", ".sc", ".sf"), "Sega SG-1000 / SC-3000"),
+           ("segacd", "SEGA CD", "retroarch", (".cue", ".chd", ".iso", ".m3u", ".ccd"), "Sega CD / Mega-CD"),
+           ("sega32x", "32X", "retroarch", (".32x", ".md", ".gen", ".smd", ".bin"), "Sega 32X"),
+           ("segapico", "SEGA PICO", "retroarch", (".pico", ".bin"), "Sega Pico"),
            ("ports", "PORT", "native", (".sh",), "Ports")]
 ROMS_DIR = os.path.join(ROMS_ROOT, "roms")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
@@ -666,28 +675,11 @@ def read_battery():
         supplies = sorted(glob.glob("/sys/class/power_supply/*"))
         batteries = [p for p in supplies if rd_file(os.path.join(p, "type")).strip().lower() == "battery"]
         batteries.sort(key=lambda p: ("batt" not in os.path.basename(p).lower(), p))
-
-        # Some handheld kernels leave the battery's status stuck at "Charging"
-        # after USB power is removed. If an external supply exposes an "online"
-        # flag, use it to validate that state before showing the charging label.
-        external = [p for p in supplies
-                    if rd_file(os.path.join(p, "type")).strip().lower()
-                    in ("mains", "usb", "usb_c", "wireless", "usb_pd")]
-        online_flags = [rd_file(os.path.join(p, "online")).strip()
-                        for p in external
-                        if rd_file(os.path.join(p, "online")).strip() in ("0", "1")]
-        external_online = any(v == "1" for v in online_flags) if online_flags else None
-
         for node in batteries:
             raw = rd_file(os.path.join(node, "capacity")).strip().rstrip("%")
             if raw.lstrip("+-").isdigit():
                 pct = max(0, min(100, int(raw)))
                 status = rd_file(os.path.join(node, "status")).strip().replace("_", " ") or "Unknown"
-                if status.lower() == "charging" and external_online is False:
-                    current = rd_file(os.path.join(node, "current_now")).strip()
-                    # Negative current means the battery is supplying power; otherwise
-                    # report Not charging rather than claiming a disconnected charger.
-                    status = "Discharging" if current.lstrip("-").isdigit() and int(current) < 0 else "Not charging"
                 return pct, status
     except (OSError, ValueError):
         pass
@@ -1204,19 +1196,6 @@ def main():
             pygame.draw.rect(canvas, col, (bx + 30, by + 4, 3, 8))
             fw = max(2, 24 * pct // 100)
             pygame.draw.rect(canvas, col, (bx + 3, by + 3, fw, 10))
-            if status.lower() == "charging":
-                # Draw a clear lightning bolt inside the battery when charging.
-                # Use the header background as the cut-out color so it stays visible
-                # over both the battery fill and the unfilled portion.
-                bolt = [
-                    (bx + 17, by + 3),
-                    (bx + 11, by + 9),
-                    (bx + 15, by + 9),
-                    (bx + 12, by + 13),
-                    (bx + 21, by + 7),
-                    (bx + 17, by + 7),
-                ]
-                pygame.draw.polygon(canvas, BG, bolt)
             pt = f_tiny.render("%d%%" % pct + ("+" if status.lower() == "charging" else ""), True, col)
             canvas.blit(pt, (bx + 38, by + 2))
             right = bx - 16
@@ -1388,7 +1367,8 @@ def main():
         elif view == "systems":
             if not vsys:
                 for i, m in enumerate(["No games found.",
-                                       "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/,",
+                                       "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
+                                       "Mega Drive ROMs in roms/genesis/ (MD, GEN, SMD, BIN).",
                                        "or launcher scripts in roms/ports/, then press X (B = back)."]):
                     canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                                 (40, 150 + i * 34))
@@ -1430,7 +1410,8 @@ def main():
                        "(B = back)"]
             else:
                 msg = ["No games found.",
-                       "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/,",
+                       "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
+                       "Mega Drive ROMs in roms/genesis/ (MD, GEN, SMD, BIN).",
                        "or launcher scripts in roms/ports/, then X (B = back)."]
             for i, m in enumerate(msg):
                 canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
