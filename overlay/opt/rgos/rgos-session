@@ -36,7 +36,10 @@ if mountpoint -q /media/roms; then
       /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/nes /media/roms/saves/snes /media/roms/saves/genesis \
       /media/roms/saves/mastersystem /media/roms/saves/gamegear /media/roms/saves/sg1000 \
       /media/roms/saves/segacd /media/roms/saves/sega32x /media/roms/saves/segapico \
-      /media/roms/states/snes /media/roms/states/genesis /media/roms/firmware 2>/dev/null
+      /media/roms/states/snes /media/roms/states/genesis /media/roms/firmware \
+      /media/roms/bios/gba /media/roms/bios/nes /media/roms/bios/snes /media/roms/bios/genesis \
+      /media/roms/bios/mastersystem /media/roms/bios/gamegear /media/roms/bios/sg1000 \
+      /media/roms/bios/segacd /media/roms/bios/sega32x /media/roms/bios/segapico 2>/dev/null
 fi
 /opt/rgos/rgos-perf off 2>/dev/null     # undo a port profile left behind if the session was killed mid-port
 mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null   # for devices_deferred
@@ -170,9 +173,20 @@ run_retroarch() {
         echo "retroarch is not installed" >> "$PORTLOG"
         printf '\nRetroArch is not installed.\n' > /dev/tty1 2>/dev/null
         sleep 4; return 0; }
-    mkdir -p "/media/roms/saves/$sysname" "/media/roms/states/$sysname" /media/roms/firmware /var/lib/rgos/retroarch /run/rgos 2>/dev/null
+    mkdir -p "/media/roms/saves/$sysname" "/media/roms/states/$sysname" "/media/roms/bios/$sysname" /media/roms/firmware /var/lib/rgos/retroarch /run/rgos 2>/dev/null
+    # Migrate legacy Sega CD BIOS placement into the per-system search folder
+    # with symlinks (no duplicate data and existing ROMS/firmware setups still work).
+    if [ "$sysname" = segacd ]; then
+        for bios in bios_CD_U.bin bios_CD_E.bin bios_CD_J.bin; do
+            if [ ! -s "/media/roms/bios/segacd/$bios" ] && [ -s "/media/roms/firmware/$bios" ]; then
+                ln -sf "/media/roms/firmware/$bios" "/media/roms/bios/segacd/$bios" 2>/dev/null
+            fi
+        done
+    fi
+    # Per-system BIOS folders on the ROMS card. Keep firmware_directory as a
+    # compatibility path for existing Sega CD setups using ROMS/firmware/.
     # Use a real file for the append config: RetroArch cannot reliably reopen Bash process-substitution paths (/dev/fd/N).
-    ra_run "$core $rom" "savefile_directory = \"/media/roms/saves/$sysname\"\nsavestate_directory = \"/media/roms/states/$sysname\"\n" \
+    ra_run "$core $rom" "savefile_directory = \"/media/roms/saves/$sysname\"\nsavestate_directory = \"/media/roms/states/$sysname\"\nsystem_directory = \"/media/roms/bios/$sysname\"\nfirmware_directory = \"/media/roms/firmware\"\n" \
         -L "$corepath" "$rom"
     return 0
 }
@@ -245,7 +259,17 @@ while true; do
             */roms/mastersystem/*) core=$(configured_core mastersystem genesis_plus_gx); run_retroarch "$core" "$rom" ;;
             */roms/gamegear/*) core=$(configured_core gamegear genesis_plus_gx); run_retroarch "$core" "$rom" ;;
             */roms/sg1000/*) core=$(configured_core sg1000 genesis_plus_gx); run_retroarch "$core" "$rom" ;;
-            */roms/segacd/*) core=$(configured_core segacd genesis_plus_gx); run_retroarch "$core" "$rom" ;;
+            */roms/segacd/*)
+                # Genesis Plus GX requires a region-appropriate Sega CD BIOS.
+                # Support the preferred per-system folder and the older firmware folder.
+                if ! { [ -s /media/roms/bios/segacd/bios_CD_U.bin ] || [ -s /media/roms/bios/segacd/bios_CD_E.bin ] || [ -s /media/roms/bios/segacd/bios_CD_J.bin ] || [ -s /media/roms/firmware/bios_CD_U.bin ] || [ -s /media/roms/firmware/bios_CD_E.bin ] || [ -s /media/roms/firmware/bios_CD_J.bin ]; }; then
+                    echo "Sega CD launch blocked: BIOS missing (expected bios_CD_U.bin, bios_CD_E.bin, or bios_CD_J.bin in ROMS/bios/segacd/)." >> "$PORTLOG"
+                    printf '\nSega CD BIOS missing.\n\nCopy a legally obtained bios_CD_U.bin, bios_CD_E.bin, or bios_CD_J.bin to\nROMS/bios/segacd/ and try again.\n' > /dev/tty1 2>/dev/null
+                    sleep 5
+                else
+                    core=$(configured_core segacd genesis_plus_gx); run_retroarch "$core" "$rom"
+                fi ;;
+
             */roms/sega32x/*) core=$(configured_core sega32x genesis_plus_gx); run_retroarch "$core" "$rom" ;;
             */roms/segapico/*) core=$(configured_core segapico genesis_plus_gx); run_retroarch "$core" "$rom" ;;
             *) echo "cannot launch: '$rom'" >> "$PORTLOG" ;;
