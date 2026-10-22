@@ -252,6 +252,7 @@ while true; do
       10) rom=$(cat /run/rgos/launch 2>/dev/null)
           case "$rom" in
             @tool:retroarch) run_retroarch_ui ;;
+            @tool:flycast) run_port /opt/rgos/rgos-flycast ;;
             */roms/ports/*) run_port "$rom" ;;
             */roms/gba/*) core=$(configured_core gba mgba); run_retroarch "$core" "$rom" ;;
             */roms/gb/*) core=$(configured_core gb gambatte); run_retroarch "$core" "$rom" ;;

@@ -452,7 +452,8 @@ def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
 HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("tools", "Tools"), ("settings", "Settings")]
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
 TOOLS = [("files", "File Manager", "Browse, copy, move, rename and delete files on the SD cards", "@view:files"),
-         ("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
+         ("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch"),
+         ("flycast", "Flycast", "Standalone Dreamcast emulator (its own game list and settings)", "@tool:flycast")]
 def fm_roots():
     """Storage the file manager may touch: the ROMS card, plus the second SD card when it is mounted."""
     roots = [ROMS_ROOT]

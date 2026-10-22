@@ -162,5 +162,35 @@ class DreamcastTest(unittest.TestCase):
         self.assertIn("CORE=flycast", self.read("build.sh"))
 
 
+class FlycastStandaloneTest(unittest.TestCase):
+    def read(self, *p):
+        return open(os.path.join(ROOT, *p)).read()
+
+    def test_tool_entry(self):
+        src = self.read("overlay", "opt", "rgos", "menu.py")
+        self.assertRegex(src, r'\("flycast", "Flycast", "[^"]+", "@tool:flycast"\)')
+
+    def test_session_launches_it_as_a_port(self):
+        s = self.read("overlay", "opt", "rgos", "rgos-session")
+        self.assertIn("@tool:flycast) run_port /opt/rgos/rgos-flycast", s)
+
+    def test_launcher(self):
+        s = self.read("overlay", "opt", "rgos", "rgos-flycast")
+        for want in ("/media/roms/roms/dreamcast", "dc_boot.bin", "dc_flash.bin", "Dreamcast.ContentPath", 'exec "$FLY"'):
+            self.assertIn(want, s)
+
+    def test_build_installs_it(self):
+        b = self.read("build.sh")
+        for want in ("flycast_build()", "flycast_install", "https://github.com/flyinghead/flycast.git", "--recursive",
+                     "CMAKE_TOOLCHAIN_FILE", "CMAKE_SYSROOT", "/usr/local/bin/flycast", "rgos-flycast", "FLYCAST=0"):
+            self.assertIn(want, b)
+        self.assertNotIn("FLYCAST_URL", b)                     # compiled, no longer downloaded
+
+    def test_rootfs_and_update_install_it_and_stage_exists(self):
+        b = self.read("build.sh")
+        self.assertGreaterEqual(b.count("flycast_install"), 3)         # definition + rootfs() + update()
+        self.assertIn("flycast) flycast_build;;", b)
+
+
 if __name__ == "__main__":
     unittest.main()

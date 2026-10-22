@@ -6,6 +6,7 @@
 #        ./build.sh rg34xxsp [stage]  (default device; stage defaults to all)
 #        ./build.sh rg35xxsp [stage]  (Anbernic RG35XX SP; stage defaults to all)
 #        ./build.sh tfa|uboot|kernel|rootfs|image (single stage for the default RG34XX-SP)
+#        ./build.sh flycast         compile only the standalone Flycast emulator (cached in work/flycast-out; see flycast_build)
 #        ./build.sh update          re-apply overlay/ to the existing rootfs and build ONLY out/rgos-update-<id>.tar
 # ./build.sh (image stage) also writes out/rgos-update-<BUILD_ID>.tar: copy it into the "update" folder on the
 # ROMS (exFAT) partition and reboot the device to install it (kernel, initramfs, DTB and the whole root filesystem;
@@ -231,7 +232,7 @@ apply_overlay() {
                  "$WORK/rootfs/opt/rgos/rgos-perf" "$WORK/rootfs/opt/rgos/rgos-videoprobe" \
                  "$WORK/rootfs/opt/rgos/rgos-hw" "$WORK/rootfs/opt/rgos/rgos-hwprobe" "$WORK/rootfs/opt/rgos/rgos-poweroff" \
                  "$WORK/rootfs/opt/rgos/rgos-inputprobe" "$WORK/rootfs/opt/rgos/rgos-wifi" "$WORK/rootfs/opt/rgos/rgos-wifi-dhcp" \
-                 "$WORK/rootfs/opt/rgos/rgos-sdcard" "$WORK/rootfs/opt/rgos/sdcard.py" "$WORK/rootfs/opt/rgos/rgos-splash"
+                 "$WORK/rootfs/opt/rgos/rgos-sdcard" "$WORK/rootfs/opt/rgos/sdcard.py" "$WORK/rootfs/opt/rgos/rgos-splash" "$WORK/rootfs/opt/rgos/rgos-flycast"
   # enable the volume-button service here (not only in rootfs()) so `./build.sh update` picks it up too
   sudo mkdir -p "$WORK/rootfs/etc/systemd/system/multi-user.target.wants"
   sudo ln -sf /etc/systemd/system/rgos-volume.service "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/rgos-volume.service"
@@ -245,6 +246,88 @@ apply_overlay() {
   # boot splash video: plays from rgos-splash.service as soon as the framebuffer exists (not from the menu); rgos.service waits for it
   sudo mkdir -p "$WORK/rootfs/etc/systemd/system/sysinit.target.wants"
   sudo ln -sf /etc/systemd/system/rgos-splash.service "$WORK/rootfs/etc/systemd/system/sysinit.target.wants/rgos-splash.service"
+}
+# ---- standalone Flycast (Tools > Flycast), compiled from source -------------------------------------------------------
+# Debian does not package Flycast and no official ARM64 Linux build exists, so it is built here. The compile is a CMake
+# cross-build (native on an arm64 host) against a small arm64 "sysroot" holding the -dev packages, never emulated, so it
+# takes minutes rather than hours. Results are cached in $WORK/flycast-out; the sources in $WORK/flycast-src.
+#   FLYCAST=0             skip it (image without the Flycast tool)
+#   FLYCAST_TAG=v2.5      git tag/branch to build (master works too)
+#   FLYCAST_REBUILD=1     rebuild even if a cached binary exists
+#   FLYCAST_REQUIRED=1    stop the build when Flycast cannot be built (default: warn and carry on without it)
+#   FLYCAST_CMAKE_ARGS="" extra CMake arguments, e.g. "-DUSE_VULKAN=ON"
+#   FLYCAST_CPUFLAGS      compiler flags for the CPU (default -mcpu=cortex-a53, the H700 core)
+# Host needs: cmake, pkg-config, git, debootstrap, and (x86-64 host) g++-aarch64-linux-gnu.
+flycast_build() {
+  local src="$WORK/flycast-src" sysroot="$WORK/flycast-sysroot" bld="$WORK/flycast-build" out="$WORK/flycast-out"
+  local tag=${FLYCAST_TAG:-v2.5} cpu=${FLYCAST_CPUFLAGS:--mcpu=cortex-a53} c triplet=aarch64-linux-gnu
+  if [ -z "${FLYCAST_REBUILD:-}" ] && [ -x "$out/flycast" ]; then echo "using cached Flycast build: $out/flycast"; return 0; fi
+  for c in cmake pkg-config git debootstrap ${CROSS}gcc ${CROSS}g++ ${CROSS}strip; do
+    command -v "$c" >/dev/null || { echo "Flycast build: missing host tool '$c' (x86-64 host: apt install cmake pkg-config g++-aarch64-linux-gnu)"; return 1; }
+  done
+  # 1. sysroot with the arm64 development packages (same Debian suite as the rootfs, so the libraries match at run time).
+  #    --foreign: only unpack the packages, nothing has to run in the arm64 chroot. Everything Flycast links against is
+  #    already in the rootfs at run time (SDL2 via pygame, ALSA via alsa-utils, EGL/GLES/GBM/DRM, zlib); curl and libzip are
+  #    avoided (bundled / off) so no new runtime packages are needed.
+  if [ ! -f "$sysroot/.rgos-ok" ]; then
+    sudo rm -rf "$sysroot"
+    sudo debootstrap --arch=arm64 --foreign --variant=minbase --components=main \
+      --include=libsdl2-dev,libegl-dev,libgles-dev,libgbm-dev,libdrm-dev,libasound2-dev,libudev-dev,zlib1g-dev,libc6-dev,linux-libc-dev \
+      "$SUITE" "$sysroot" http://deb.debian.org/debian || { echo "Flycast build: could not create the arm64 sysroot"; return 1; }
+    sudo touch "$sysroot/.rgos-ok"
+  fi
+  # 2. sources, with the submodules Flycast vendors (libchdr, imgui, glslang, ...)
+  if [ ! -d "$src/.git" ]; then
+    rm -rf "$src"
+    git clone --recursive --shallow-submodules --depth 1 --branch "$tag" https://github.com/flyinghead/flycast.git "$src" \
+      || { rm -rf "$src"; echo "Flycast build: git clone of $tag failed"; return 1; }
+  fi
+  # 3. toolchain file: compilers, sysroot, and rpath-link so the linker finds the libraries the -dev libraries depend on
+  mkdir -p "$bld"
+  cat > "$bld/toolchain.cmake" <<TOOLCHAIN
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR aarch64)
+set(CMAKE_C_COMPILER ${CROSS}gcc)
+set(CMAKE_CXX_COMPILER ${CROSS}g++)
+set(CMAKE_SYSROOT $sysroot)
+set(CMAKE_FIND_ROOT_PATH $sysroot)
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+set(CMAKE_C_FLAGS_INIT "$cpu")
+set(CMAKE_CXX_FLAGS_INIT "$cpu")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-static-libstdc++ -static-libgcc -Wl,-rpath-link,$sysroot/usr/lib/$triplet -Wl,-rpath-link,$sysroot/lib/$triplet")
+TOOLCHAIN
+  export PKG_CONFIG_SYSROOT_DIR="$sysroot"
+  export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/$triplet/pkgconfig:$sysroot/usr/lib/pkgconfig:$sysroot/usr/share/pkgconfig"
+  # GLES (not desktop GL): the H700's Mali driver gives GLES via KMS/DRM. No Vulkan, no curl, bundled libzip, system SDL2.
+  # (If your Flycast version names an option differently, CMake only warns; add overrides through FLYCAST_CMAKE_ARGS.)
+  cmake -S "$src" -B "$bld" -DCMAKE_TOOLCHAIN_FILE="$bld/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
+    -DUSE_GLES=ON -DUSE_VULKAN=OFF -DUSE_HOST_SDL=ON -DUSE_HOST_LIBZIP=OFF -DUSE_LIBCURL=OFF -DUSE_BREAKPAD=OFF \
+    -DENABLE_CTEST=OFF ${FLYCAST_CMAKE_ARGS:-} || { echo "Flycast build: cmake configure failed"; return 1; }
+  cmake --build "$bld" -j"$J" || { echo "Flycast build: compile failed"; return 1; }
+  [ -f "$bld/flycast" ] || { echo "Flycast build: no flycast binary produced in $bld"; return 1; }
+  mkdir -p "$out"; cp "$bld/flycast" "$out/flycast"; ${CROSS}strip "$out/flycast" || true
+  echo "built Flycast $tag -> $out/flycast"
+}
+flycast_install() {
+  local lib missing=
+  if [ "${FLYCAST:-1}" = 0 ]; then echo "skipping standalone Flycast (FLYCAST=0)"; return 0; fi
+  if flycast_build; then
+    sudo rm -rf "$WORK/rootfs/opt/flycast"; sudo install -d "$WORK/rootfs/opt/flycast" "$WORK/rootfs/usr/local/bin"
+    sudo install -m 755 "$WORK/flycast-out/flycast" "$WORK/rootfs/opt/flycast/flycast"
+    sudo ln -sf /opt/flycast/flycast "$WORK/rootfs/usr/local/bin/flycast"
+    # every shared library the binary needs must exist in the rootfs, or the tool fails at run time
+    for lib in $(readelf -d "$WORK/flycast-out/flycast" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+      sudo find "$WORK/rootfs/lib" "$WORK/rootfs/usr/lib" -name "$lib" 2>/dev/null | grep -q . || missing="$missing $lib"
+    done
+    [ -z "$missing" ] || echo "WARNING: Flycast needs libraries that are not in the rootfs:$missing (add their Debian packages to the debootstrap --include list)"
+    echo "installed standalone Flycast"
+  else
+    echo "WARNING: standalone Flycast could not be built; Tools > Flycast will say it is missing"
+    [ "${FLYCAST_REQUIRED:-0}" != 1 ] || exit 1
+  fi
 }
 rootfs() {
   need debootstrap
@@ -376,6 +459,8 @@ rootfs() {
     echo "WARNING: Dreamcast core $CORE could not be installed"
   fi
   rm -f "$CORE_ZIP"
+  # Standalone Flycast (Tools > Flycast): compiled from source (see flycast_build), optional.
+  flycast_install
   # FinalBurn Neo: arcade + Neo Geo. Unlike the cores above this one is required (it is the default for the arcade and
   # neogeo systems), so a failed download stops the build.
   FBNEO_ZIP="$WORK/fbneo_libretro.so.zip"
@@ -645,6 +730,7 @@ update() {
   [ -d "$WORK/rootfs" ] || { echo "no rootfs: run ./build.sh rootfs first"; exit 1; }
   [ -x "$WORK/rootfs/usr/bin/retroarch" ] || { echo "this rootfs has no RetroArch: re-run ./build.sh rootfs once (it now installs retroarch + libretro-mgba)"; exit 1; }
   BUILD_ID=${BUILD_ID:-$(date -u +%Y%m%d-%H%M%S)}
+  flycast_install      # compiles on first use, then just copies the cached binary
   apply_overlay
   bootfiles
   make_update_tar
@@ -693,7 +779,7 @@ PT
 
 need git make gcc sfdisk; [ -n "$CROSS" ] && need ${CROSS}gcc
 case "${1:-all}" in
-  tfa) tfa;; uboot) uboot;; kernel) kernel;; rootfs) rootfs;; image) image;; update) update;;
+  flycast) flycast_build;; tfa) tfa;; uboot) uboot;; kernel) kernel;; rootfs) rootfs;; image) image;; update) update;;
   all) tfa; uboot; kernel; rootfs; image;;
   *) echo "unknown stage/device: ${1:-}"; echo "usage: ./build all | ./build.sh [rg34xxsp|rg35xxsp] [all|tfa|uboot|kernel|rootfs|image|update]"; exit 1;;
 esac

@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Tools > Flycast: the standalone Flycast emulator (its own game list, pointed at ROMS/roms/dreamcast).
+# Started by rgos-session through run_port, so the performance profile and the SELECT+START killswitch apply.
+# usage: rgos-flycast [rom]      (a disc image on the command line starts that game directly)
+FLY=$(command -v flycast 2>/dev/null || true)
+[ -x "$FLY" ] || FLY=/opt/flycast/flycast
+if [ ! -x "$FLY" ]; then
+    echo "flycast is not installed"
+    printf '\nFlycast is not installed.\n' > /dev/tty1 2>/dev/null
+    sleep 4; exit 1
+fi
+ROMS=/media/roms/roms/dreamcast
+BIOS=/media/roms/bios/dreamcast
+SAVES=/media/roms/saves/dreamcast/flycast
+export XDG_CONFIG_HOME=$SAVES/config XDG_DATA_HOME=$SAVES/data      # VMUs, save states and settings live on the ROMS card
+export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
+D=$XDG_DATA_HOME/flycast
+mkdir -p "$ROMS" "$BIOS/dc" "$XDG_CONFIG_HOME/flycast" "$D/data" 2>/dev/null
+# BIOS is optional. Same files as the libretro core (ROMS/bios/dreamcast/dc/); copied, not linked, because the ROMS card may not support symlinks.
+for f in dc_boot.bin dc_flash.bin; do
+    for src in "$BIOS/dc/$f" "$BIOS/$f" "/media/roms/firmware/$f"; do
+        if [ -s "$src" ]; then
+            for dst in "$D/$f" "$D/data/$f"; do [ -s "$dst" ] || cp "$src" "$dst" 2>/dev/null; done
+            break
+        fi
+    done
+done
+CFG=$XDG_CONFIG_HOME/flycast/emu.cfg
+[ -f "$CFG" ] || printf '[config]\nDreamcast.ContentPath = %s\n' "$ROMS" > "$CFG"      # first run only: never overwrite the user's settings
+exec "$FLY" "$@"
