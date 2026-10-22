@@ -97,7 +97,7 @@ if mountpoint -q /media/roms || timeout 60 mount -t "$fstype" -o noatime,umask=0
         mkdir -p "/media/roms/roms/$s" "/media/roms/saves/$s" "/media/roms/states/$s" "/media/roms/bios/$s" 2>/dev/null
     done
     mkdir -p /media/roms/roms/ports /media/roms/saves/ports/data /media/roms/saves/ports/config \
-      /media/roms/bios/dreamcast/dc /media/roms/firmware /media/roms/update 2>/dev/null
+      /media/roms/bios/dreamcast/dc /media/roms/firmware /media/roms/update /media/roms/music 2>/dev/null
     sync
     touch "$FLAG"
     echo "ROMS ready ($fstype)"

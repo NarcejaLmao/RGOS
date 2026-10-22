@@ -29,7 +29,7 @@ MENULOG=/var/log/rgos-menu.log
 timeout 30 /opt/rgos/rgos-sdcard sync --settle 2>/dev/null
 # make sure the folders exist (cards set up by older versions lack them)
 if mountpoint -q /media/roms; then
-    mkdir -p /media/roms/roms/ports /media/roms/roms/gba /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/nes /media/roms/roms/snes /media/roms/roms/genesis \
+    mkdir -p /media/roms /media/roms/music/roms/ports /media/roms/roms/gba /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/nes /media/roms/roms/snes /media/roms/roms/genesis \
       /media/roms/roms/mastersystem /media/roms/roms/gamegear /media/roms/roms/sg1000 \
       /media/roms/roms/segacd /media/roms/roms/sega32x /media/roms/roms/segapico /media/roms/roms/arcade /media/roms/roms/neogeo /media/roms/roms/atari2600 /media/roms/roms/atari5200 /media/roms/roms/atari7800 /media/roms/roms/ngp /media/roms/roms/wonderswan /media/roms/roms/dreamcast \
       /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/gb /media/roms/saves/gbc /media/roms/saves/nes /media/roms/saves/snes /media/roms/saves/genesis \

@@ -5,8 +5,8 @@
 FLY=$(command -v flycast 2>/dev/null || true)
 [ -x "$FLY" ] || FLY=/opt/flycast/flycast
 if [ ! -x "$FLY" ]; then
-    echo "flycast is not installed"
-    printf '\nFlycast is not installed.\n' > /dev/tty1 2>/dev/null
+    echo "flycast is not installed (looked for: $(command -v flycast 2>/dev/null || echo 'flycast in PATH'), /opt/flycast/flycast): the image was built without it, see the build output for 'standalone Flycast could NOT be built'"
+    printf '\nStandalone Flycast is not in this image.\nDreamcast games still start from the game list (RetroArch core).\n' > /dev/tty1 2>/dev/null
     sleep 4; exit 1
 fi
 ROMS=/media/roms/roms/dreamcast

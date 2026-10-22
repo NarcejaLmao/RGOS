@@ -949,6 +949,80 @@ def log(msg):
     sys.stderr.flush()
 
 
+# Launcher background music. Tracks can be bundled in /opt/rgos/music or added by the user
+# to the ROMS partition at /media/roms/music. Files are shuffled without repeating until
+# the current playlist is exhausted; unsupported/corrupt tracks are skipped gracefully.
+MUSIC_DIRS = (os.path.join(os.path.dirname(os.path.abspath(__file__)), "music"),
+              os.path.join(ROMS_ROOT, "music"))
+MUSIC_EXTS = (".mp3", ".ogg", ".oga", ".wav", ".flac", ".mod", ".xm", ".it", ".s3m")
+_music_playlist = []
+_music_last = None
+
+def _music_tracks():
+    tracks = []
+    for root in MUSIC_DIRS:
+        if not os.path.isdir(root):
+            continue
+        for base, _dirs, names in os.walk(root):
+            for name in names:
+                if name.lower().endswith(MUSIC_EXTS):
+                    path = os.path.join(base, name)
+                    if path not in tracks:
+                        tracks.append(path)
+    return tracks
+
+def _start_launcher_music():
+    global _music_playlist, _music_last
+    tracks = _music_tracks()
+    if not tracks:
+        return
+    try:
+        if not pygame.mixer.get_init():
+            pygame.mixer.init(22050, -16, 2, 2048)
+        _music_playlist = tracks[:]
+        import random
+        random.shuffle(_music_playlist)
+        if len(_music_playlist) > 1 and _music_playlist[0] == _music_last:
+            _music_playlist.append(_music_playlist.pop(0))
+        _play_next_launcher_track()
+        log("launcher music: %d track(s) found" % len(tracks))
+    except Exception as e:
+        log("launcher music unavailable: %s" % e)
+
+def _play_next_launcher_track():
+    global _music_playlist, _music_last
+    while _music_playlist:
+        path = _music_playlist.pop(0)
+        try:
+            pygame.mixer.music.load(path)
+            pygame.mixer.music.set_volume(0.55)
+            pygame.mixer.music.play()
+            _music_last = path
+            log("launcher music playing: %s" % path)
+            return
+        except Exception as e:
+            log("launcher music skipped %s: %s" % (path, e))
+    # Re-scan so custom tracks copied to the SD card while the launcher is running can be found.
+    tracks = _music_tracks()
+    if tracks:
+        import random
+        _music_playlist = tracks[:]
+        random.shuffle(_music_playlist)
+        if len(_music_playlist) > 1 and _music_playlist[0] == _music_last:
+            _music_playlist.append(_music_playlist.pop(0))
+        while _music_playlist:
+            path = _music_playlist.pop(0)
+            try:
+                pygame.mixer.music.load(path)
+                pygame.mixer.music.set_volume(0.55)
+                pygame.mixer.music.play()
+                _music_last = path
+                log("launcher music playing: %s" % path)
+                return
+            except Exception as e:
+                log("launcher music skipped %s: %s" % (path, e))
+
+
 def main():
     windowed = os.environ.get("RGOS_WINDOWED") == "1"
     # RGOS_VIDEO=fb: use SDL's dummy driver for the off-screen canvas and draw into /dev/fb0 through fbout.
@@ -1128,6 +1202,9 @@ def main():
             except Exception as e:
                 log("splash failed: %r" % (e,))
 
+    # Start random background music only after the splash has finished and released audio.
+    _start_launcher_music()
+
     # First start of a fresh install: force the guided stick calibration, then the button mapping, before the launcher
     # can be used. A failed step restarts by itself; after 3 failures MENU may skip that step (so a broken stick hub can
     # never lock the device out). The marker file is written only when the whole setup is finished.
@@ -1159,6 +1236,8 @@ def main():
             pygame.time.wait(120)
             continue
         blanked = False
+        if pygame.mixer.get_init() and not pygame.mixer.music.get_busy() and (_music_playlist or _music_tracks()):
+            _play_next_launcher_track()
         _acts = inp.poll()
         if _acts:
             last_act = time.monotonic()
@@ -1895,6 +1974,11 @@ def main():
                 and time.time() >= max(vol_show_until, bri_show_until))
         clock.tick(15 if idle else 30)
 
+    try:
+        if pygame.mixer.get_init():
+            pygame.mixer.music.stop()
+    except Exception:
+        pass
     if not windowed:
         fbout.set_graphics(False)
     pygame.quit()

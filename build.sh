@@ -258,23 +258,77 @@ apply_overlay() {
 #   FLYCAST_CMAKE_ARGS="" extra CMake arguments, e.g. "-DUSE_VULKAN=ON"
 #   FLYCAST_CPUFLAGS      compiler flags for the CPU (default -mcpu=cortex-a53, the H700 core)
 # Host needs: cmake, pkg-config, git, debootstrap, and (x86-64 host) g++-aarch64-linux-gnu.
-flycast_build() {
-  local src="$WORK/flycast-src" sysroot="$WORK/flycast-sysroot" bld="$WORK/flycast-build" out="$WORK/flycast-out"
-  local tag=${FLYCAST_TAG:-v2.5} cpu=${FLYCAST_CPUFLAGS:--mcpu=cortex-a53} c triplet=aarch64-linux-gnu
-  if [ -z "${FLYCAST_REBUILD:-}" ] && [ -x "$out/flycast" ]; then echo "using cached Flycast build: $out/flycast"; return 0; fi
+# Host tools for the Flycast builds. When some are missing and apt is available they are installed automatically
+# (FLYCAST_AUTO_APT=0 turns that off and just reports what is missing).
+flycast_host_tools() {
+  local c miss= pkgs=
   for c in cmake pkg-config git debootstrap dpkg-deb tar make ${CROSS}gcc ${CROSS}g++ ${CROSS}strip; do
-    command -v "$c" >/dev/null || { echo "Flycast build: missing host tool '$c' (x86-64 host: apt install cmake pkg-config g++-aarch64-linux-gnu)"; return 1; }
+    command -v "$c" >/dev/null || miss="$miss $c"
   done
+  [ -z "$miss" ] && return 0
+  pkgs="cmake pkg-config git debootstrap dpkg make tar"
+  [ -n "$CROSS" ] && pkgs="$pkgs gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu" || pkgs="$pkgs gcc g++ binutils"
+  if [ "${FLYCAST_AUTO_APT:-1}" != 0 ] && command -v apt-get >/dev/null; then
+    echo "Flycast build: missing host tools:$miss -> installing: $pkgs"
+    sudo apt-get install -y $pkgs || echo "Flycast build: apt-get install failed"
+  fi
+  miss=; for c in cmake pkg-config git debootstrap dpkg-deb tar make ${CROSS}gcc ${CROSS}g++ ${CROSS}strip; do
+    command -v "$c" >/dev/null || miss="$miss $c"
+  done
+  [ -z "$miss" ] || { echo "Flycast build: still missing host tools:$miss (run: sudo apt install $pkgs)"; return 1; }
+}
+# ---- glibc compatibility: a binary built against a NEWER glibc than the rootfs ships cannot start -----------------------
+# Symptom (RetroArch log / Tools > Flycast): "libm.so.6: version `GLIBC_2.43' not found (required by .../flycast_libretro.so)".
+# Cause: the arm64 sysroot the Flycast binaries are linked against was newer than the rootfs they run in (different SUITE,
+# or a sysroot/cached binary left over from an older run), so the linker bound them to symbol versions the image's libc
+# does not have. These helpers compare the two and force a clean rebuild instead of shipping a binary that cannot load.
+glibc_max() {    # highest GLIBC_x.y a file REQUIRES (executable/.so) or, for libc/libm itself, PROVIDES
+  { readelf -W --dyn-syms "$1" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*'
+    readelf -W -V "$1" 2>/dev/null | grep -o 'GLIBC_[0-9][0-9.]*'; } | sort -uV | tail -n1
+}
+glibc_of_tree() {   # glibc version provided by a root tree (rootfs or sysroot): the highest version tag of its libc + libm
+  local root=$1 f v best=
+  for f in libc.so.6 libm.so.6; do
+    f=$(sudo find "$root/lib" "$root/usr/lib" -name "$f" -print -quit 2>/dev/null) || true
+    [ -n "$f" ] || continue
+    v=$(sudo cat "$f" | { cat > "$WORK/.glibc-probe.$$"; glibc_max "$WORK/.glibc-probe.$$"; rm -f "$WORK/.glibc-probe.$$"; })
+    [ -n "$v" ] && best=$(printf '%s\n%s\n' "$best" "$v" | sort -V | tail -n1)
+  done
+  echo "$best"
+}
+glibc_newer() {     # true when version $1 is newer than version $2 (both like GLIBC_2.41)
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]
+}
+glibc_ok() {        # glibc_ok <binary>: true if the rootfs can run it (or when there is no rootfs yet to compare with)
+  local have need
+  [ -d "$WORK/rootfs/usr" ] || return 0
+  have=$(glibc_of_tree "$WORK/rootfs"); need=$(glibc_max "$1")
+  if glibc_newer "$need" "$have"; then
+    echo "Flycast build: $(basename "$1") needs $need but the rootfs only has $have"; return 1
+  fi
+  return 0
+}
+flycast_sysroot() {
+  local sysroot="$WORK/flycast-sysroot" have_rootfs sys_glibc root_glibc
+  # a sysroot whose glibc is newer than the rootfs's would link binaries that cannot run there: throw it away and redo it
+  if [ -f "$sysroot/.rgos-ok" ] && [ -d "$WORK/rootfs/usr" ]; then
+    sys_glibc=$(glibc_of_tree "$sysroot"); root_glibc=$(glibc_of_tree "$WORK/rootfs")
+    if glibc_newer "$sys_glibc" "$root_glibc"; then
+      echo "Flycast build: sysroot glibc ($sys_glibc) is newer than the rootfs's ($root_glibc): rebuilding the sysroot"
+      sudo rm -rf "$sysroot"
+    fi
+  fi
   # 1. sysroot with the arm64 development packages (same Debian suite as the rootfs, so the libraries match at run time).
   #    --foreign: only unpack the packages, nothing has to run in the arm64 chroot. Everything Flycast links against is
-  #    already in the rootfs at run time (SDL2 via pygame, ALSA via alsa-utils, EGL/GLES/GBM/DRM, zlib); curl and libzip are
-  #    avoided (bundled / off) so no new runtime packages are needed.
+  #    already in the rootfs at run time (SDL2 via pygame, ALSA via alsa-utils, EGL/GLES/GBM/DRM, zlib); libzip is
+  #    bundled. Flycast's CMake requires libcurl (find_package(CURL)); the rootfs already has libcurl.so.4 through the curl package.
   # (a sysroot left by an older run has the .rgos-ok marker but no unpacked -dev packages: treat that as stale and redo it)
-  if [ ! -f "$sysroot/.rgos-ok" ] || [ ! -e "$sysroot/usr/include/SDL2/SDL.h" ]; then
+  if [ ! -f "$sysroot/.rgos-ok" ] || [ ! -e "$sysroot/usr/include/SDL2/SDL.h" ] || [ ! -e "$sysroot/usr/include/aarch64-linux-gnu/curl/curl.h" -a ! -e "$sysroot/usr/include/curl/curl.h" ]; then
     sudo rm -rf "$sysroot"
     sudo debootstrap --arch=arm64 --foreign --variant=minbase --components=main \
-      --include=libsdl2-dev,libegl-dev,libgles-dev,libgbm-dev,libdrm-dev,libasound2-dev,libudev-dev,zlib1g-dev,libc6-dev,linux-libc-dev \
-      "$SUITE" "$sysroot" http://deb.debian.org/debian || { echo "Flycast build: could not create the arm64 sysroot"; return 1; }
+      --include=libsdl2-dev,libegl-dev,libgles-dev,libgbm-dev,libdrm-dev,libasound2-dev,libudev-dev,zlib1g-dev,libcurl4-openssl-dev,libc6-dev,linux-libc-dev \
+      "$SUITE" "$sysroot" http://deb.debian.org/debian 2>&1 | tee "$WORK/flycast-sysroot.log"
+    [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast build: could not create the arm64 sysroot (log: $WORK/flycast-sysroot.log)"; return 1; }
     # --foreign only unpacks the "required" packages; the --include'd -dev packages (and their dependencies) are merely
     # downloaded into the apt cache and would be installed by the second stage, which never runs here. Unpack every
     # downloaded .deb into the sysroot by hand so the headers, .so symlinks and .pc/.cmake files are really there.
@@ -288,17 +342,38 @@ flycast_build() {
     [ "$ndeb" -gt 0 ] || { echo "Flycast build: debootstrap downloaded no packages into $sysroot/var/cache/apt/archives"; sudo rm -rf "$sysroot"; return 1; }
     # sanity check: the development files CMake needs must now exist, otherwise do not mark the sysroot as good
     if ! sudo test -e "$sysroot/usr/include/SDL2/SDL.h" || ! sudo test -e "$sysroot/usr/include/EGL/egl.h" \
-       || ! sudo test -e "$sysroot/usr/include/GLES2/gl2.h" || ! sudo test -e "$sysroot/usr/include/gbm.h"; then
+       || ! sudo test -e "$sysroot/usr/include/GLES2/gl2.h" || ! sudo test -e "$sysroot/usr/include/gbm.h" \
+       || { ! sudo test -e "$sysroot/usr/include/curl/curl.h" && ! sudo test -e "$sysroot/usr/include/aarch64-linux-gnu/curl/curl.h"; }; then
       echo "Flycast build: sysroot is missing SDL2/EGL/GLES2/GBM headers after unpacking $ndeb packages"
       sudo rm -rf "$sysroot"; return 1
     fi
     sudo touch "$sysroot/.rgos-ok"
   fi
+  # the freshly built sysroot must not be newer than the rootfs either (SUITE mismatch)
+  if [ -d "$WORK/rootfs/usr" ]; then
+    sys_glibc=$(glibc_of_tree "$sysroot"); root_glibc=$(glibc_of_tree "$WORK/rootfs")
+    if glibc_newer "$sys_glibc" "$root_glibc"; then
+      echo "Flycast build: the sysroot ($sys_glibc) is still newer than the rootfs ($root_glibc): SUITE=$SUITE does not match the suite the rootfs was built from; rebuild the rootfs or set SUITE to match"
+      sudo rm -rf "$sysroot"; return 1
+    fi
+  fi
+}
+flycast_build() {
+  local src="$WORK/flycast-src" sysroot="$WORK/flycast-sysroot" bld="$WORK/flycast-build" out="$WORK/flycast-out"
+  local tag=${FLYCAST_TAG:-v2.5} cpu=${FLYCAST_CPUFLAGS:--mcpu=cortex-a53} c triplet=aarch64-linux-gnu
+  if [ -z "${FLYCAST_REBUILD:-}" ] && [ -x "$out/flycast" ]; then
+    if glibc_ok "$out/flycast"; then echo "using cached Flycast build: $out/flycast"; return 0; fi
+    echo "cached Flycast build is incompatible with the rootfs's glibc: rebuilding"; rm -rf "$out" "$bld"
+  fi
+  flycast_host_tools || return 1
+  flycast_sysroot || return 1
   # 2. sources, with the submodules Flycast vendors (libchdr, imgui, glslang, ...)
   if [ ! -d "$src/.git" ]; then
     rm -rf "$src"
     git clone --recursive --shallow-submodules --depth 1 --branch "$tag" https://github.com/flyinghead/flycast.git "$src" \
-      || { rm -rf "$src"; echo "Flycast build: git clone of $tag failed"; return 1; }
+      || { rm -rf "$src"; echo "Flycast build: git clone of tag $tag failed, trying master"
+           git clone --recursive --shallow-submodules --depth 1 https://github.com/flyinghead/flycast.git "$src" \
+             || { rm -rf "$src"; echo "Flycast build: git clone failed (network? is github.com reachable from the build host?)"; return 1; }; }
   fi
   # 3. toolchain file: compilers, sysroot, and rpath-link so the linker finds the libraries the -dev libraries depend on
   mkdir -p "$bld"
@@ -321,14 +396,21 @@ TOOLCHAIN
   export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/$triplet/pkgconfig:$sysroot/usr/lib/pkgconfig:$sysroot/usr/share/pkgconfig"
   # GLES (not desktop GL): the H700's Mali driver gives GLES via KMS/DRM. No Vulkan, no curl, bundled libzip, system SDL2.
   # (If your Flycast version names an option differently, CMake only warns; add overrides through FLYCAST_CMAKE_ARGS.)
-  cmake -S "$src" -B "$bld" -DCMAKE_TOOLCHAIN_FILE="$bld/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
-    -DUSE_GLES=ON -DUSE_VULKAN=OFF -DUSE_HOST_SDL=ON -DUSE_HOST_LIBZIP=OFF -DUSE_LIBCURL=OFF -DUSE_BREAKPAD=OFF \
-    -DENABLE_CTEST=OFF ${FLYCAST_CMAKE_ARGS:-} 2>&1 | tee "$WORK/flycast-configure.log"
-  [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast build: cmake configure failed (log: $WORK/flycast-configure.log)"; return 1; }
+  local hostsdl
+  for hostsdl in ON OFF; do     # system SDL2 first (already in the rootfs); the bundled SDL2 if CMake cannot use the sysroot's
+    rm -rf "$bld/CMakeCache.txt" "$bld/CMakeFiles"
+    cmake -S "$src" -B "$bld" -DCMAKE_TOOLCHAIN_FILE="$bld/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
+      -DUSE_GLES=ON -DUSE_VULKAN=OFF -DUSE_HOST_SDL=$hostsdl -DUSE_HOST_LIBZIP=OFF -DUSE_BREAKPAD=OFF \
+      -DENABLE_CTEST=OFF ${FLYCAST_CMAKE_ARGS:-} 2>&1 | tee "$WORK/flycast-configure.log"
+    [ "${PIPESTATUS[0]}" = 0 ] && break
+    echo "Flycast build: cmake configure failed with USE_HOST_SDL=$hostsdl (log: $WORK/flycast-configure.log)"
+    [ "$hostsdl" = OFF ] && return 1
+  done
   cmake --build "$bld" -j"$J" 2>&1 | tee "$WORK/flycast-compile.log"
   [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast build: compile failed (log: $WORK/flycast-compile.log)"; return 1; }
   [ -f "$bld/flycast" ] || { echo "Flycast build: no flycast binary produced in $bld"; return 1; }
   mkdir -p "$out"; cp "$bld/flycast" "$out/flycast"; ${CROSS}strip "$out/flycast" || true
+  glibc_ok "$out/flycast" || { rm -rf "$out"; return 1; }
   echo "built Flycast $tag -> $out/flycast"
 }
 flycast_install() {
@@ -343,10 +425,63 @@ flycast_install() {
       [ -n "$(sudo find "$WORK/rootfs/lib" "$WORK/rootfs/usr/lib" -name "$lib" -print -quit 2>/dev/null)" ] || missing="$missing $lib"
     done
     [ -z "$missing" ] || echo "WARNING: Flycast needs libraries that are not in the rootfs:$missing (add their Debian packages to the debootstrap --include list)"
+    # the binary must really be in the rootfs, be an arm64 executable, and be reachable through the wrapper's lookup
+    if ! sudo test -x "$WORK/rootfs/opt/flycast/flycast" || ! readelf -h "$WORK/rootfs/opt/flycast/flycast" 2>/dev/null | grep -q AArch64; then
+      echo "ERROR: /opt/flycast/flycast is missing or is not an arm64 binary in the rootfs"; [ "${FLYCAST_REQUIRED:-0}" != 1 ] || exit 1
+    fi
     echo "installed standalone Flycast"
   else
-    echo "WARNING: standalone Flycast could not be built; Tools > Flycast will say it is missing"
+    echo
+    echo "################################################################################"
+    echo "# WARNING: standalone Flycast could NOT be built. The image will contain no    #"
+    echo "# /opt/flycast/flycast, so Tools > Flycast prints 'flycast is not installed'.  #"
+    echo "# Run  ./build.sh flycast  to see the error; logs in $WORK/flycast-*.log"
+    echo "################################################################################"
+    echo
     [ "${FLYCAST_REQUIRED:-0}" != 1 ] || exit 1
+  fi
+}
+# ---- Flycast libretro core (GLES), compiled from source -----------------------------------------------------------------
+# Debian's RetroArch is built against OpenGL ES (the only GL the H700 / Panfrost exposes through KMS), but the prebuilt
+# flycast_libretro.so from the libretro buildbot asks for a desktop-GL context -> "Requesting OpenGL context, but RetroArch
+# is compiled against OpenGLES" and the game never starts. So the core is built here with GLES, reusing the sysroot, the
+# sources and the toolchain file of flycast_build.  FLYCAST_CORE=0 skips it (the buildbot core is then used, GL-only).
+flycast_core_build() {
+  local src="$WORK/flycast-src" sysroot="$WORK/flycast-sysroot" bld="$WORK/flycast-core-build" out="$WORK/flycast-core-out" so
+  if [ -z "${FLYCAST_REBUILD:-}" ] && [ -s "$out/flycast_libretro.so" ]; then
+    if glibc_ok "$out/flycast_libretro.so"; then echo "using cached Flycast core: $out/flycast_libretro.so"; return 0; fi
+    echo "cached Flycast core is incompatible with the rootfs's glibc: rebuilding"; rm -rf "$out" "$bld"
+  fi
+  # sysroot + sources + toolchain.cmake come from flycast_build (it returns at once when its own output is cached)
+  if [ ! -f "$sysroot/.rgos-ok" ] || [ ! -d "$src/.git" ] || [ ! -f "$WORK/flycast-build/toolchain.cmake" ]; then
+    flycast_build || { echo "Flycast core build: sysroot/sources are not available"; return 1; }
+  fi
+  flycast_sysroot || return 1      # re-validates (and if needed recreates) the sysroot against the rootfs's glibc
+  mkdir -p "$bld"; cp "$WORK/flycast-build/toolchain.cmake" "$bld/toolchain.cmake"
+  # the core is a shared library: no -static-libstdc++ needed to be changed, but keep the same rpath-link settings
+  export PKG_CONFIG_SYSROOT_DIR="$sysroot"
+  export PKG_CONFIG_LIBDIR="$sysroot/usr/lib/aarch64-linux-gnu/pkgconfig:$sysroot/usr/lib/pkgconfig:$sysroot/usr/share/pkgconfig"
+  cmake -S "$src" -B "$bld" -DCMAKE_TOOLCHAIN_FILE="$bld/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
+    -DLIBRETRO=ON -DUSE_GLES=ON -DUSE_VULKAN=OFF -DUSE_HOST_LIBZIP=OFF -DUSE_BREAKPAD=OFF \
+    -DENABLE_CTEST=OFF ${FLYCAST_CORE_CMAKE_ARGS:-} 2>&1 | tee "$WORK/flycast-core-configure.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast core build: cmake configure failed (log: $WORK/flycast-core-configure.log)"; return 1; }
+  cmake --build "$bld" -j"$J" 2>&1 | tee "$WORK/flycast-core-compile.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast core build: compile failed (log: $WORK/flycast-core-compile.log)"; return 1; }
+  so=$(find "$bld" -maxdepth 2 -name 'flycast_libretro.so' -print -quit)
+  [ -n "$so" ] || so=$(find "$bld" -maxdepth 2 -name 'libflycast*.so' -print -quit)
+  [ -n "$so" ] || { echo "Flycast core build: no libretro .so produced in $bld"; return 1; }
+  mkdir -p "$out"; cp "$so" "$out/flycast_libretro.so"; ${CROSS}strip --strip-unneeded "$out/flycast_libretro.so" || true
+  glibc_ok "$out/flycast_libretro.so" || { rm -rf "$out"; return 1; }
+  echo "built Flycast libretro core (GLES) -> $out/flycast_libretro.so"
+}
+flycast_core_install() {
+  local d="$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro"
+  [ "${FLYCAST_CORE:-1}" = 0 ] && { echo "skipping GLES Flycast core (FLYCAST_CORE=0)"; return 0; }
+  if flycast_core_build; then
+    sudo install -d "$d"; sudo install -m 755 "$WORK/flycast-core-out/flycast_libretro.so" "$d/flycast_libretro.so"
+    echo "installed GLES Flycast libretro core"
+  else
+    echo "WARNING: GLES Flycast core could not be built; Dreamcast games in RetroArch will fail with the buildbot (desktop-GL) core"
   fi
 }
 rootfs() {
@@ -481,6 +616,8 @@ rootfs() {
   rm -f "$CORE_ZIP"
   # Standalone Flycast (Tools > Flycast): compiled from source (see flycast_build), optional.
   flycast_install
+  # GLES build of the libretro core replaces the buildbot (desktop-GL) one downloaded above
+  flycast_core_install
   # FinalBurn Neo: arcade + Neo Geo. Unlike the cores above this one is required (it is the default for the arcade and
   # neogeo systems), so a failed download stops the build.
   FBNEO_ZIP="$WORK/fbneo_libretro.so.zip"
@@ -751,6 +888,7 @@ update() {
   [ -x "$WORK/rootfs/usr/bin/retroarch" ] || { echo "this rootfs has no RetroArch: re-run ./build.sh rootfs once (it now installs retroarch + libretro-mgba)"; exit 1; }
   BUILD_ID=${BUILD_ID:-$(date -u +%Y%m%d-%H%M%S)}
   flycast_install      # compiles on first use, then just copies the cached binary
+  flycast_core_install # same for the GLES libretro core
   apply_overlay
   bootfiles
   make_update_tar
@@ -799,7 +937,7 @@ PT
 
 need git make gcc sfdisk; [ -n "$CROSS" ] && need ${CROSS}gcc
 case "${1:-all}" in
-  flycast) flycast_build;; tfa) tfa;; uboot) uboot;; kernel) kernel;; rootfs) rootfs;; image) image;; update) update;;
+  flycast) flycast_build;; flycastcore) flycast_core_build;; tfa) tfa;; uboot) uboot;; kernel) kernel;; rootfs) rootfs;; image) image;; update) update;;
   all) tfa; uboot; kernel; rootfs; image;;
   *) echo "unknown stage/device: ${1:-}"; echo "usage: ./build all | ./build.sh [rg34xxsp|rg35xxsp] [all|tfa|uboot|kernel|rootfs|image|update]"; exit 1;;
 esac
