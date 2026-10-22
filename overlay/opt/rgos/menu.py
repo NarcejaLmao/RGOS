@@ -12,6 +12,7 @@ from evpad import EvPads, CODES as EV_CODES, EV_KEY, EV_ABS
 import fbout
 import splash
 import wifictl
+import filemanager
 try:
     import sdcard                      # second SD card (optional: the menu works without it)
 except Exception:
@@ -447,7 +448,19 @@ def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
 
 HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("tools", "Tools"), ("settings", "Settings")]
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
-TOOLS = [("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
+TOOLS = [("files", "File Manager", "Browse, copy, move, rename and delete files on the SD cards", "@view:files"),
+         ("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
+def fm_roots():
+    """Storage the file manager may touch: the ROMS card, plus the second SD card when it is mounted."""
+    roots = [ROMS_ROOT]
+    sd = load_json("/etc/rgos/sdcard.json", {"enabled": True, "mountpoint": "/media/roms2"})
+    mp = sd.get("mountpoint", "/media/roms2")
+    if sd.get("enabled", True) and mp and os.path.ismount(mp):
+        roots.append(mp)
+    return roots
+
+
+FM_ROWS = 7                                    # visible rows in the file manager list
 # rows of Settings, in order (ids)
 SETTINGS_ROWS = ["theme", "splash", "emulators", "calib", "bmap", "wifi", "info"]
 RECENT_MAX = 20
@@ -999,6 +1012,7 @@ def main():
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
     cal = bmap = None
     set_idx, tool_idx, kb = 0, 0, None
+    fm, fm_pop = None, None                    # file manager (Tools > File Manager) and its popup (menu / confirm / info)
     emu_idx = 0
     wconf, wscan, wf_idx, wf_msg, wf_msg_until, wf_pending = wifictl.load_conf(), wifictl.Scanner(), 0, "", 0.0, ("", False)
 
@@ -1159,7 +1173,7 @@ def main():
             if a == "quit":
                 code = EXIT_POWER
             elif a == "menu":                  # MENU / home button: back to the home screen
-                if view in ("systems", "games", "recents", "tools", "settings", "wifi", "info"):
+                if view in ("systems", "games", "recents", "tools", "settings", "wifi", "info", "files"):
                     view = "home"
                 elif view == "calib" and cal and cal.state in ("done", "fail"):
                     view = "home"
@@ -1217,7 +1231,82 @@ def main():
                 elif a == "b":
                     view = "home"
                 elif a == "a":
-                    code = launch(TOOLS[tool_idx][3])
+                    tgt = TOOLS[tool_idx][3]
+                    if tgt == "@view:files":
+                        fm, fm_pop, view = filemanager.FileManager(fm_roots()), None, "files"
+                    else:
+                        code = launch(tgt)
+            elif view == "files":
+                if fm.busy:
+                    pass                       # a copy / delete is running: ignore buttons until it is done
+                elif fm_pop:
+                    kind = fm_pop["kind"]
+                    if kind == "info":
+                        if a in ("a", "b"):
+                            fm_pop = None
+                    elif kind == "confirm":
+                        if a in ("left", "right", "up", "down"):
+                            fm_pop["sel"] = 1 - fm_pop["sel"]
+                        elif a == "b":
+                            fm_pop = None
+                        elif a == "a":
+                            if fm_pop["sel"] == 0:
+                                fm.delete()
+                            fm_pop = None
+                    else:
+                        if a in ("up", "down"):
+                            fm_pop["sel"] = (fm_pop["sel"] + (1 if a == "down" else -1)) % len(fm_pop["items"])
+                        elif a == "b":
+                            fm_pop = None
+                        elif a == "a":
+                            act = fm_pop["items"][fm_pop["sel"]][0]
+                            fm_pop = None
+                            if act == "copy":
+                                fm.copy()
+                            elif act == "cut":
+                                fm.cut()
+                            elif act == "paste":
+                                fm.paste()
+                            elif act == "rename":
+                                kb, view = Kbd("fm_rename", "Rename", fm.current()["name"], False), "kbd"
+                            elif act == "mkdir":
+                                kb, view = Kbd("fm_mkdir", "New folder name", "", False), "kbd"
+                            elif act == "delete":
+                                fm_pop = {"kind": "confirm", "sel": 1, "n": len(fm.targets())}
+                            elif act == "info":
+                                fm_pop = {"kind": "info", "lines": fm.info()}
+                else:
+                    fm.msg = ""
+                    if a in ("up", "down"):
+                        fm.wrap_cursor(1 if a == "down" else -1)
+                    elif a in ("l", "left"):
+                        fm.move_cursor(-FM_ROWS)
+                    elif a in ("r", "right"):
+                        fm.move_cursor(FM_ROWS)
+                    elif a == "a":
+                        if not fm.open_current() and fm.current():
+                            fm_pop = {"kind": "info", "lines": fm.info()}
+                    elif a == "b":
+                        if not fm.go_up():
+                            view = "tools"
+                    elif a == "y":
+                        fm.toggle_mark()
+                    elif a == "x":
+                        items = []
+                        if fm.cwd is not None:
+                            if fm.targets():
+                                items += [("copy", "Copy"), ("cut", "Cut")]
+                            if fm.can_paste():
+                                items.append(("paste", "Paste here (%d)" % len(fm.clip)))
+                            if fm.current() and not fm.marked:
+                                items.append(("rename", "Rename"))
+                            items.append(("mkdir", "New folder"))
+                            if fm.targets():
+                                items.append(("delete", "Delete" + (" (%d)" % len(fm.marked) if fm.marked else "")))
+                        if fm.current():
+                            items.append(("info", "Details"))
+                        if items:
+                            fm_pop = {"kind": "menu", "items": items, "sel": 0}
             elif view == "settings":
                 if a in ("up", "down"):
                     set_idx = (set_idx + (1 if a == "down" else -1)) % len(SETTINGS_ROWS)
@@ -1281,7 +1370,12 @@ def main():
                     kb.show = not kb.show
                 elif a in ("a", "start"):
                     res = kb.press() if a == "a" else "ok"
-                    if res and kb.field.startswith("wifi"):
+                    if res and kb.field.startswith("fm_"):
+                        if res == "cancel" or (kb.field == "fm_rename" and fm.rename(kb.text)) or (kb.field == "fm_mkdir" and fm.mkdir(kb.text)):
+                            view = "files"
+                        else:
+                            view, kb = "files", None       # invalid / duplicate name: fm.msg says why
+                    elif res and kb.field.startswith("wifi"):
                         view = "wifi"
                         if res == "ok" and kb.field == "wifi_ssid":
                             if kb.text.strip():
@@ -1385,6 +1479,8 @@ def main():
             info = "Recents   %d game%s   %s" % (len(games), "" if len(games) == 1 else "s", clk)
         elif view == "tools":
             info = "Tools   %s" % clk
+        elif view == "files" or (view == "kbd" and kb.field.startswith("fm_")):
+            info = "Tools > Files   %s" % clk
         elif view in ("settings", "calib", "bmap"):
             info = "Settings   %s" % clk
         elif view == "info":
@@ -1420,7 +1516,7 @@ def main():
             x0 = (W - (2 * bw + gap)) // 2
             subs = {"games": "%d games" % len(all_games),
                     "recents": "%d recent" % len(recent_games()),
-                    "tools": "RetroArch",
+                    "tools": "File Manager, RetroArch",
                     "settings": "Theme, Wi-Fi, info, sticks, buttons"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
                 bx, by, sel = x0 + (i % 2) * (bw + gap), top_y + (i // 2) * (bh + gap), i == home_idx
@@ -1436,6 +1532,82 @@ def main():
                 canvas.blit(f_row.render(tname, True, TEXT if sel else DIM), (list_x + 24, by + 5))
                 canvas.blit(f_small.render(fit(f_small, tdesc, W - 2 * list_x - 48), True, DIM), (list_x + 24, by + 30))
             hint = "A Open   B Back   START+SELECT Power off"
+        elif view == "files":
+            canvas.blit(f_small.render(tail_fit(f_small, fm.title(), W - 2 * list_x), True, ACCENT), (list_x, 68))
+            n_fm = len(fm.entries)
+            first_fm = min(max(0, fm.idx - FM_ROWS // 2), max(0, n_fm - FM_ROWS))
+            if not n_fm:
+                canvas.blit(f_row.render("Empty folder   (X for options)", True, DIM), (list_x + 10, 110))
+            fw_ = W - 2 * list_x - 14
+            for slot, e in enumerate(fm.entries[first_fm:first_fm + FM_ROWS]):
+                i = first_fm + slot
+                by, sel = 92 + slot * 44, i == fm.idx
+                draw_button(canvas, (list_x, by, fw_, 40), SEL_BG if sel else PANEL, 10, 3, sel)
+                ck = (list_x + 12, by + 12, 16, 16)                       # mark box (Y)
+                pygame.draw.rect(canvas, ACCENT if sel else DIM, ck, 2, border_radius=3)
+                if e["path"] in fm.marked:
+                    pygame.draw.rect(canvas, ACCENT, (ck[0] + 4, ck[1] + 4, 8, 8), border_radius=2)
+                ic = ACCENT if e["dir"] else DIM                           # folder / file icon
+                if e["dir"]:
+                    pygame.draw.rect(canvas, ic, (list_x + 40, by + 11, 10, 5), border_radius=2)
+                    pygame.draw.rect(canvas, ic, (list_x + 40, by + 15, 22, 14), border_radius=3)
+                else:
+                    pygame.draw.rect(canvas, ic, (list_x + 44, by + 11, 15, 18), 2, border_radius=2)
+                size_s = "" if e["dir"] else filemanager.human_size(e["size"])
+                sz = f_small.render(size_s, True, DIM)
+                canvas.blit(sz, (list_x + fw_ - 16 - sz.get_width(), by + 12))
+                canvas.blit(f_row.render(fit(f_row, e["name"], fw_ - 80 - 16 - sz.get_width() - 16), True, TEXT if sel else DIM),
+                            (list_x + 72, by + 7))
+            if n_fm > FM_ROWS:
+                bar_h = FM_ROWS * 44 - 4
+                th = max(24, int(bar_h * FM_ROWS / n_fm))
+                ty = 92 + int((bar_h - th) * first_fm / max(1, n_fm - FM_ROWS))
+                pygame.draw.rect(canvas, PANEL, (W - list_x - 6, 92, 6, bar_h), border_radius=3)
+                pygame.draw.rect(canvas, ACCENT, (W - list_x - 6, ty, 6, th), border_radius=3)
+            status = fm.busy or fm.msg or ("%d marked" % len(fm.marked) if fm.marked else
+                                           ("Clipboard: %d item%s to %s" % (len(fm.clip), "" if len(fm.clip) == 1 else "s", "move" if fm.clip_cut else "copy")) if fm.clip else "")
+            canvas.blit(f_small.render(fit(f_small, status, W - 2 * list_x), True, ACCENT), (list_x, 420))
+            if fm.busy:
+                bx, by, bw, bh = W // 2 - 150, H // 2 - 30, 300, 60
+                pygame.draw.rect(canvas, PANEL, (bx, by, bw, bh), border_radius=12)
+                pygame.draw.rect(canvas, ACCENT, (bx, by, bw, bh), 2, border_radius=12)
+                t = f_row.render(fm.busy, True, TEXT)
+                canvas.blit(t, (bx + (bw - t.get_width()) // 2, by + 18))
+            elif fm_pop:
+                if fm_pop["kind"] == "menu":
+                    its = fm_pop["items"]
+                    bw, bh = 280, 24 + 40 * len(its)
+                    bx, by = (W - bw) // 2, max(70, (H - bh) // 2)
+                    pygame.draw.rect(canvas, PANEL, (bx, by, bw, bh), border_radius=12)
+                    pygame.draw.rect(canvas, ACCENT, (bx, by, bw, bh), 2, border_radius=12)
+                    for k, (_id, label) in enumerate(its):
+                        ry, rs = by + 12 + k * 40, k == fm_pop["sel"]
+                        if rs:
+                            pygame.draw.rect(canvas, SEL_BG, (bx + 8, ry, bw - 16, 36), border_radius=8)
+                        canvas.blit(f_row.render(label, True, TEXT if rs else DIM), (bx + 24, ry + 6))
+                elif fm_pop["kind"] == "confirm":
+                    bw, bh = 340, 130
+                    bx, by = (W - bw) // 2, (H - bh) // 2
+                    pygame.draw.rect(canvas, PANEL, (bx, by, bw, bh), border_radius=12)
+                    pygame.draw.rect(canvas, ACCENT, (bx, by, bw, bh), 2, border_radius=12)
+                    q = "Delete %d item%s?" % (fm_pop["n"], "" if fm_pop["n"] == 1 else "s")
+                    t = f_row.render(q, True, TEXT)
+                    canvas.blit(t, (bx + (bw - t.get_width()) // 2, by + 18))
+                    for k, label in enumerate(("Yes", "No")):
+                        rx, rs = bx + 30 + k * 150, k == fm_pop["sel"]
+                        draw_button(canvas, (rx, by + 70, 130, 38), SEL_BG if rs else BG, 10, 3, rs)
+                        t = f_row.render(label, True, TEXT if rs else DIM)
+                        canvas.blit(t, (rx + (130 - t.get_width()) // 2, by + 77))
+                else:
+                    lines = fm_pop["lines"]
+                    bw, bh = 400, 28 + 26 * len(lines)
+                    bx, by = (W - bw) // 2, (H - bh) // 2
+                    pygame.draw.rect(canvas, PANEL, (bx, by, bw, bh), border_radius=12)
+                    pygame.draw.rect(canvas, ACCENT, (bx, by, bw, bh), 2, border_radius=12)
+                    for k, ln in enumerate(lines):
+                        canvas.blit((f_row if k == 0 else f_small).render(fit(f_row if k == 0 else f_small, ln, bw - 40), True, TEXT if k == 0 else DIM),
+                                    (bx + 20, by + 14 + k * 26))
+            hint = ("A Select   B Cancel" if fm_pop else "A Open   B Up   Y Mark   X Options   L/R Page")
         elif view == "settings":
             wst = wifictl.status()
             spl = {"on": "On: video and sound", "silent": "On: video only", "off": "Off"}[splash.mode_of(state)]
