@@ -34,6 +34,17 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            ("segacd", "CD", "retroarch", (".cue", ".chd", ".iso", ".m3u", ".ccd"), "Sega CD / Mega-CD"),
            ("sega32x", "32X", "retroarch", (".32x", ".md", ".gen", ".smd", ".bin"), "Sega 32X"),
            ("segapico", "PICO", "retroarch", (".pico", ".bin"), "Sega Pico"),
+           # Atari consoles: Stella (2600), Atari800 (5200, needs 5200.rom in ROMS/bios/atari5200/), ProSystem (7800).
+           ("atari2600", "A26", "retroarch", (".a26", ".bin"), "Atari 2600"),
+           ("atari5200", "A52", "retroarch", (".a52", ".bin", ".car"), "Atari 5200"),
+           ("atari7800", "A78", "retroarch", (".a78", ".bin"), "Atari 7800"),
+           # Neo Geo Pocket and Pocket Color (Beetle NeoPop; RACE is the lighter alternative). No BIOS needed.
+           ("ngp", "NGP", "retroarch", (".ngp", ".ngc", ".ngpc"), "Neo Geo Pocket / Color"),
+           # WonderSwan and WonderSwan Color (Beetle Cygne). No BIOS needed.
+           ("wonderswan", "WS", "retroarch", (".ws", ".wsc", ".pc2"), "WonderSwan / Color"),
+           # FBNeo runs arcade boards (CPS1/2/3, Konami, Irem, ...) and Neo Geo; ROMs stay zipped, named as MAME/FBNeo expect.
+           ("arcade", "ARC", "retroarch", (".zip", ".7z"), "Arcade (FinalBurn Neo)"),
+           ("neogeo", "NEO", "retroarch", (".zip", ".7z"), "Neo Geo"),
            ("ports", "PORT", "native", (".sh",), "Ports")]
 ROMS_DIR = os.path.join(ROMS_ROOT, "roms")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
@@ -290,7 +301,10 @@ def default_core(sid):
     return {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "fceumm", "snes": "snes9x", "genesis": "genesis_plus_gx",
             "mastersystem": "genesis_plus_gx", "gamegear": "genesis_plus_gx",
             "sg1000": "genesis_plus_gx", "segacd": "genesis_plus_gx",
-            "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx"}.get(sid, "")
+            "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx",
+            "arcade": "fbneo", "neogeo": "fbneo",
+            "atari2600": "stella2014", "atari5200": "atari800", "atari7800": "prosystem",
+            "ngp": "mednafen_ngp", "wonderswan": "mednafen_wswan"}.get(sid, "")
 
 
 # Only offer cores known to support the selected system. The list is intersected
@@ -300,7 +314,7 @@ SYSTEM_CORE_COMPATIBILITY = {
     "gb": ("gambatte", "sameboy", "gearboy", "mgba", "vbam", "mednafen_gb"),
     "gbc": ("gambatte", "sameboy", "gearboy", "mgba", "vbam", "mednafen_gb"),
     "nes": ("fceumm", "nestopia", "quicknes", "mesen", "mesen_s"),
-    "snes": ("snes9x", "bsnes", "bsnes_hd_beta", "bsnes2014_accuracy", "bsnes2014_balanced", "bsnes2014_performance", "bsnes_mercury_accuracy", "bsnes_mercury_balanced", "bsnes_mercury_performance"),
+    "snes": ("snes9x", "snes9x2010", "bsnes", "bsnes_hd_beta", "bsnes2014_accuracy", "bsnes2014_balanced", "bsnes2014_performance", "bsnes_mercury_accuracy", "bsnes_mercury_balanced", "bsnes_mercury_performance"),
     "genesis": ("genesis_plus_gx", "picodrive"),
     "mastersystem": ("genesis_plus_gx", "picodrive"),
     "gamegear": ("genesis_plus_gx", "picodrive"),
@@ -308,6 +322,13 @@ SYSTEM_CORE_COMPATIBILITY = {
     "segacd": ("genesis_plus_gx", "picodrive"),
     "sega32x": ("genesis_plus_gx", "picodrive"),
     "segapico": ("genesis_plus_gx",),
+    "atari2600": ("stella2014", "stella"),
+    "atari5200": ("atari800",),
+    "atari7800": ("prosystem",),
+    "ngp": ("mednafen_ngp", "race"),
+    "wonderswan": ("mednafen_wswan",),
+    "arcade": ("fbneo",),
+    "neogeo": ("fbneo",),
 }
 
 

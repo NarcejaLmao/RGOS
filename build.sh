@@ -311,6 +311,69 @@ rootfs() {
   sudo unzip -o "$SNES9X_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract Snes9x core"; exit 1; }
   sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/snes9x_libretro.so" || { echo "Downloaded archive did not contain snes9x_libretro.so"; exit 1; }
   rm -f "$SNES9X_ZIP"
+  # Alternative cores, selectable per system in Settings > Emulators (the menu only offers cores that are installed):
+  #   gpsp (GBA, lighter than mGBA), snes9x2010 (SNES, much faster on weak CPUs), nestopia (NES, accuracy),
+  #   picodrive (Mega Drive / SMS / GG / Sega CD / 32X, faster than Genesis Plus GX).
+  # They are optional: a failed download only prints a warning, the default cores above are what the image needs.
+  for CORE in gpsp snes9x2010 nestopia picodrive; do
+    CORE_ZIP="$WORK/${CORE}_libretro.so.zip"
+    if curl -fL --retry 3 --retry-delay 2 \
+         "https://buildbot.libretro.com/nightly/linux/aarch64/latest/${CORE}_libretro.so.zip" -o "$CORE_ZIP" \
+       && sudo unzip -o "$CORE_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null \
+       && sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/${CORE}_libretro.so"; then
+      echo "installed optional core: $CORE"
+    else
+      echo "WARNING: optional core $CORE could not be installed; it will not appear in Settings > Emulators"
+    fi
+    rm -f "$CORE_ZIP"
+  done
+  # Atari 2600 / 5200 / 7800 cores. Optional like the alternatives above: if one is missing the system's games are still
+  # listed, and launching one prints "RetroArch core ... not found" in the port log instead of breaking the image build.
+  for CORE in stella2014 atari800 prosystem; do
+    CORE_ZIP="$WORK/${CORE}_libretro.so.zip"
+    if curl -fL --retry 3 --retry-delay 2 \
+         "https://buildbot.libretro.com/nightly/linux/aarch64/latest/${CORE}_libretro.so.zip" -o "$CORE_ZIP" \
+       && sudo unzip -o "$CORE_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null \
+       && sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/${CORE}_libretro.so"; then
+      echo "installed Atari core: $CORE"
+    else
+      echo "WARNING: Atari core $CORE could not be installed; its system will not launch games"
+    fi
+    rm -f "$CORE_ZIP"
+  done
+  # Neo Geo Pocket / Color cores: mednafen_ngp (Beetle NeoPop, default) and race (lighter alternative). Optional, like the Atari cores.
+  for CORE in mednafen_ngp race; do
+    CORE_ZIP="$WORK/${CORE}_libretro.so.zip"
+    if curl -fL --retry 3 --retry-delay 2 \
+         "https://buildbot.libretro.com/nightly/linux/aarch64/latest/${CORE}_libretro.so.zip" -o "$CORE_ZIP" \
+       && sudo unzip -o "$CORE_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null \
+       && sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/${CORE}_libretro.so"; then
+      echo "installed Neo Geo Pocket core: $CORE"
+    else
+      echo "WARNING: Neo Geo Pocket core $CORE could not be installed"
+    fi
+    rm -f "$CORE_ZIP"
+  done
+  # WonderSwan / Color core (Beetle Cygne). Optional, like the other extra cores.
+  CORE=mednafen_wswan; CORE_ZIP="$WORK/${CORE}_libretro.so.zip"
+  if curl -fL --retry 3 --retry-delay 2 \
+       "https://buildbot.libretro.com/nightly/linux/aarch64/latest/${CORE}_libretro.so.zip" -o "$CORE_ZIP" \
+     && sudo unzip -o "$CORE_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null \
+     && sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/${CORE}_libretro.so"; then
+    echo "installed WonderSwan core: $CORE"
+  else
+    echo "WARNING: WonderSwan core $CORE could not be installed"
+  fi
+  rm -f "$CORE_ZIP"
+  # FinalBurn Neo: arcade + Neo Geo. Unlike the cores above this one is required (it is the default for the arcade and
+  # neogeo systems), so a failed download stops the build.
+  FBNEO_ZIP="$WORK/fbneo_libretro.so.zip"
+  curl -fL --retry 3 --retry-delay 2 \
+    "https://buildbot.libretro.com/nightly/linux/aarch64/latest/fbneo_libretro.so.zip" \
+    -o "$FBNEO_ZIP" || { echo "Failed to download the official ARM64 FBNeo core"; exit 1; }
+  sudo unzip -o "$FBNEO_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null || { echo "Failed to extract FBNeo core"; exit 1; }
+  sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/fbneo_libretro.so" || { echo "Downloaded archive did not contain fbneo_libretro.so"; exit 1; }
+  rm -f "$FBNEO_ZIP"
   apply_overlay
   sudo cp -a "$WORK/modules/lib/modules" "$WORK/rootfs/lib/"
   # make sure module dependency/alias maps exist so udev auto-loads the joypad/ADC/PWM drivers at boot
