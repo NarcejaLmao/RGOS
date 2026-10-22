@@ -228,9 +228,16 @@ run_port() {
     mkdir -p /media/roms/saves/ports/data /media/roms/saves/ports/config /var/lib/rgos/shader-cache 2>/dev/null
     local PORT_NICE=-5 MESA_NO_ERROR=1 MESA_GLTHREAD=false PIN_HELPERS=0
     [ -r /etc/rgos/ports.conf ] && . /etc/rgos/ports.conf
+    # Launcher scripts edited on Windows have CRLF line endings; bash then fails on the first line ("bash\r: not found").
+    grep -q $'\r' "$script" 2>/dev/null && { sed -i 's/\r$//' "$script" 2>/dev/null && echo "converted CRLF line endings in $script" >> "$PORTLOG"; }
     /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1          # performance profile, undone below
+    ra_graphics 1       # text console off the screen while the port owns KMS (same as for RetroArch)
     (
         cd "$dir" || exit 1
+        # The session itself runs with SDL_VIDEODRIVER=dummy (the menu draws through the framebuffer). That value must NOT
+        # reach a port: SDL would pick the dummy driver and the game runs (or exits) without ever showing a picture.
+        # Let SDL choose its real driver (KMSDRM). RGOS_* only configure the menu's own framebuffer output.
+        unset SDL_VIDEODRIVER RGOS_VIDEO RGOS_FB_DBUF RGOS_FB_VSYNC
         export ROMS_ROOT=/media/roms PORTS_DIR=/media/roms/roms/ports
         export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
         export XDG_DATA_HOME=/media/roms/saves/ports/data XDG_CONFIG_HOME=/media/roms/saves/ports/config
@@ -250,6 +257,7 @@ run_port() {
     kill "$kpid" 2>/dev/null
     kill -KILL -- "-$pid" 2>/dev/null    # leftovers of the port's process group
     rm -f /run/rgos/port.pid
+    ra_graphics 0
     /opt/rgos/rgos-perf off >> "$PORTLOG" 2>&1
     dump_port_logs "$script"
     return 0
