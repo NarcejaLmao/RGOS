@@ -237,6 +237,20 @@ def load_daemon():
     return mod
 
 
+class WakeSources(unittest.TestCase):
+    def test_only_power_key_devices_can_wake_system(self):
+        m = load_daemon()
+        with tempfile.TemporaryDirectory() as root:
+            mk(root, "class/input/event0/device/power/wakeup", "enabled")
+            mk(root, "class/input/event1/device/power/wakeup", "enabled")
+            class Pads:
+                keybits = {"/dev/input/event0": {116, 115}, "/dev/input/event1": {304, 305}}
+            enabled = m.configure_wake_sources(Pads(), set(), sys_root=root)
+            self.assertEqual(rdf(root, "class/input/event0/device/power/wakeup").strip(), "enabled")
+            self.assertEqual(rdf(root, "class/input/event1/device/power/wakeup").strip(), "disabled")
+            self.assertEqual(enabled, {"/dev/input/event0", "/dev/input/event1"})
+
+
 class Daemon(unittest.TestCase):
     """Runs rgos-hw's main loop with a fake clock, fake input events and fake sysfs."""
     def setUp(self):

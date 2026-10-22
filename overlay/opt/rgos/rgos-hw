@@ -44,6 +44,31 @@ def _stop(*_):
     STOP = True
 
 
+def configure_wake_sources(pads, enabled=None, sys_root="/sys"):
+    """Allow only dedicated power-key input devices to wake the suspended system.
+
+    Gamepads, keyboards and other input devices can generate wake IRQs while the
+    device is being suspended. Leaving their wake flags enabled makes suspend
+    immediately return on some handheld kernels.
+    """
+    if enabled is None:
+        enabled = set()
+    for path, keys in getattr(pads, "keybits", {}).items():
+        if path in enabled:
+            continue
+        wake = os.path.join(sys_root, "class", "input", os.path.basename(path), "device", "power", "wakeup")
+        desired = "enabled" if KEY_POWER in keys else "disabled"
+        try:
+            with open(wake, "w") as f:
+                f.write(desired + "\n")
+            enabled.add(path)
+            log("input wake %s: %s" % (desired, path))
+        except OSError:
+            # Some input devices do not expose a wakeup control; leave them alone.
+            pass
+    return enabled
+
+
 class Hw:
     def __init__(self, conf):
         self.conf = conf
@@ -242,20 +267,9 @@ def daemon():
                 next_batt = now + 10.0
                 hw.battery_tick()
             events = pads.read()
-            # Only mark input devices that actually expose KEY_POWER as wake sources.
-            # Some kernels/drivers do not support wake from suspend; in that case suspend
-            # still freezes everything but may require a hardware reset to resume.
-            for path, keys in getattr(pads, "keybits", {}).items():
-                if KEY_POWER not in keys or path in wakeup_enabled:
-                    continue
-                wake = "/sys/class/input/%s/device/power/wakeup" % os.path.basename(path)
-                try:
-                    with open(wake, "w") as f:
-                        f.write("enabled\n")
-                    wakeup_enabled.add(path)
-                    log("power key wake enabled:", path)
-                except OSError:
-                    pass
+            # Restrict wake IRQs to power-key devices. Gamepad/keyboard wake IRQs
+            # are a common cause of an immediate resume on handheld kernels.
+            wakeup_enabled = configure_wake_sources(pads, wakeup_enabled)
             for t, c, v in events:
                 if t != EV_KEY:
                     continue
@@ -265,6 +279,14 @@ def daemon():
                     elif v == 0 and t_power is not None:
                         if not long_done:
                             if hw.short == "suspend":
+                                # Let the key-up IRQ settle before entering suspend, then
+                                # discard queued input events so the same press cannot
+                                # be interpreted as a second action after resume.
+                                time.sleep(0.30)
+                                try:
+                                    pads.read()
+                                except Exception:
+                                    pass
                                 hw.suspend("short power press")
                             elif hw.short == "screen":
                                 hw.screen(not hw.screen_on)
