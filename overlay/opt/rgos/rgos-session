@@ -144,7 +144,11 @@ ra_run_once() {
 ra_run() {
     local label=$1 lines=$2; shift 2
     ra_run_once "$label" 0 "$lines" "$@"
-    if [ "$RA_HUNG" = 1 ]; then
+    if [ "$RA_HUNG" = 1 ] && [ "${RA_SAFE_RETRY:-1}" = 0 ]; then
+        echo "RetroArch hung; this core cannot use the safe (sdl2) profile, not retrying" >> "$PORTLOG"
+        printf '\nRetroArch stopped responding. See rgos-port-logs.txt on the boot partition.\n' > /dev/tty1 2>/dev/null
+        sleep 4
+    elif [ "$RA_HUNG" = 1 ]; then
         echo "RetroArch hung (no answer on its command port): retrying with the safe video profile" >> "$PORTLOG"
         printf '\nRetroArch stopped responding. Retrying with safe video settings...\n' > /dev/tty1 2>/dev/null
         sleep 2
@@ -163,7 +167,14 @@ ra_graphics() {     # 1 = tty1 into graphics mode (kernel console stops drawing)
 }
 run_retroarch() {
     local core=$1 rom=$2 corepath sysname
-    sysname=$(basename "$(dirname "$rom")")
+    # The system is the folder directly under roms/ (menu.py scans recursively, so a disc such as
+    # roms/dreamcast/Game/disc.gdi must not turn "Game" into the system name: BIOS, saves and states would be looked
+    # up in the wrong folders).
+    case "$rom" in
+        /media/roms/roms/*/*)  sysname=${rom#/media/roms/roms/};  sysname=${sysname%%/*} ;;
+        /media/roms2/roms/*/*) sysname=${rom#/media/roms2/roms/}; sysname=${sysname%%/*} ;;
+        *) sysname=$(basename "$(dirname "$rom")") ;;
+    esac
     corepath=$(find_core "$core") || {
         echo "RetroArch core '$core' not found" >> "$PORTLOG"
         printf '\nRetroArch core %s_libretro.so not found.\n' "$core" > /dev/tty1 2>/dev/null
@@ -185,7 +196,15 @@ run_retroarch() {
     # Per-system BIOS folders on the ROMS card. Keep firmware_directory as a
     # compatibility path for existing Sega CD setups using ROMS/firmware/.
     # Use a real file for the append config: RetroArch cannot reliably reopen Bash process-substitution paths (/dev/fd/N).
-    ra_run "$core $rom" "savefile_directory = \"/media/roms/saves/$sysname\"\nsavestate_directory = \"/media/roms/states/$sysname\"\nsystem_directory = \"/media/roms/bios/$sysname\"\nfirmware_directory = \"/media/roms/firmware\"\n" \
+    # Hardware-rendered, heavy cores (Flycast): loading the disc, creating the dynarec and compiling shaders can take far
+    # longer than the 25 s default start-up grace of rgos-raguard, during which RetroArch does not answer its command
+    # port. The guard then killed a perfectly healthy RetroArch and the retry with the sdl2 video driver (which cannot
+    # host a hardware-rendered core) exited at once -> straight back to the launcher. Give it time, and do not retry.
+    local grace=25 retry=1
+    case "$core" in flycast*) grace=120; retry=0 ;; esac
+    # Log any shared library the core cannot resolve: the usual reason a core "closes at once".
+    ldd "$corepath" 2>&1 | grep -i 'not found' | sed 's/^/core dependency missing: /' >> "$PORTLOG"
+    RA_GUARD_GRACE=$grace RA_SAFE_RETRY=$retry ra_run "$core $rom" "savefile_directory = \"/media/roms/saves/$sysname\"\nsavestate_directory = \"/media/roms/states/$sysname\"\nsystem_directory = \"/media/roms/bios/$sysname\"\nfirmware_directory = \"/media/roms/firmware\"\n" \
         -L "$corepath" "$rom"
     return 0
 }
