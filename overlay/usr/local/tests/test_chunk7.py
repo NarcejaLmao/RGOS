@@ -384,16 +384,19 @@ class Daemon(unittest.TestCase):
         m.STOP = False
         t0 = self.t[0]
         pending = sorted(script, key=lambda x: x[0])
+        def fake_sleep(_):
+            self.t[0] += tick
+            if not pending and self.t[0] > t0 + self.horizon:
+                m.STOP = True
         class FakePads:
+            keybits = {}
             def read(_):
                 out = []
                 while pending and t0 + pending[0][0] <= self.t[0]:
                     out += pending.pop(0)[1]
                 return out
-        def fake_sleep(_):
-            self.t[0] += tick
-            if not pending and self.t[0] > t0 + self.horizon:
-                m.STOP = True
+            def wait(_, timeout):          # the daemon blocks here instead of sleeping: advance the fake clock
+                fake_sleep(timeout)
         self.horizon = (script[-1][0] if script else 0) + 2
         with mock.patch.object(m, "EvPads", FakePads), mock.patch.object(m.time, "sleep", fake_sleep):
             m.daemon()

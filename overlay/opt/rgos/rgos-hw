@@ -74,6 +74,18 @@ def configure_wake_sources(pads, enabled=None, sys_root="/sys"):
     return enabled
 
 
+def idle_timeout(now, t_power, long_done, long_s, next_batt, next_audio, audio_pending):
+    """Seconds the main loop may block waiting for a key: until the next timed chore. Capped at 1 s so a SIGTERM
+    (which only sets STOP) is noticed promptly and late-appearing input devices are picked up."""
+    t = 1.0
+    t = min(t, next_batt - now)
+    if audio_pending:
+        t = min(t, next_audio - now)
+    if t_power is not None and not long_done:
+        t = min(t, t_power + long_s - now)
+    return max(0.0, t)
+
+
 class Hw:
     def __init__(self, conf):
         self.conf = conf
@@ -295,6 +307,7 @@ def daemon():
     suspend_works = True                # cleared when the kernel cannot (or will not) suspend: sleep with the screen off instead
     ignore_power_until = 0.0            # right after a real resume: the key press that woke us must not count as a new press
     next_batt, next_audio, audio_tries = 0.0, 0.0, 0
+    wake_pending, next_wake_cfg = set(), 0.0
     audio_conf = conf.get("audio", {})
     try:
         while not STOP:
@@ -311,7 +324,10 @@ def daemon():
             events = pads.read()
             # Restrict wake IRQs to power-key devices. Gamepad/keyboard wake IRQs
             # are a common cause of an immediate resume on handheld kernels.
-            wakeup_enabled = configure_wake_sources(pads, wakeup_enabled)
+            pending = set(pads.keybits) - wakeup_enabled
+            if pending and (pending != wake_pending or now >= next_wake_cfg):   # new device: at once; failures: every 3 s
+                wakeup_enabled = configure_wake_sources(pads, wakeup_enabled)
+                wake_pending, next_wake_cfg = pending, now + 3.0
             for t, c, v in events:
                 if t != EV_KEY:
                     continue
@@ -368,7 +384,8 @@ def daemon():
             if t_power is not None and not long_done and time.time() - t_power >= hw.long_s:
                 long_done = True
                 hw.poweroff("power key held")
-            time.sleep(0.03 if hw.screen_on else 0.2)       # asleep: wake up 5 times a second instead of 33
+            pads.wait(idle_timeout(time.time(), t_power, long_done, hw.long_s, next_batt, next_audio,
+                                   audio_conf.get("enable_switches", True) and audio_tries < 20))    # event-driven: no polling wakeups
     finally:
         if not hw.screen_on:
             hw.screen(True)

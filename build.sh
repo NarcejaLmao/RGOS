@@ -340,6 +340,12 @@ FSTAB
   sudo ln -sf /etc/systemd/system/rgos-firstboot.service "$W/rgos-firstboot.service"
   sudo ln -sf /etc/systemd/system/rgos-volume.service "$W/rgos-volume.service"
   sudo ln -sf /dev/null "$WORK/rootfs/etc/systemd/system/getty@tty1.service"   # RG OS owns tty1
+  # boot/CPU diet: units a single-purpose handheld never needs (masking one that is not installed is harmless)
+  for u in apt-daily.timer apt-daily.service apt-daily-upgrade.timer apt-daily-upgrade.service dpkg-db-backup.timer \
+           dpkg-db-backup.service e2scrub_all.timer e2scrub_all.service e2scrub_reap.service fstrim.timer man-db.timer \
+           systemd-networkd-wait-online.service systemd-pstore.service getty-static.service console-getty.service; do
+    sudo ln -sf /dev/null "$WORK/rootfs/etc/systemd/system/$u"
+  done
   sudo sed -i 's/^root:[^:]*:/root::/' "$WORK/rootfs/etc/shadow"                # empty root pw (dev)
 }
 # Tiny initramfs that mounts the Debian root and switch_roots. It is passed as an external initrd,
@@ -527,7 +533,7 @@ label rgos
   linux /Image
   initrd /initrd.gz
   fdt /rgos.dtb
-  append root=/dev/mmcblk0p2 rootwait rw console=tty0 quiet loglevel=3 systemd.show_status=0 vt.global_cursor_default=0 fsck.mode=skip $EXTRA
+  append root=/dev/mmcblk0p2 rootwait rw console=tty0 quiet loglevel=3 audit=0 systemd.show_status=0 vt.global_cursor_default=0 fsck.mode=skip $EXTRA
 EXT
 }
 # Update package: out/rgos-update-<BUILD_ID>.tar = manifest + SHA256SUMS + boot files + gzip'd root filesystem.

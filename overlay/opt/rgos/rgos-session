@@ -244,7 +244,9 @@ PORTLOG=/var/log/rgos-port.log
 
 while true; do
     rm -f /run/rgos/launch
-    python3 /opt/rgos/menu.py 2>>"$MENULOG"
+    # Import instead of running the file: a script run as __main__ is recompiled on every start, an imported module is cached
+    # in /opt/rgos/__pycache__ (the 80 KB menu took a noticeable moment to compile on the handheld's CPU at each launch).
+    python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import menu; menu.run()' 2>>"$MENULOG"
     rc=$?
     case $rc in
       10) rom=$(cat /run/rgos/launch 2>/dev/null)

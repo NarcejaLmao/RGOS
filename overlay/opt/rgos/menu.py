@@ -68,6 +68,7 @@ THEMES = [
     ("amber", "Amber Terminal", dict(BG=(0, 0, 0), PANEL=(22, 15, 0), SEL_BG=(54, 38, 0), ACCENT=(255, 176, 0), TEXT=(255, 205, 100), DIM=(158, 114, 38))),
     ("gameboy", "Game Boy", dict(BG=(15, 56, 15), PANEL=(28, 78, 28), SEL_BG=(48, 98, 48), ACCENT=(184, 214, 40), TEXT=(224, 248, 208), DIM=(139, 172, 15))),
     ("paper", "Paper (light)", dict(BG=(238, 235, 227), PANEL=(252, 250, 245), SEL_BG=(213, 220, 238), ACCENT=(208, 62, 38), TEXT=(32, 34, 46), DIM=(108, 112, 128))),
+    ("mustard", "MustardOS", dict(BG=(24, 22, 18), PANEL=(38, 35, 28), SEL_BG=(84, 70, 20), ACCENT=(240, 184, 0), TEXT=(245, 238, 220), DIM=(158, 148, 118))),
     ("contrast", "High Contrast", dict(BG=(0, 0, 0), PANEL=(28, 28, 28), SEL_BG=(72, 72, 72), ACCENT=(255, 235, 0), TEXT=(255, 255, 255), DIM=(176, 176, 176))),
 ]
 DEFAULT_THEME = THEMES[0][0]
@@ -342,6 +343,48 @@ def wrap(font, text, width):
 def _mix(c, t, k):
     """Blend colour c toward colour t by k (0..1)."""
     return tuple(max(0, min(255, int(c[i] + (t[i] - c[i]) * k))) for i in range(3))
+
+
+class CFont:
+    """pygame Font wrapper that remembers rendered text and measured widths. The menu redraws every frame, and re-rasterising the
+    same strings 30 times a second was the biggest CPU cost on the handheld; now each string is rendered once per colour."""
+    def __init__(self, font):
+        self._f, self._r, self._s = font, {}, {}
+
+    def render(self, text, aa, color, *bg):
+        try:
+            key = (text, aa, tuple(color), bg)
+            surf = self._r.get(key)
+        except TypeError:                      # unhashable argument: just render it
+            return self._f.render(text, aa, color, *bg)
+        if surf is None:
+            if len(self._r) > 600:
+                self._r.clear()
+            surf = self._r[key] = self._f.render(text, aa, color, *bg)
+        return surf
+
+    def size(self, text):
+        sz = self._s.get(text)
+        if sz is None:
+            if len(self._s) > 2000:
+                self._s.clear()
+            sz = self._s[text] = self._f.size(text)
+        return sz
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
+def throttled(fn, interval):
+    """fn() at most once per `interval` seconds; in between the last result is returned (for sysfs / run-file polling)."""
+    st = [-1e9, None]
+
+    def get():
+        now = time.monotonic()
+        if now - st[0] >= interval:
+            st[0], st[1] = now, fn()
+        return st[1]
+    return get
 
 
 _BTN_CACHE = {}
@@ -901,22 +944,35 @@ def main():
     canvas = pygame.Surface((W, H))
     fpath = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     if os.path.exists(fpath):
-        mk = lambda s: pygame.font.Font(fpath, s)
+        mk = lambda s: CFont(pygame.font.Font(fpath, s))
     else:
-        mk = lambda s: pygame.font.Font(None, int(s * 1.3))
+        mk = lambda s: CFont(pygame.font.Font(None, int(s * 1.3)))
     f_logo, f_big, f_row, f_small, f_tiny = mk(30), mk(22), mk(19), mk(14), mk(11)
 
     inp = Input()
     all_games = scan_roms()
-    games_of = lambda sid: [g for g in all_games if g["sid"] == sid]
+    _gcache = [None, {}]
+
+    def games_of(sid):                         # per-system lists, rebuilt only when the ROM scan is replaced (was O(all games) per frame)
+        if _gcache[0] is not all_games:
+            by = {}
+            for g in all_games:
+                by.setdefault(g["sid"], []).append(g)
+            _gcache[0], _gcache[1] = all_games, by
+        return _gcache[1].get(sid, [])
     vsys = visible_systems(all_games)
     NO_SYSTEM = ("", "", "", (), "")           # placeholder while no system has any games
     state = load_state()
     theme_id = apply_theme(state.get("theme"))
 
+    _rcache = [None, None, []]
+
     def recent_games():
-        by_path = {g["path"]: g for g in all_games}
-        return [by_path[p] for p in state.get("recent", []) if p in by_path]
+        rec = tuple(state.get("recent", []))
+        if _rcache[0] is not all_games or _rcache[1] != rec:
+            by_path = {g["path"]: g for g in all_games}
+            _rcache[0], _rcache[1], _rcache[2] = all_games, rec, [by_path[p] for p in rec if p in by_path]
+        return _rcache[2]
 
     # screens: "home" (Games / Recents / Settings) -> "systems" (consoles) -> "games"; "recents"; "settings"
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
@@ -941,6 +997,9 @@ def main():
         idx_by[last["sid"]] = games_of(last["sid"]).index(last)
     rows, list_x, list_w, top_y, row_h = 8, 20, 450 + DX, 84, 44
     clock = pygame.time.Clock()
+    rd_vol, rd_bri, rd_bat = throttled(read_volume, 0.1), throttled(read_brightness, 0.1), throttled(read_battery, 10.0)
+    last_act, clk_at, clk = time.monotonic(), 0, ""
+    IDLE_VIEWS = ("home", "systems", "games", "recents", "tools", "settings")
     code = None
     vol_seen = read_volume()
     vol_seen = vol_seen[1] if vol_seen else None
@@ -1061,7 +1120,10 @@ def main():
             pygame.time.wait(120)
             continue
         blanked = False
-        for a in inp.poll():
+        _acts = inp.poll()
+        if _acts:
+            last_act = time.monotonic()
+        for a in _acts:
             if forced:                         # first-run setup: buttons only feed the wizard (and MENU skips after 3 failures)
                 if a == "quit":
                     code = EXIT_POWER
@@ -1284,7 +1346,9 @@ def main():
         else:
             games, key = games_of(sid), sid
         idx = min(idx_by.get(key, 0), max(0, len(games) - 1))
-        clk = time.strftime("%H:%M")
+        _now = int(time.time())
+        if _now != clk_at:
+            clk_at, clk = _now, time.strftime("%H:%M")
 
         canvas.fill(BG)
         pygame.draw.rect(canvas, PANEL, (0, 0, W, 64))
@@ -1313,7 +1377,7 @@ def main():
         if forced:
             info = "First-time setup   %s" % clk
         s = f_small.render(info, True, DIM)
-        bat = read_battery()
+        bat = rd_bat()
         right = W - 20
         if bat:                                    # battery gauge at the top right (when /run/rgos/battery exists)
             pct, status = bat
@@ -1601,7 +1665,7 @@ def main():
             hint += "   [" + inp.last_raw + "]"
         canvas.blit(f_small.render(hint, True, DIM), (20, H - 28))
 
-        vol = read_volume()                     # volume popup (VOL+/VOL- are handled by the rgos-volume service)
+        vol = rd_vol()                          # volume popup (VOL+/VOL- are handled by the rgos-volume service)
         if vol and vol[1] != vol_seen:
             vol_seen, vol_pct, vol_show_until = vol[1], vol[0], time.time() + 1.5
         if time.time() < vol_show_until:
@@ -1614,7 +1678,7 @@ def main():
                 pygame.draw.rect(canvas, ACCENT, (bx + 56, by + 17, max(6, 140 * vol_pct // 100), 10), border_radius=5)
             canvas.blit(f_small.render("%d%%" % vol_pct, True, TEXT), (bx + 208, by + 14))
 
-        bri = read_brightness()                 # brightness popup (SELECT+VOL, handled by the rgos-hw service)
+        bri = rd_bri()                          # brightness popup (SELECT+VOL, handled by the rgos-hw service)
         if bri and bri[1] != bri_seen:
             if bri_seen is not None:
                 bri_pct, bri_show_until = bri[0], time.time() + 1.5
@@ -1629,7 +1693,10 @@ def main():
             canvas.blit(f_small.render("%d%%" % bri_pct, True, TEXT), (bx + 208, by + 14))
 
         present()
-        clock.tick(30)
+        # nothing pressed for 3 s on a plain list screen and no popup showing: 15 fps is plenty (saves CPU and battery)
+        idle = (view in IDLE_VIEWS and not forced and time.monotonic() - last_act > 3.0
+                and time.time() >= max(vol_show_until, bri_show_until))
+        clock.tick(15 if idle else 30)
 
     if not windowed:
         fbout.set_graphics(False)
@@ -1637,7 +1704,7 @@ def main():
     sys.exit(code)
 
 
-if __name__ == "__main__":
+def run():
     try:
         main()
     except SystemExit:
@@ -1647,3 +1714,7 @@ if __name__ == "__main__":
         log("CRASH\n" + traceback.format_exc())
         fbout.set_graphics(False)      # give the text console back so the error is readable
         sys.exit(1)
+
+
+if __name__ == "__main__":
+    run()
