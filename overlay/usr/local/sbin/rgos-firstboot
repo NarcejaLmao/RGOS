@@ -90,7 +90,15 @@ echo "$fstype" > /var/lib/rgos/romsfs.detected 2>/dev/null
 # 3. Mount it and create the standard folders so the menu and ports find them.
 mkdir -p /media/roms
 if mountpoint -q /media/roms || timeout 60 mount -t "$fstype" -o noatime,umask=000 "$PART" /media/roms; then
-    mkdir -p /media/roms/roms/ports /media/roms/roms/genesis /media/roms/saves/ports /media/roms/saves/genesis /media/roms/states/genesis /media/roms/update
+    # The COMPLETE folder tree is made here, on the very first boot (rgos-session only repairs it for older cards).
+    # Keep this list in step with SYSTEMS in menu.py / SYSTEM_DIRS in sdcard.py.
+    SYSTEMS="gba gb gbc nes snes genesis mastersystem gamegear sg1000 segacd sega32x segapico arcade neogeo atari2600 atari5200 atari7800 ngp wonderswan dreamcast"
+    for s in $SYSTEMS; do
+        mkdir -p "/media/roms/roms/$s" "/media/roms/saves/$s" "/media/roms/states/$s" "/media/roms/bios/$s" 2>/dev/null
+    done
+    mkdir -p /media/roms/roms/ports /media/roms/saves/ports/data /media/roms/saves/ports/config \
+      /media/roms/bios/dreamcast/dc /media/roms/firmware /media/roms/update 2>/dev/null
+    sync
     touch "$FLAG"
     echo "ROMS ready ($fstype)"
 else
