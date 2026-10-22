@@ -449,6 +449,7 @@ def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
 HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("tools", "Tools"), ("settings", "Settings")]
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
 TOOLS = [("files", "File Manager", "Browse, copy, move, rename and delete files on the SD cards", "@view:files"),
+         ("portmaster", "PortMaster", "Browse, install and update native Linux game ports", "@tool:portmaster"),
          ("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
 def fm_roots():
     """Storage the file manager may touch: the ROMS card, plus the second SD card when it is mounted."""
@@ -1595,7 +1596,7 @@ def main():
             x0 = (W - (2 * bw + gap)) // 2
             subs = {"games": "%d games" % len(all_games),
                     "recents": "%d recent" % len(recent_games()),
-                    "tools": "File Manager, RetroArch",
+                    "tools": "File Manager, PortMaster, RetroArch",
                     "settings": "Theme, Wi-Fi, info, sticks, buttons"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
                 bx, by, sel = x0 + (i % 2) * (bw + gap), top_y + (i // 2) * (bh + gap), i == home_idx
@@ -1848,7 +1849,7 @@ def main():
                 for i, m in enumerate(["No games found.",
                                        "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
                                        "Mega Drive ROMs in roms/genesis/ (MD, GEN, SMD, BIN).",
-                                       "or native port .sh launchers in roms/ports/, then press X (B = back)."]):
+                                       "or launcher scripts in roms/ports/, then press X (B = back)."]):
                     canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                                 (40, 150 + i * 34))
             sys_rows = 6                       # rows that fit between the header and the hint line
@@ -1891,7 +1892,7 @@ def main():
                 msg = ["No games found.",
                        "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
                        "Mega Drive ROMs in roms/genesis/ (MD, GEN, SMD, BIN).",
-                       "or native port .sh launchers in roms/ports/, then X (B = back)."]
+                       "or launcher scripts in roms/ports/, then X (B = back)."]
             for i, m in enumerate(msg):
                 canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                             (40, 150 + i * 34))

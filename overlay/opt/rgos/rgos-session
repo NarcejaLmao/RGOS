@@ -29,7 +29,7 @@ MENULOG=/var/log/rgos-menu.log
 timeout 30 /opt/rgos/rgos-sdcard sync --settle 2>/dev/null
 # make sure the folders exist (cards set up by older versions lack them)
 if mountpoint -q /media/roms; then
-    mkdir -p /media/roms /media/roms/roms/ports /media/roms/roms/gba /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/nes /media/roms/roms/snes /media/roms/roms/genesis \
+    mkdir -p /media/roms /media/roms/music/roms/ports /media/roms/roms/gba /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/nes /media/roms/roms/snes /media/roms/roms/genesis \
       /media/roms/roms/mastersystem /media/roms/roms/gamegear /media/roms/roms/sg1000 \
       /media/roms/roms/segacd /media/roms/roms/sega32x /media/roms/roms/segapico /media/roms/roms/arcade /media/roms/roms/neogeo /media/roms/roms/atari2600 /media/roms/roms/atari5200 /media/roms/roms/atari7800 /media/roms/roms/ngp /media/roms/roms/wonderswan \
       /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/gb /media/roms/saves/gbc /media/roms/saves/nes /media/roms/saves/snes /media/roms/saves/genesis \
@@ -211,66 +211,43 @@ run_retroarch_ui() {
     return 0
 }
 run_port() {
-    local script=$1 dir pid kpid pin rc name safe_name
-    # Ports must come from the removable ROMS partition and stay inside its ports directory.
-    case "$script" in /media/roms/roms/ports/*.sh) ;; *) echo "refusing non-port launcher: $script" >> "$PORTLOG"; return 1 ;; esac
-    [ -f "$script" ] || { echo "cannot launch port: $script" >> "$PORTLOG"; return 1; }
+    local script=$1 dir pid kpid pin
     dir=$(dirname "$script")
-    name=$(basename "$script" .sh)
-    safe_name=$(printf '%s' "$name" | tr -cd '[:alnum:]_.-')
-    [ -n "$safe_name" ] || safe_name=port
+    if [ ! -f "$script" ]; then echo "cannot launch port: $script" >> "$PORTLOG"; return; fi
     {
         echo "=== $(date)  port: $script"
-        echo "architecture: $(uname -m); kernel: $(uname -r)"
     } >> "$PORTLOG"
-    mkdir -p "/media/roms/saves/ports/$safe_name/data" "/media/roms/saves/ports/$safe_name/config" /var/lib/rgos/shader-cache /run/rgos 2>/dev/null
+    mkdir -p /media/roms/saves/ports/data /media/roms/saves/ports/config /var/lib/rgos/shader-cache 2>/dev/null
     local PORT_NICE=-5 MESA_NO_ERROR=1 MESA_GLTHREAD=false PIN_HELPERS=0
     [ -r /etc/rgos/ports.conf ] && . /etc/rgos/ports.conf
-    # Windows editors commonly create CRLF shell scripts; normalize only the selected launcher.
+    # Launcher scripts edited on Windows have CRLF line endings; bash then fails on the first line ("bash\r: not found").
     grep -q $'\r' "$script" 2>/dev/null && { sed -i 's/\r$//' "$script" 2>/dev/null && echo "converted CRLF line endings in $script" >> "$PORTLOG"; }
-    # Quick, useful diagnostics for missing runtime libraries, without blocking scripts that use bundled/private libs.
-    if command -v file >/dev/null 2>&1; then
-        while IFS= read -r bin; do
-            [ -f "$bin" ] || continue
-            desc=$(file -b "$bin" 2>/dev/null)
-            case "$desc" in *ELF*) echo "binary: $bin ($desc)" >> "$PORTLOG"; ldd "$bin" 2>&1 | grep -i 'not found' | sed "s#^#missing dependency ($bin): #" >> "$PORTLOG" ;; esac
-        done < <(grep -Eo '(^|[[:space:]])[^[:space:]"'"'"']+' "$script" | sed 's/^[[:space:]]*//' | grep '^\./' | sed "s#^#$dir/#" | sort -u)
-    fi
-    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1
-    ra_graphics 1
+    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1          # performance profile, undone below
+    ra_graphics 1       # text console off the screen while the port owns KMS (same as for RetroArch)
     (
         cd "$dir" || exit 1
+        # The session itself runs with SDL_VIDEODRIVER=dummy (the menu draws through the framebuffer). That value must NOT
+        # reach a port: SDL would pick the dummy driver and the game runs (or exits) without ever showing a picture.
+        # Let SDL choose its real driver (KMSDRM). RGOS_* only configure the menu's own framebuffer output.
         unset SDL_VIDEODRIVER RGOS_VIDEO RGOS_FB_DBUF RGOS_FB_VSYNC
         export ROMS_ROOT=/media/roms PORTS_DIR=/media/roms/roms/ports
-        export RGOS_PORT_NAME="$safe_name" RGOS_PORT_DIR="$dir"
-        export RGOS_PORT_SAVE_DIR="/media/roms/saves/ports/$safe_name"
-        export RGOS_PORT_DATA_DIR="/media/roms/saves/ports/$safe_name/data"
-        export RGOS_PORT_CONFIG_DIR="/media/roms/saves/ports/$safe_name/config"
         export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
-        export SDL_JOYSTICK_HIDAPI=1 SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0
-        export XDG_DATA_HOME="$RGOS_PORT_DATA_DIR" XDG_CONFIG_HOME="$RGOS_PORT_CONFIG_DIR"
-        export XDG_CACHE_HOME="$RGOS_PORT_SAVE_DIR/cache"
-        mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME"
-        # Support common layouts used by community ports without forcing one directory name.
-        local_libs=""
-        for libdir in "$dir/libs.aarch64" "$dir/lib/aarch64-linux-gnu" "$dir/lib" "$dir/libs" "$dir/usr/lib"; do
-            [ -d "$libdir" ] && local_libs="${local_libs:+$local_libs:}$libdir"
-        done
-        if [ -n "$local_libs" ]; then export LD_LIBRARY_PATH="$local_libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"; fi
+        export XDG_DATA_HOME=/media/roms/saves/ports/data XDG_CONFIG_HOME=/media/roms/saves/ports/config
+        export LD_LIBRARY_PATH="$dir/libs.aarch64:$dir/lib:$dir/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"   # no trailing ":" (it would add the cwd)
+        # persistent shader cache (on the root partition, kept across updates): no recompile stutter on later runs
         export MESA_SHADER_CACHE_DIR=/var/lib/rgos/shader-cache MESA_SHADER_CACHE_MAX_SIZE=256M
-        export MESA_NO_ERROR="$MESA_NO_ERROR" mesa_glthread="$MESA_GLTHREAD"
-        export PULSE_SERVER=unix:/run/pulse/native
+        export MESA_NO_ERROR mesa_glthread=$MESA_GLTHREAD
         exec nice -n "$PORT_NICE" setsid bash "$script" >> "$PORTLOG" 2>&1 < /dev/null
     ) &
     pid=$!
-    echo "$pid" > /run/rgos/port.pid
+    echo "$pid" > /run/rgos/port.pid        # rgos-hw pauses this process group while the screen is off
     if [ "$PIN_HELPERS" = 1 ]; then pin="taskset -c 0 nice -n -10"; else pin=; fi
     $pin python3 /opt/rgos/rgos-portkey "$pid" >> "$PORTLOG" 2>&1 &
     kpid=$!
-    wait "$pid"; rc=$?
-    echo "--- port exited (rc=$rc)" >> "$PORTLOG"
+    wait "$pid"
+    echo "--- port exited (rc=$?)" >> "$PORTLOG"
     kill "$kpid" 2>/dev/null
-    kill -KILL -- "-$pid" 2>/dev/null
+    kill -KILL -- "-$pid" 2>/dev/null    # leftovers of the port's process group
     rm -f /run/rgos/port.pid
     ra_graphics 0
     /opt/rgos/rgos-perf off >> "$PORTLOG" 2>&1
@@ -293,6 +270,7 @@ while true; do
     case $rc in
       10) rom=$(cat /run/rgos/launch 2>/dev/null)
           case "$rom" in
+            @tool:portmaster) run_port /opt/rgos/PortMaster.sh ;;
             @tool:retroarch) run_retroarch_ui ;;
             */roms/ports/*) run_port "$rom" ;;
             */roms/gba/*) core=$(configured_core gba mgba); run_retroarch "$core" "$rom" ;;
