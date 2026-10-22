@@ -31,14 +31,14 @@ timeout 30 /opt/rgos/rgos-sdcard sync --settle 2>/dev/null
 if mountpoint -q /media/roms; then
     mkdir -p /media/roms /media/roms/music/roms/ports /media/roms/roms/gba /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/nes /media/roms/roms/snes /media/roms/roms/genesis \
       /media/roms/roms/mastersystem /media/roms/roms/gamegear /media/roms/roms/sg1000 \
-      /media/roms/roms/segacd /media/roms/roms/sega32x /media/roms/roms/segapico /media/roms/roms/arcade /media/roms/roms/neogeo /media/roms/roms/atari2600 /media/roms/roms/atari5200 /media/roms/roms/atari7800 /media/roms/roms/ngp /media/roms/roms/wonderswan /media/roms/roms/dreamcast \
+      /media/roms/roms/segacd /media/roms/roms/sega32x /media/roms/roms/segapico /media/roms/roms/arcade /media/roms/roms/neogeo /media/roms/roms/atari2600 /media/roms/roms/atari5200 /media/roms/roms/atari7800 /media/roms/roms/ngp /media/roms/roms/wonderswan \
       /media/roms/saves/ports /media/roms/saves/gba /media/roms/saves/gb /media/roms/saves/gbc /media/roms/saves/nes /media/roms/saves/snes /media/roms/saves/genesis \
       /media/roms/saves/mastersystem /media/roms/saves/gamegear /media/roms/saves/sg1000 \
-      /media/roms/saves/segacd /media/roms/saves/sega32x /media/roms/saves/segapico /media/roms/saves/arcade /media/roms/saves/neogeo /media/roms/saves/atari2600 /media/roms/saves/atari5200 /media/roms/saves/atari7800 /media/roms/saves/ngp /media/roms/saves/wonderswan /media/roms/saves/dreamcast \
+      /media/roms/saves/segacd /media/roms/saves/sega32x /media/roms/saves/segapico /media/roms/saves/arcade /media/roms/saves/neogeo /media/roms/saves/atari2600 /media/roms/saves/atari5200 /media/roms/saves/atari7800 /media/roms/saves/ngp /media/roms/saves/wonderswan \
       /media/roms/states/gb /media/roms/states/gbc /media/roms/states/snes /media/roms/states/genesis /media/roms/firmware \
       /media/roms/bios/gba /media/roms/bios/gb /media/roms/bios/gbc /media/roms/bios/nes /media/roms/bios/snes /media/roms/bios/genesis \
       /media/roms/bios/mastersystem /media/roms/bios/gamegear /media/roms/bios/sg1000 \
-      /media/roms/bios/segacd /media/roms/bios/sega32x /media/roms/bios/segapico /media/roms/bios/arcade /media/roms/bios/neogeo /media/roms/bios/atari2600 /media/roms/bios/atari5200 /media/roms/bios/atari7800 /media/roms/bios/ngp /media/roms/bios/wonderswan /media/roms/bios/dreamcast 2>/dev/null
+      /media/roms/bios/segacd /media/roms/bios/sega32x /media/roms/bios/segapico /media/roms/bios/arcade /media/roms/bios/neogeo /media/roms/bios/atari2600 /media/roms/bios/atari5200 /media/roms/bios/atari7800 /media/roms/bios/ngp /media/roms/bios/wonderswan 2>/dev/null
 fi
 /opt/rgos/rgos-perf off 2>/dev/null     # undo a port profile left behind if the session was killed mid-port
 mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null   # for devices_deferred
@@ -167,9 +167,6 @@ ra_graphics() {     # 1 = tty1 into graphics mode (kernel console stops drawing)
 }
 run_retroarch() {
     local core=$1 rom=$2 corepath sysname
-    # The system is the folder directly under roms/ (menu.py scans recursively, so a disc such as
-    # roms/dreamcast/Game/disc.gdi must not turn "Game" into the system name: BIOS, saves and states would be looked
-    # up in the wrong folders).
     case "$rom" in
         /media/roms/roms/*/*)  sysname=${rom#/media/roms/roms/};  sysname=${sysname%%/*} ;;
         /media/roms2/roms/*/*) sysname=${rom#/media/roms2/roms/}; sysname=${sysname%%/*} ;;
@@ -196,12 +193,7 @@ run_retroarch() {
     # Per-system BIOS folders on the ROMS card. Keep firmware_directory as a
     # compatibility path for existing Sega CD setups using ROMS/firmware/.
     # Use a real file for the append config: RetroArch cannot reliably reopen Bash process-substitution paths (/dev/fd/N).
-    # Hardware-rendered, heavy cores (Flycast): loading the disc, creating the dynarec and compiling shaders can take far
-    # longer than the 25 s default start-up grace of rgos-raguard, during which RetroArch does not answer its command
-    # port. The guard then killed a perfectly healthy RetroArch and the retry with the sdl2 video driver (which cannot
-    # host a hardware-rendered core) exited at once -> straight back to the launcher. Give it time, and do not retry.
     local grace=25 retry=1
-    case "$core" in flycast*) grace=120; retry=0 ;; esac
     # Log any shared library the core cannot resolve: the usual reason a core "closes at once".
     ldd "$corepath" 2>&1 | grep -i 'not found' | sed 's/^/core dependency missing: /' >> "$PORTLOG"
     RA_GUARD_GRACE=$grace RA_SAFE_RETRY=$retry ra_run "$core $rom" "savefile_directory = \"/media/roms/saves/$sysname\"\nsavestate_directory = \"/media/roms/states/$sysname\"\nsystem_directory = \"/media/roms/bios/$sysname\"\nfirmware_directory = \"/media/roms/firmware\"\n" \
@@ -279,7 +271,6 @@ while true; do
       10) rom=$(cat /run/rgos/launch 2>/dev/null)
           case "$rom" in
             @tool:retroarch) run_retroarch_ui ;;
-            @tool:flycast) run_port /opt/rgos/rgos-flycast ;;
             */roms/ports/*) run_port "$rom" ;;
             */roms/gba/*) core=$(configured_core gba mgba); run_retroarch "$core" "$rom" ;;
             */roms/gb/*) core=$(configured_core gb gambatte); run_retroarch "$core" "$rom" ;;
@@ -316,7 +307,6 @@ while true; do
             */roms/atari7800/*) core=$(configured_core atari7800 prosystem); run_retroarch "$core" "$rom" ;;
             */roms/ngp/*) core=$(configured_core ngp mednafen_ngp); run_retroarch "$core" "$rom" ;;
             */roms/wonderswan/*) core=$(configured_core wonderswan mednafen_wswan); run_retroarch "$core" "$rom" ;;
-            */roms/dreamcast/*) mkdir -p /media/roms/bios/dreamcast/dc 2>/dev/null; core=$(configured_core dreamcast flycast); run_retroarch "$core" "$rom" ;;
             */roms/arcade/*) core=$(configured_core arcade fbneo); run_retroarch "$core" "$rom" ;;
             */roms/neogeo/*) core=$(configured_core neogeo fbneo); run_retroarch "$core" "$rom" ;;
             *) echo "cannot launch: '$rom'" >> "$PORTLOG" ;;

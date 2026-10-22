@@ -40,7 +40,7 @@ PRIMARY_MOUNT = "/media/roms"
 SYSTEM_MOUNTS = ("/", "/boot", PRIMARY_MOUNT)     # whatever disk backs these is card 1
 SKIP_LABELS = ("RGBOOT", "rgos-root")             # partitions of an RG OS system card are never game storage
 # Folder names under roms/ (kept in step with menu.SYSTEMS and rgos-session)
-SYSTEM_DIRS = ("gba", "nes", "snes", "gb", "gbc", "genesis", "mastersystem", "gamegear", "sg1000", "segacd", "sega32x", "segapico", "atari2600", "atari5200", "atari7800", "ngp", "wonderswan", "dreamcast", "arcade", "neogeo", "ports")
+SYSTEM_DIRS = ("gba", "nes", "snes", "gb", "gbc", "genesis", "mastersystem", "gamegear", "sg1000", "segacd", "sega32x", "segapico", "atari2600", "atari5200", "atari7800", "ngp", "wonderswan", "arcade", "neogeo", "ports")
 MOUNT_TYPES = {"exfat": ("exfat",), "vfat": ("vfat",), "ext4": ("ext4",), "ntfs": ("ntfs3", "ntfs")}
 MOUNT_OPTS = {"exfat": "noatime,umask=000", "vfat": "noatime,umask=000", "ext4": "noatime", "ntfs3": "noatime,umask=000", "ntfs": "noatime,umask=000"}
 DISK_RE = re.compile(r"^mmcblk\d+$")
