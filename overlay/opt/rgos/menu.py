@@ -1848,7 +1848,7 @@ def main():
                 for i, m in enumerate(["No games found.",
                                        "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
                                        "Mega Drive ROMs in roms/genesis/ (MD, GEN, SMD, BIN).",
-                                       "or launcher scripts in roms/ports/, then press X (B = back)."]):
+                                       "or native port .sh launchers in roms/ports/, then press X (B = back)."]):
                     canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                                 (40, 150 + i * 34))
             sys_rows = 6                       # rows that fit between the header and the hint line
@@ -1891,7 +1891,7 @@ def main():
                 msg = ["No games found.",
                        "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
                        "Mega Drive ROMs in roms/genesis/ (MD, GEN, SMD, BIN).",
-                       "or launcher scripts in roms/ports/, then X (B = back)."]
+                       "or native port .sh launchers in roms/ports/, then X (B = back)."]
             for i, m in enumerate(msg):
                 canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                             (40, 150 + i * 34))
