@@ -141,5 +141,26 @@ class WonderSwanTest(unittest.TestCase):
         self.assertIn("CORE=mednafen_wswan", self.read("build.sh"))
 
 
+class DreamcastTest(unittest.TestCase):
+    def read(self, *p):
+        return open(os.path.join(ROOT, *p)).read()
+
+    def test_menu_and_core_list(self):
+        src = self.read("overlay", "opt", "rgos", "menu.py")
+        self.assertRegex(src, r'\("dreamcast", "DC", "retroarch", \("\.cdi", "\.gdi", "\.chd", "\.cue", "\.m3u"\)')
+        self.assertIn('"dreamcast": "flycast"', src)
+        self.assertEqual(compat_table()["dreamcast"], ("flycast",))
+
+    def test_session_folders_and_launch(self):
+        s = self.read("overlay", "opt", "rgos", "rgos-session")
+        self.assertIn("configured_core dreamcast flycast", s)
+        for kind in ("roms", "saves", "bios"):
+            self.assertIn("/media/roms/%s/dreamcast" % kind, s)
+
+    def test_second_card_and_build(self):
+        self.assertIn('"dreamcast"', self.read("overlay", "opt", "rgos", "sdcard.py"))
+        self.assertIn("CORE=flycast", self.read("build.sh"))
+
+
 if __name__ == "__main__":
     unittest.main()

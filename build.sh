@@ -365,6 +365,17 @@ rootfs() {
     echo "WARNING: WonderSwan core $CORE could not be installed"
   fi
   rm -f "$CORE_ZIP"
+  # Sega Dreamcast (Flycast). Optional, like the other extra cores. Heavy: expect only some games to be full speed on the H700.
+  CORE=flycast; CORE_ZIP="$WORK/${CORE}_libretro.so.zip"
+  if curl -fL --retry 3 \
+       "https://buildbot.libretro.com/nightly/linux/aarch64/latest/${CORE}_libretro.so.zip" -o "$CORE_ZIP" \
+     && sudo unzip -o "$CORE_ZIP" -d "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro" >/dev/null \
+     && sudo test -s "$WORK/rootfs/usr/lib/aarch64-linux-gnu/libretro/${CORE}_libretro.so"; then
+    echo "installed Dreamcast core: $CORE"
+  else
+    echo "WARNING: Dreamcast core $CORE could not be installed"
+  fi
+  rm -f "$CORE_ZIP"
   # FinalBurn Neo: arcade + Neo Geo. Unlike the cores above this one is required (it is the default for the arcade and
   # neogeo systems), so a failed download stops the build.
   FBNEO_ZIP="$WORK/fbneo_libretro.so.zip"

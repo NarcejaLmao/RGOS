@@ -43,6 +43,8 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            ("ngp", "NGP", "retroarch", (".ngp", ".ngc", ".ngpc"), "Neo Geo Pocket / Color"),
            # WonderSwan and WonderSwan Color (Beetle Cygne). No BIOS needed.
            ("wonderswan", "WS", "retroarch", (".ws", ".wsc", ".pc2"), "WonderSwan / Color"),
+           # Sega Dreamcast (Flycast). Discs: .cdi/.gdi/.chd/.cue/.m3u. BIOS optional: dc_boot.bin + dc_flash.bin go in ROMS/bios/dreamcast/dc/.
+           ("dreamcast", "DC", "retroarch", (".cdi", ".gdi", ".chd", ".cue", ".m3u"), "Sega Dreamcast"),
            # FBNeo runs arcade boards (CPS1/2/3, Konami, Irem, ...) and Neo Geo; ROMs stay zipped, named as MAME/FBNeo expect.
            ("arcade", "ARC", "retroarch", (".zip", ".7z"), "Arcade (FinalBurn Neo)"),
            ("neogeo", "NEO", "retroarch", (".zip", ".7z"), "Neo Geo"),
@@ -305,7 +307,7 @@ def default_core(sid):
             "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx",
             "arcade": "fbneo", "neogeo": "fbneo",
             "atari2600": "stella2014", "atari5200": "atari800", "atari7800": "prosystem",
-            "ngp": "mednafen_ngp", "wonderswan": "mednafen_wswan"}.get(sid, "")
+            "ngp": "mednafen_ngp", "wonderswan": "mednafen_wswan", "dreamcast": "flycast"}.get(sid, "")
 
 
 # Only offer cores known to support the selected system. The list is intersected
@@ -328,6 +330,7 @@ SYSTEM_CORE_COMPATIBILITY = {
     "atari7800": ("prosystem",),
     "ngp": ("mednafen_ngp", "race"),
     "wonderswan": ("mednafen_wswan",),
+    "dreamcast": ("flycast",),
     "arcade": ("fbneo",),
     "neogeo": ("fbneo",),
 }
