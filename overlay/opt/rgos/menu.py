@@ -335,6 +335,48 @@ def wrap(font, text, width):
     return lines[:4]
 
 
+def _mix(c, t, k):
+    """Blend colour c toward colour t by k (0..1)."""
+    return tuple(max(0, min(255, int(c[i] + (t[i] - c[i]) * k))) for i in range(3))
+
+
+_BTN_CACHE = {}
+
+
+def _btn_face(w, h, base, radius):
+    """Cached face of a 3D button: vertical light-to-base gradient, rounded corners, thin top highlight."""
+    key = (w, h, base, radius)
+    surf = _BTN_CACHE.get(key)
+    if surf is None:
+        if len(_BTN_CACHE) > 200:
+            _BTN_CACHE.clear()
+        top, bot = _mix(base, (255, 255, 255), 0.16), _mix(base, (0, 0, 0), 0.12)
+        surf = pygame.Surface((w, h), pygame.SRCALPHA)
+        for yy in range(h):
+            pygame.draw.line(surf, _mix(top, bot, yy / max(1, h - 1)), (0, yy), (w, yy))
+        hl = _mix(base, (255, 255, 255), 0.35)
+        pygame.draw.line(surf, hl, (radius, 1), (w - radius - 1, 1))
+        mask = pygame.Surface((w, h), pygame.SRCALPHA)
+        pygame.draw.rect(mask, (255, 255, 255, 255), (0, 0, w, h), border_radius=radius)
+        surf.blit(mask, (0, 0), special_flags=pygame.BLEND_RGBA_MIN)
+        _BTN_CACHE[key] = surf
+    return surf
+
+
+def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
+    """Draw a button that looks raised: soft shadow, darker side edge below the face, gradient face with a top highlight.
+    The face occupies exactly rect; the side and shadow extend `depth` pixels below it."""
+    x, y, w, h = rect
+    side = _mix(base, (0, 0, 0), 0.55)
+    sh = pygame.Surface((w, h + depth + 3), pygame.SRCALPHA)
+    pygame.draw.rect(sh, (0, 0, 0, 70), (0, 3, w, h + depth), border_radius=radius)
+    surf.blit(sh, (x, y))
+    pygame.draw.rect(surf, side, (x, y + depth, w, h), border_radius=radius)
+    surf.blit(_btn_face(w, h, base, radius), (x, y))
+    if sel:
+        pygame.draw.rect(surf, ACCENT, (x, y, w, h), 2 if h < 80 else 3, border_radius=radius)
+
+
 HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("tools", "Tools"), ("settings", "Settings")]
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
 TOOLS = [("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
@@ -1233,8 +1275,9 @@ def main():
         canvas.fill(BG)
         pygame.draw.rect(canvas, PANEL, (0, 0, W, 64))
         pygame.draw.rect(canvas, ACCENT, (0, 62, W, 2))
-        canvas.blit(f_logo.render("RG", True, ACCENT), (20, 14))
-        canvas.blit(f_logo.render("OS", True, TEXT), (64, 14))
+        rg = f_logo.render("RG", True, ACCENT)                 # place OS after the measured width of RG so they never overlap
+        canvas.blit(rg, (20, 14))
+        canvas.blit(f_logo.render("OS", True, TEXT), (20 + rg.get_width() + 4, 14))
         if view == "games":
             info = "%s   %d %s%s   %s" % (sname, len(games), "port" if sid == "ports" else "game", "" if len(games) == 1 else "s", clk)
         elif view == "systems":
@@ -1282,9 +1325,7 @@ def main():
                     "settings": "Theme, Wi-Fi, info, sticks, buttons"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
                 bx, by, sel = x0 + (i % 2) * (bw + gap), top_y + (i // 2) * (bh + gap), i == home_idx
-                pygame.draw.rect(canvas, SEL_BG if sel else PANEL, (bx, by, bw, bh), border_radius=22)
-                if sel:
-                    pygame.draw.rect(canvas, ACCENT, (bx, by, bw, bh), 3, border_radius=22)
+                draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 22, 8, sel)
                 ICONS[hid](canvas, bx + 70, by + bh // 2, ACCENT if sel else DIM, SEL_BG if sel else PANEL)
                 canvas.blit(f_logo.render(hname, True, TEXT if sel else DIM), (bx + 124, by + bh // 2 - 28))
                 canvas.blit(f_small.render(fit(f_small, subs[hid], bw - 126 - 10), True, DIM), (bx + 126, by + bh // 2 + 12))
@@ -1292,9 +1333,7 @@ def main():
         elif view == "tools":
             for i, (_tid, tname, tdesc, _tgt) in enumerate(TOOLS):
                 by, sel = top_y + i * 56, i == tool_idx
-                pygame.draw.rect(canvas, SEL_BG if sel else PANEL, (list_x, by, W - 2 * list_x, 52), border_radius=12)
-                if sel:
-                    pygame.draw.rect(canvas, ACCENT, (list_x, by, W - 2 * list_x, 52), 2, border_radius=12)
+                draw_button(canvas, (list_x, by, W - 2 * list_x, 52), SEL_BG if sel else PANEL, 12, 3, sel)
                 canvas.blit(f_row.render(tname, True, TEXT if sel else DIM), (list_x + 24, by + 5))
                 canvas.blit(f_small.render(fit(f_small, tdesc, W - 2 * list_x - 48), True, DIM), (list_x + 24, by + 30))
             hint = "A Open   B Back   START+SELECT Power off"
@@ -1310,9 +1349,7 @@ def main():
                      "info": ("Information", "Build, kernel, storage, battery, volume and input status")}
             for i, (nm, sub) in enumerate(srows[r] for r in SETTINGS_ROWS):
                 by, sel = top_y + i * 46, i == set_idx
-                pygame.draw.rect(canvas, SEL_BG if sel else PANEL, (list_x, by, W - 2 * list_x, 42), border_radius=12)
-                if sel:
-                    pygame.draw.rect(canvas, ACCENT, (list_x, by, W - 2 * list_x, 42), 2, border_radius=12)
+                draw_button(canvas, (list_x, by, W - 2 * list_x, 42), SEL_BG if sel else PANEL, 12, 3, sel)
                 canvas.blit(f_row.render(nm, True, TEXT if sel else DIM), (list_x + 24, by + 3))
                 sub_w = W - 2 * list_x - 48
                 if SETTINGS_ROWS[i] == "theme":      # colour swatches of the active theme at the right end of the row
@@ -1420,9 +1457,7 @@ def main():
                 for c, k in enumerate(keys):
                     kx = KX + c * (kw + 4)
                     sel = (r == kb.row and c == kb.col)
-                    pygame.draw.rect(canvas, SEL_BG if sel else PANEL, (kx, ky, kw, 44), border_radius=8)
-                    if sel:
-                        pygame.draw.rect(canvas, ACCENT, (kx, ky, kw, 44), 2, border_radius=8)
+                    draw_button(canvas, (kx, ky, kw, 44), SEL_BG if sel else PANEL, 8, 4, sel)
                     label = KB_LAYER_NAMES[(kb.layer + 1) % 3] if k == "Layer" else k
                     t = f_row.render(label, True, ACCENT if (sel and r == 4) else (TEXT if sel else DIM))
                     canvas.blit(t, (kx + (kw - t.get_width()) // 2, ky + 11))
