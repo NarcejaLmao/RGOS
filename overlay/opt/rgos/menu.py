@@ -1050,7 +1050,17 @@ def main():
             forced, view = False, "home"
             mark_calibrated()
 
+    blanked = False
     while code is None:
+        if os.path.exists(SCREENOFF_FILE):      # asleep (rgos-hw): one black frame (even if the backlight cannot be switched), then idle
+            inp.poll()                          # drains input; everything pressed in the dark is ignored
+            if not blanked:
+                canvas.fill((0, 0, 0))
+                present()
+                blanked = True
+            pygame.time.wait(120)
+            continue
+        blanked = False
         for a in inp.poll():
             if forced:                         # first-run setup: buttons only feed the wizard (and MENU skips after 3 failures)
                 if a == "quit":
@@ -1618,11 +1628,8 @@ def main():
             pygame.draw.rect(canvas, ACCENT, (bx + 66, by + 17, max(6, 130 * bri_pct // 100), 10), border_radius=5)
             canvas.blit(f_small.render("%d%%" % bri_pct, True, TEXT), (bx + 208, by + 14))
 
-        asleep = os.path.exists(SCREENOFF_FILE)
-        if asleep:                              # screen asleep (rgos-hw): show black (even if the backlight cannot be switched) and idle
-            canvas.fill((0, 0, 0))
         present()
-        clock.tick(4 if asleep else 30)
+        clock.tick(30)
 
     if not windowed:
         fbout.set_graphics(False)

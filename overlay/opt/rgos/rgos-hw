@@ -10,6 +10,11 @@ What it does
                      networking and background services. A hardware wake-capable power key resumes the same session.
       hold ~1.5 s  = clean power off (rgos-poweroff), with a short buzz as feedback.
     conf power_key.short: "suspend" | "screen" | "poweroff" | "none".
+  * SLEEP POWER (hwctl.LowPower): while asleep the radios (Wi-Fi, Bluetooth) and LEDs go off. When the kernel cannot really
+    suspend (software sleep: screen dark, game paused) the CPU also drops to its lowest speed with the extra cores offline and
+    GPU/DRAM devfreq goes to powersave; everything is restored on wake. Switch parts off with conf "low_power":
+    {"enabled": true, "radios_off": true, "leds_off": true, "cpu_min": true, "offline_cpus": true, "devfreq_min": true}
+    (e.g. radios_off=false keeps Wi-Fi connected while asleep).
   * BRIGHTNESS: hold SELECT and press VOL+ / VOL- (conf bright_combo: "select" | "menu" | "none"; the volume daemon
     ignores the volume keys while SELECT is held). The level is remembered in /var/lib/rgos/brightness and shown by
     the menu (/run/rgos/brightness) or as a RetroArch message in-game.
@@ -91,6 +96,7 @@ class Hw:
         self.crit_hits = 0
         self.last_low_warn = 101
         self.paused = []                # pids / process groups we SIGSTOPped for screen-off
+        self.lp = hwctl.LowPower(conf, run_dir=RUN)     # radios / LEDs / CPU turned down while asleep (see hwctl.LowPower)
 
     # ---- brightness
     def _saved_level(self, default):
@@ -141,6 +147,7 @@ class Hw:
             return
         self.screen_on = on
         if on:
+            self.lp.leave()                          # extra cores / clocks / radios back first, then the light and the game
             self.bl.set(self.level)
             try:
                 os.unlink(SCREENOFF)
@@ -153,6 +160,7 @@ class Hw:
             if self.pause_game:
                 self._signal_game(signal.SIGSTOP)
             self.bl.set(0)
+            self.lp.enter(full=True)                 # lowest CPU / GPU speed, extra cores offline, radios + LEDs off
         log("screen", "on" if on else "off")
 
     # ---- full system suspend
@@ -177,6 +185,8 @@ class Hw:
         # Darken the panel before entering suspend. The kernel then freezes all processes, not just the game.
         self.bl.set(0)
         ok = False
+        self.lp.prefer_deep_sleep()                  # suspend to RAM draws far less than s2idle, when the kernel offers it
+        self.lp.enter(full=False)                    # radios + LEDs off (no wake-on-wlan, nothing lit)
         before = self._slept()
         try:
             subprocess.run(["sync"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -195,7 +205,8 @@ class Hw:
         except (OSError, subprocess.SubprocessError) as e:
             log("system suspend error:", e)
         finally:
-            # Runs after resume, or immediately if this kernel cannot suspend.
+            # Runs after resume, or immediately if this kernel cannot suspend (soft_sleep() then turns things down again).
+            self.lp.leave()
             if ok:
                 self.bl.set(self.level)
             try:
@@ -269,6 +280,7 @@ def daemon():
     signal.signal(signal.SIGINT, _stop)
     os.makedirs(RUN, exist_ok=True)
     hw = Hw(conf)
+    hw.lp.restore_stale()                  # a previous rgos-hw that died while asleep must not leave cores offline / radios off
     log("backlight:", hw.bl.describe(), "| battery:", hw.bat.node or "none", "| motor:", hw.motor.describe(),
         "| power key short=%s long=%.1fs combo=%s" % (hw.short, hw.long_s, hw.combo))
     if hw.bl.available:
@@ -294,7 +306,7 @@ def daemon():
                     log("audio switches on:", ", ".join(done))
                     audio_tries = 99
             if now >= next_batt:
-                next_batt = now + 10.0
+                next_batt = now + (10.0 if hw.screen_on else 30.0)     # slower while asleep (low-battery shutdown still works)
                 hw.battery_tick()
             events = pads.read()
             # Restrict wake IRQs to power-key devices. Gamepad/keyboard wake IRQs
@@ -356,10 +368,11 @@ def daemon():
             if t_power is not None and not long_done and time.time() - t_power >= hw.long_s:
                 long_done = True
                 hw.poweroff("power key held")
-            time.sleep(0.03)
+            time.sleep(0.03 if hw.screen_on else 0.2)       # asleep: wake up 5 times a second instead of 33
     finally:
         if not hw.screen_on:
             hw.screen(True)
+        hw.lp.leave()
         for p in (ACTIVE, SCREENOFF, LOWFLAG):
             try:
                 os.unlink(p)

@@ -76,6 +76,128 @@ def write_run(path, text):
 
 
 # ------------------------------------------------------------------------------------------------ backlight
+
+class LowPower:
+    """Turn everything down while the device sleeps and put it back exactly as it was afterwards.
+
+    enter(full=False)  radios (Wi-Fi, Bluetooth) off and LEDs dark: used before a real kernel suspend
+    enter(full=True)   the above plus CPU at its lowest speed with the extra cores offline and GPU/DRAM devfreq at
+                       powersave: used for the software sleep (screen off, game paused) on kernels that cannot suspend
+    leave()            restores every value that was changed (only values this class changed; a radio that was already
+                       blocked stays blocked)
+    The old values are kept in /run/rgos/lowpower.json, so a restarted rgos-hw can still undo a sleep (restore_stale()).
+    /run/rgos/sleeping exists while asleep: the Wi-Fi daemon keeps the radio down and the stick hub stops sampling.
+    Tunables (hw config "low_power"): enabled, radios_off, leds_off, cpu_min, offline_cpus, devfreq_min (all true by default).
+    Every write is best-effort: a missing knob is skipped, never an error."""
+    DEFAULTS = {"enabled": True, "radios_off": True, "leds_off": True, "cpu_min": True, "offline_cpus": True,
+                "devfreq_min": True}
+    ORDER = ("offline", "cpu", "devfreq", "led", "radio")        # order of restoring (extra cores back first)
+
+    def __init__(self, conf=None, sys_root="/sys", run_dir="/run/rgos"):
+        self.c = dict(self.DEFAULTS)
+        extra = (conf or {}).get("low_power", {}) if isinstance(conf, dict) else {}
+        if isinstance(extra, dict):
+            self.c.update({k: bool(v) for k, v in extra.items() if k in self.DEFAULTS})
+        self.sys, self.run_dir = sys_root, run_dir
+        self.flag = os.path.join(run_dir, "sleeping")
+        self.saved_file = os.path.join(run_dir, "lowpower.json")
+        self.saved = {k: [] for k in self.ORDER}
+        self.stage = 0                                     # 0 awake, 1 radios + LEDs off, 2 fully turned down
+
+    # ---- helpers
+    def _p(self, *parts):
+        return os.path.join(self.sys, *parts)
+
+    def _set(self, category, path, value):
+        """Write value to a sysfs knob and remember the old value (only when it really changed)."""
+        old = rd(path, None)
+        if old is None or old == str(value):
+            return False
+        if not wr(path, value):
+            return False
+        self.saved[category].append([path, old])
+        return True
+
+    def _persist(self):
+        write_run(self.saved_file, json.dumps({"stage": self.stage, "saved": self.saved}))
+
+    # ---- stages
+    def _light(self):
+        if self.c["radios_off"]:
+            for d in sorted(glob.glob(self._p("class/rfkill/rfkill*"))):
+                if rd(os.path.join(d, "type")) in ("wlan", "bluetooth"):
+                    self._set("radio", os.path.join(d, "soft"), 1)
+            write_run(self.flag, "1")                      # tells the Wi-Fi daemon to keep the radio down
+        if self.c["leds_off"]:
+            for d in sorted(glob.glob(self._p("class/leds/*"))):
+                if rd(os.path.join(d, "brightness")) not in ("", "0"):
+                    self._set("led", os.path.join(d, "brightness"), 0)
+
+    def _deep(self):
+        if self.c["cpu_min"]:
+            for d in sorted(glob.glob(self._p("devices/system/cpu/cpu[0-9]*/cpufreq"))):
+                if "powersave" in rd(os.path.join(d, "scaling_available_governors")).split():
+                    self._set("cpu", os.path.join(d, "scaling_governor"), "powersave")
+                lowest = rd(os.path.join(d, "cpuinfo_min_freq"))
+                if lowest.isdigit():
+                    self._set("cpu", os.path.join(d, "scaling_max_freq"), lowest)
+        if self.c["devfreq_min"]:
+            for d in sorted(glob.glob(self._p("class/devfreq/*"))):
+                if "powersave" in rd(os.path.join(d, "available_governors")).split():
+                    self._set("devfreq", os.path.join(d, "governor"), "powersave")
+        if self.c["offline_cpus"]:                         # last: the cores' cpufreq knobs vanish once they are offline
+            def cpu_no(d):
+                tail = os.path.basename(d)[3:]
+                return int(tail) if tail.isdigit() else -1
+            for d in sorted(glob.glob(self._p("devices/system/cpu/cpu[0-9]*")), key=cpu_no):
+                if cpu_no(d) >= 1:                         # cpu0 can never go offline
+                    self._set("offline", os.path.join(d, "online"), 0)
+
+    def enter(self, full=False):
+        if not self.c["enabled"]:
+            return
+        target = 2 if full else 1
+        if self.stage < 1:
+            self._light()
+            self.stage = 1
+        if target >= 2 and self.stage < 2:
+            self._deep()
+            self.stage = 2
+        self._persist()
+
+    def leave(self):
+        for cat in self.ORDER:
+            for path, old in reversed(self.saved[cat]):
+                wr(path, old)
+            self.saved[cat] = []
+        for p in (self.flag, self.saved_file, self.saved_file + ".tmp"):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        self.stage = 0
+
+    def restore_stale(self):
+        """Undo a sleep that a previous rgos-hw never finished (crash, restart) and drop a stale /run/rgos/sleeping."""
+        try:
+            with open(self.saved_file) as f:
+                data = json.load(f)
+            saved = data.get("saved", {})
+            for cat in self.ORDER:
+                self.saved[cat] = [list(x) for x in saved.get(cat, []) if isinstance(x, list) and len(x) == 2]
+        except (OSError, ValueError, AttributeError):
+            pass
+        self.leave()
+
+    def prefer_deep_sleep(self):
+        """Pick the kernel's deepest suspend state (\"deep\" = suspend to RAM) over s2idle when it offers both."""
+        path = self._p("power/mem_sleep")
+        states = rd(path).split()
+        if "deep" in states and "[deep]" not in states:
+            return wr(path, "deep")
+        return False
+
+
 class Backlight:
     """Panel backlight as a 0..100 percentage.
 

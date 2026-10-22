@@ -916,6 +916,7 @@ def run():
     sticks, next_try, last_status, note = None, 0.0, 0.0, ("sticks: starting" if mode == "adc-mux" else "sticks: %s" % mode)
     last_probe, probe_n, next_scan = 0.0, 0, time.time() + 3.0
     nxt = time.time()
+    sleep_chk, asleep = 0.0, False
     try:
         while not STOP:
             now = time.time()
@@ -993,7 +994,10 @@ def run():
                 if batch and batch[-1][0] != EV_SYN:
                     out += EVFMT.pack(0, 0, EV_SYN, 0, 0)
             if sticks is not None and time.time() >= nxt:
-                nxt = time.time() + poll
+                if time.time() >= sleep_chk:                  # device asleep (rgos-hw): sample the sticks twice a second, not 100x
+                    sleep_chk = time.time() + 0.25
+                    asleep = os.path.exists("/run/rgos/sleeping")
+                nxt = time.time() + (0.5 if asleep else poll)
                 try:
                     ev = sticks.poll()
                 except Exception as e:

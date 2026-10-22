@@ -80,6 +80,29 @@ class T(unittest.TestCase):
         r = subprocess.run([sys.executable, exe, "connect", "Home", "short"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 1)
 
+    def test_daemon_keeps_radio_down_while_device_sleeps(self):
+        from unittest import mock
+        calls, status = [], []
+        d = wifictl.Daemon()
+        stopped = []
+        d.children_stop = lambda: stopped.append(1)
+        d.last_state = "connected"
+        os.makedirs(wifictl.RUN_DIR, exist_ok=True)
+        flag = wifictl.SLEEP_FLAG
+        open(flag, "w").close()
+        try:
+            with mock.patch.object(wifictl, "find_iface", lambda: "wlan0"), \
+                    mock.patch.object(wifictl, "run", lambda cmd, timeout=8: calls.append(cmd)), \
+                    mock.patch.object(wifictl, "write_status", lambda st: status.append(st)):
+                d.step([0.0])
+        finally:
+            os.remove(flag)
+        self.assertEqual(stopped, [1])                                  # wpa_supplicant and DHCP client stopped
+        self.assertIn(["ip", "link", "set", "wlan0", "down"], calls)
+        self.assertNotIn(["rfkill", "unblock", "wifi"], calls)          # the radio is NOT switched back on every 2 seconds
+        self.assertEqual(status[-1]["state"], "off")
+        self.assertEqual(d.last_state, "")                              # reconnect is logged after waking
+
     def test_dhcp_script_syntax_and_noop(self):
         s = os.path.join(os.path.dirname(__file__), "..", "overlay", "opt", "rgos", "rgos-wifi-dhcp")
         self.assertEqual(subprocess.run(["sh", "-n", s]).returncode, 0)

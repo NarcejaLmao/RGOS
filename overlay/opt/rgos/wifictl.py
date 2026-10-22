@@ -16,6 +16,7 @@ import hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
 CONF_FILE = os.environ.get("RGOS_WIFI_CONF", "/var/lib/rgos/wifi.json")
 SYS_CONF = os.environ.get("RGOS_WIFI_SYS", "/etc/rgos/wifi.json")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
+SLEEP_FLAG = os.path.join(RUN_DIR, "sleeping")     # exists while the device sleeps (written by rgos-hw)
 STATUS_FILE = os.path.join(RUN_DIR, "wifi.status")
 WPA_CONF = os.path.join(RUN_DIR, "wpa_supplicant.conf")
 CTRL_DIR = os.environ.get("RGOS_WPA_CTRL", "/run/wpa_supplicant")
@@ -388,6 +389,12 @@ class Daemon:
                 iface_seen[0] = time.time()
                 load_modules(cfg)
             write_status({"state": "no-adapter"})
+            return
+        if os.path.exists(SLEEP_FLAG):                                # device asleep (rgos-hw): radio stays down, no scanning
+            self.children_stop()
+            run(["ip", "link", "set", iface, "down"])
+            write_status({"state": "off", "iface": iface})
+            self.last_state = ""                                      # reconnect (and log it) after waking
             return
         if not conf["enabled"]:
             self.children_stop()

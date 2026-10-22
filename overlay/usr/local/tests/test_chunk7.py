@@ -230,6 +230,96 @@ class FF(unittest.TestCase):
         self.h.close(); self.assertFalse(self.h.motor_on)
 
 
+class LowPowerTests(unittest.TestCase):
+    """hwctl.LowPower against a fake sysfs tree: everything is turned down, then restored exactly."""
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory(); self.addCleanup(self.d.cleanup)
+        self.r = self.d.name
+        r = self.r
+        for n in range(4):                                             # 4 cores sharing one cpufreq policy, like the H700
+            mk(r, "sys/devices/system/cpu/cpu%d/online" % n, 1) if n else None
+            mk(r, "sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor" % n, "schedutil")
+            mk(r, "sys/devices/system/cpu/cpu%d/cpufreq/scaling_available_governors" % n, "performance powersave schedutil")
+            mk(r, "sys/devices/system/cpu/cpu%d/cpufreq/scaling_max_freq" % n, 1512000)
+            mk(r, "sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_min_freq" % n, 480000)
+        mk(r, "sys/class/devfreq/gpu/governor", "simple_ondemand"); mk(r, "sys/class/devfreq/gpu/available_governors", "simple_ondemand performance powersave")
+        mk(r, "sys/class/devfreq/dram/governor", "userspace"); mk(r, "sys/class/devfreq/dram/available_governors", "userspace")   # no powersave: left alone
+        mk(r, "sys/class/rfkill/rfkill0/type", "wlan"); mk(r, "sys/class/rfkill/rfkill0/soft", 0)
+        mk(r, "sys/class/rfkill/rfkill1/type", "bluetooth"); mk(r, "sys/class/rfkill/rfkill1/soft", 1)     # already blocked by the user
+        mk(r, "sys/class/rfkill/rfkill2/type", "gps"); mk(r, "sys/class/rfkill/rfkill2/soft", 0)           # not a radio we manage
+        mk(r, "sys/class/leds/red/brightness", 255); mk(r, "sys/class/leds/blue/brightness", 0)
+        mk(r, "sys/power/mem_sleep", "s2idle [deep]")
+        self.sys, self.run = os.path.join(r, "sys"), os.path.join(r, "run")
+        os.makedirs(self.run)
+
+    def lp(self, conf=None):
+        return hwctl.LowPower(conf, sys_root=self.sys, run_dir=self.run)
+
+    def snap(self):
+        out = {}
+        for root, _dirs, files in os.walk(self.sys):
+            for f in files:
+                p = os.path.join(root, f); out[os.path.relpath(p, self.sys)] = open(p).read()
+        return out
+
+    def test_full_enter_turns_everything_down(self):
+        lp = self.lp(); lp.enter(full=True); g = lambda rel: rdf(self.sys, rel).strip()
+        self.assertEqual(g("devices/system/cpu/cpu0/cpufreq/scaling_governor"), "powersave")
+        self.assertEqual(g("devices/system/cpu/cpu0/cpufreq/scaling_max_freq"), "480000")
+        self.assertEqual([g("devices/system/cpu/cpu%d/online" % n) for n in (1, 2, 3)], ["0", "0", "0"])
+        self.assertEqual(g("class/devfreq/gpu/governor"), "powersave"); self.assertEqual(g("class/devfreq/dram/governor"), "userspace")
+        self.assertEqual(g("class/rfkill/rfkill0/soft"), "1"); self.assertEqual(g("class/rfkill/rfkill2/soft"), "0")
+        self.assertEqual(g("class/leds/red/brightness"), "0")
+        self.assertTrue(os.path.exists(os.path.join(self.run, "sleeping")))        # the Wi-Fi daemon and the stick hub look at this
+
+    def test_leave_restores_everything_exactly(self):
+        before = self.snap(); lp = self.lp()
+        lp.enter(full=True); self.assertNotEqual(self.snap(), before)
+        lp.leave()
+        self.assertEqual(self.snap(), before)
+        self.assertEqual(os.listdir(self.run), [])                                 # flag and saved-state file removed
+
+    def test_light_enter_only_touches_radios_and_leds(self):
+        before = self.snap(); lp = self.lp(); lp.enter(full=False); after = self.snap()
+        changed = {k for k in after if after[k] != before[k]}
+        self.assertEqual(changed, {"class/rfkill/rfkill0/soft", "class/leds/red/brightness"})
+        lp.leave(); self.assertEqual(self.snap(), before)
+
+    def test_upgrading_light_to_full_then_leave_restores_everything(self):
+        before = self.snap(); lp = self.lp()
+        lp.enter(full=False); lp.enter(full=True); lp.enter(full=True)             # repeated calls must not stack saves
+        lp.leave(); self.assertEqual(self.snap(), before)
+
+    def test_radio_the_user_already_blocked_stays_blocked(self):
+        lp = self.lp(); lp.enter(full=False); lp.leave()
+        self.assertEqual(rdf(self.sys, "class/rfkill/rfkill1/soft").strip(), "1")
+
+    def test_disabled_changes_nothing(self):
+        before = self.snap(); lp = self.lp({"low_power": {"enabled": False}}); lp.enter(full=True)
+        self.assertEqual(self.snap(), before); self.assertEqual(os.listdir(self.run), [])
+
+    def test_single_switches(self):
+        lp = self.lp({"low_power": {"radios_off": False, "offline_cpus": False}}); before = self.snap(); lp.enter(full=True)
+        after = self.snap(); changed = {k for k in after if after[k] != before[k]}
+        self.assertNotIn("class/rfkill/rfkill0/soft", changed); self.assertNotIn("devices/system/cpu/cpu1/online", changed)
+        self.assertIn("devices/system/cpu/cpu0/cpufreq/scaling_governor", changed)
+
+    def test_a_restarted_daemon_can_undo_a_sleep_it_never_finished(self):
+        before = self.snap(); self.lp().enter(full=True)                           # "crash": this object is simply dropped
+        self.lp().restore_stale()
+        self.assertEqual(self.snap(), before); self.assertEqual(os.listdir(self.run), [])
+
+    def test_stale_flag_without_saved_state_is_removed(self):
+        mk(self.run, "sleeping", "1"); self.lp().restore_stale()
+        self.assertFalse(os.path.exists(os.path.join(self.run, "sleeping")))
+
+    def test_prefers_deep_suspend_over_s2idle(self):
+        mk(self.sys, "power/mem_sleep", "[s2idle] deep")
+        self.assertTrue(self.lp().prefer_deep_sleep()); self.assertEqual(rdf(self.sys, "power/mem_sleep"), "deep")
+        mk(self.sys, "power/mem_sleep", "[s2idle]")                                # kernel without deep: left alone
+        self.assertFalse(self.lp().prefer_deep_sleep())
+
+
 def load_daemon():
     loader = importlib.machinery.SourceFileLoader("rgos_hw", os.path.join(OPT, "rgos-hw"))
     spec = importlib.util.spec_from_loader("rgos_hw", loader)
@@ -274,11 +364,13 @@ class Daemon(unittest.TestCase):
         self.msgs, self.poweroffs = [], []
         self.t = [1000.0]
         orig_bl, orig_bat, orig_motor = hwctl.Backlight, hwctl.Battery, hwctl.Motor
+        orig_lp = hwctl.LowPower
         self.patches = [
             mock.patch.object(hwctl, "load_conf", lambda *a, **k: self.conf),
             mock.patch.object(hwctl, "Backlight", lambda c=None, sys_root="/sys": orig_bl(c, sys_root=self.sys)),
             mock.patch.object(hwctl, "Battery", lambda c=None, sys_root="/sys": orig_bat(c, sys_root=self.sys)),
             mock.patch.object(hwctl, "Motor", lambda c=None, **k: orig_motor(c, sys_root=self.sys, gpio_root=os.path.join(r, "nogpio"))),
+            mock.patch.object(hwctl, "LowPower", lambda c=None, sys_root="/sys", run_dir="/run/rgos": orig_lp(c, sys_root=self.sys, run_dir=run_dir)),
             mock.patch.object(hwctl, "retroarch_msg", lambda text, port=55355: self.msgs.append(text)),
             mock.patch.object(m.time, "time", lambda: self.t[0]),
             mock.patch.object(m.Hw, "poweroff", lambda s, why: self.poweroffs.append(why)),
@@ -384,6 +476,46 @@ class Daemon(unittest.TestCase):
                              (0.9, [(1, P, 1)]), (1.1, [(1, P, 0)]),            # the key press that woke it, delivered late
                              (3.0, [(1, P, 1)]), (3.2, [(1, P, 0)])])           # a real new press
         self.assertEqual(len(calls), 2)
+
+    def test_screen_off_turns_cores_down_and_screen_on_restores_them(self):
+        r = self.d.name
+        for n in range(3):
+            if n: mk(r, "sys/devices/system/cpu/cpu%d/online" % n, 1)
+            mk(r, "sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor" % n, "schedutil")
+            mk(r, "sys/devices/system/cpu/cpu%d/cpufreq/scaling_available_governors" % n, "powersave schedutil")
+        hw = self.mod.Hw(self.conf)
+        hw.screen(False)
+        self.assertEqual(rdf(self.sys, "devices/system/cpu/cpu2/online").strip(), "0")
+        self.assertEqual(rdf(self.sys, "devices/system/cpu/cpu0/cpufreq/scaling_governor").strip(), "powersave")
+        self.assertTrue(os.path.exists(os.path.join(r, "run", "sleeping")))
+        hw.screen(True)
+        self.assertEqual(rdf(self.sys, "devices/system/cpu/cpu2/online").strip(), "1")
+        self.assertEqual(rdf(self.sys, "devices/system/cpu/cpu0/cpufreq/scaling_governor").strip(), "schedutil")
+        self.assertFalse(os.path.exists(os.path.join(r, "run", "sleeping")))
+
+    def test_daemon_exit_while_asleep_restores_everything(self):
+        r = self.d.name
+        mk(r, "sys/devices/system/cpu/cpu1/online", 1)
+        self.run_script([(0.2, [(1, 116, 1)]), (0.3, [(1, 116, 0)])])               # short press: asleep when the daemon is stopped
+        self.assertEqual(rdf(self.sys, "devices/system/cpu/cpu1/online").strip(), "1")
+        self.assertFalse(os.path.exists(os.path.join(r, "run", "sleeping")))
+
+    def test_suspend_turns_radios_off_during_and_restores_after(self):
+        r = self.d.name
+        mk(r, "sys/class/rfkill/rfkill0/type", "wlan"); mk(r, "sys/class/rfkill/rfkill0/soft", 0)
+        mk(r, "sys/power/mem_sleep", "[s2idle] deep")
+        hw = self.mod.Hw(self.conf); seen = {}
+        def fake_run(args, **kwargs):
+            if args[:2] == ["systemctl", "suspend"]:
+                seen["soft"] = rdf(self.sys, "class/rfkill/rfkill0/soft").strip()
+            return subprocess.CompletedProcess(args, 0, "", "")
+        asleep = iter(range(0, 1000, 30))
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(self.mod.Hw, "_slept", staticmethod(lambda: next(asleep))):
+            self.assertTrue(hw.suspend("unit test"))
+        self.assertEqual(seen["soft"], "1")                                         # radio was down while suspending
+        self.assertEqual(rdf(self.sys, "class/rfkill/rfkill0/soft").strip(), "0")   # and is back afterwards
+        self.assertEqual(rdf(self.sys, "power/mem_sleep"), "deep")                  # deepest suspend state requested
 
     def test_short_power_press_sleeps_and_wakes(self):
         P = 116
