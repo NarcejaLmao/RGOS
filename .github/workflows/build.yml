@@ -49,9 +49,10 @@ jobs:
 
       - name: Build (boot files, rootfs, image and update tar)
         run: |
+          chmod +x build.sh build tools/* 2>/dev/null || true   # the exec bit is lost when files are zipped/uploaded
           export BUILD_ID="$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
           echo "BUILD_ID=$BUILD_ID" >> "$GITHUB_ENV"
-          ./build.sh "$DEVICE" all
+          bash ./build.sh "$DEVICE" all
 
       - name: Locate the update tar
         run: |
