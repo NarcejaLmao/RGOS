@@ -6,10 +6,10 @@ behaves exactly as before. Settings: /etc/rgos/hw-tsp.json, overrides in /var/li
 
 What it does
   * POWER KEY (KEY_POWER, read straight from /dev/input/event*; the build tells systemd-logind to ignore the key):
-      short press  = screen off / on ("screen"; default) - the backlight goes dark, the running game is paused
-                     (SIGSTOP; ports too) and RetroArch stops making sound. Any power press wakes it.
+      short press  = full system suspend (default): Linux freezes all userspace, including the game, menu, audio,
+                     networking and background services. A hardware wake-capable power key resumes the same session.
       hold ~1.5 s  = clean power off (rgos-poweroff), with a short buzz as feedback.
-    conf power_key.short: "screen" | "poweroff" | "none".
+    conf power_key.short: "suspend" | "screen" | "poweroff" | "none".
   * BRIGHTNESS: hold SELECT and press VOL+ / VOL- (conf bright_combo: "select" | "menu" | "none"; the volume daemon
     ignores the volume keys while SELECT is held). The level is remembered in /var/lib/rgos/brightness and shown by
     the menu (/run/rgos/brightness) or as a RetroArch message in-game.
@@ -18,7 +18,7 @@ What it does
     row) it shows "shutting down" and powers off cleanly after critical_grace_s seconds unless a charger shows up.
   * AUDIO: switches on playback switches the codec leaves muted after boot (volume levels are rgos-volume's job).
 
-CLI (for tests and ports):  rgos-hw brightness [N|+N|-N]   rgos-hw screen on|off   rgos-hw rumble [ms]
+CLI (for tests and ports):  rgos-hw brightness [N|+N|-N]   rgos-hw screen on|off   rgos-hw suspend   rgos-hw rumble [ms]
                             rgos-hw status   rgos-hw prepoweroff   (run as root; `screen` only switches the backlight)
 """
 import os, signal, subprocess, sys, time
@@ -55,7 +55,7 @@ class Hw:
         self.osd_port = int(conf.get("osd_port", 55355) or 0)
         pk = conf.get("power_key", {})
         self.long_s = max(0.3, float(pk.get("long_ms", 1500)) / 1000.0)
-        self.short = pk.get("short", "screen")
+        self.short = pk.get("short", "suspend")
         self.power_codes = set(int(c) for c in pk.get("codes", [KEY_POWER]))
         self.combo = conf.get("bright_combo", "select")
         self.pause_game = bool(conf.get("pause_game_on_screen_off", True))
@@ -130,6 +130,34 @@ class Hw:
             self.bl.set(0)
         log("screen", "on" if on else "off")
 
+    # ---- full system suspend
+    def suspend(self, reason="power key"):
+        """Freeze the entire Linux session; systemctl returns only after the device resumes."""
+        log("full system suspend:", reason)
+        os.makedirs(RUN, exist_ok=True)
+        hwctl.write_run(RUN + "/suspended", str(int(time.time())))
+        # Darken the panel before entering suspend. The kernel then freezes all processes, not just the game.
+        self.bl.set(0)
+        try:
+            subprocess.run(["sync"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False, timeout=10)
+            result = subprocess.run(["systemctl", "suspend"], stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                    text=True, check=False)
+            if result.returncode:
+                log("system suspend failed (rc=%d): %s" % (result.returncode, (result.stderr or "").strip()))
+            else:
+                log("system resumed")
+        except (OSError, subprocess.SubprocessError) as e:
+            log("system suspend error:", e)
+        finally:
+            # Runs after resume, or immediately if this kernel cannot suspend.
+            self.bl.set(self.level)
+            try:
+                os.unlink(RUN + "/suspended")
+            except OSError:
+                pass
+
     # ---- power off
     def poweroff(self, reason):
         log("power off:", reason)
@@ -179,8 +207,12 @@ class Hw:
 def daemon():
     conf = hwctl.load_conf()
     if conf is None:
-        log("no hardware config for this device: nothing to do")
-        return 0
+        # Keep the power-key/suspend handler active even on devices without custom backlight/battery config.
+        # hwctl discovery helpers safely no-op when optional hardware is absent.
+        conf = {"power_key": {"short": "suspend", "long_ms": 1500, "codes": [KEY_POWER]},
+                "backlight": {"default_pct": 70}, "audio": {"enable_switches": False},
+                "battery": {}, "rumble": {"mode": "none"}}
+        log("no per-device hardware config; using generic power-key suspend")
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     os.makedirs(RUN, exist_ok=True)
@@ -192,6 +224,7 @@ def daemon():
     hwctl.write_run(ACTIVE, hw.combo)
     pads = EvPads()
     held = set()
+    wakeup_enabled = set()
     t_power = None                      # when the power key went down (None = up)
     long_done = False
     next_batt, next_audio, audio_tries = 0.0, 0.0, 0
@@ -208,7 +241,22 @@ def daemon():
             if now >= next_batt:
                 next_batt = now + 10.0
                 hw.battery_tick()
-            for t, c, v in pads.read():
+            events = pads.read()
+            # Only mark input devices that actually expose KEY_POWER as wake sources.
+            # Some kernels/drivers do not support wake from suspend; in that case suspend
+            # still freezes everything but may require a hardware reset to resume.
+            for path, keys in getattr(pads, "keybits", {}).items():
+                if KEY_POWER not in keys or path in wakeup_enabled:
+                    continue
+                wake = "/sys/class/input/%s/device/power/wakeup" % os.path.basename(path)
+                try:
+                    with open(wake, "w") as f:
+                        f.write("enabled\n")
+                    wakeup_enabled.add(path)
+                    log("power key wake enabled:", path)
+                except OSError:
+                    pass
+            for t, c, v in events:
                 if t != EV_KEY:
                     continue
                 if c in hw.power_codes:
@@ -216,7 +264,9 @@ def daemon():
                         t_power, long_done = time.time(), False
                     elif v == 0 and t_power is not None:
                         if not long_done:
-                            if hw.short == "screen":
+                            if hw.short == "suspend":
+                                hw.suspend("short power press")
+                            elif hw.short == "screen":
                                 hw.screen(not hw.screen_on)
                             elif hw.short == "poweroff":
                                 hw.poweroff("short press")
@@ -261,6 +311,8 @@ def cli(argv):
                 except OSError:
                     pass
         print("backlight set" if len(argv) > 1 else "usage: rgos-hw screen on|off")
+    elif cmd == "suspend":
+        hw.suspend("command line")
     elif cmd == "rumble":
         hw.motor.pulse(int(argv[1]) if len(argv) > 1 else 300)
     elif cmd == "status":

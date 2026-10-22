@@ -6,8 +6,7 @@ it found (rgos-hwprobe writes that to /var/log/rgos-hw.log). Nothing here raises
 backlight/battery/motor just means that feature is off.
 
 Config: /etc/rgos/hw-<device>.json (shipped; <device> = /etc/rgos-device), merged with /var/lib/rgos/hw.json (the
-user's own overrides, kept across firmware updates). No shipped file for the device (the RG34XX-SP) -> load_conf()
-returns None and rgos-hw does nothing, so that device behaves exactly as before.
+user's own overrides, kept across firmware updates). If no shipped file exists, rgos-hw still provides generic power-key suspend; optional hardware helpers no-op when absent.
 """
 import glob, json, os, re, subprocess, time
 

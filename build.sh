@@ -242,7 +242,6 @@ apply_overlay() {
   sudo ln -sf /etc/systemd/system/rgos-wifi.service "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/rgos-wifi.service"
   # rgos-hw exits at once on devices without /etc/rgos/hw-<device>.json, so enabling it everywhere changes nothing on the RG34XX-SP
   sudo ln -sf /etc/systemd/system/rgos-hw.service "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/rgos-hw.service"
-  sudo rm -f "$WORK/rootfs/etc/systemd/logind.conf.d/rgos-power.conf"
 }
 rootfs() {
   need debootstrap

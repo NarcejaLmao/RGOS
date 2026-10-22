@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chunk 7 tests: hwctl (backlight/battery/audio/motor), ffpad (rumble handshake) and the rgos-hw daemon logic, all
 against fake sysfs trees and a scripted fake input device (no hardware needed). Run: python3 tests/test_chunk7.py"""
-import ctypes, importlib.machinery, importlib.util, json, os, struct, sys, tempfile, unittest
+import ctypes, importlib.machinery, importlib.util, json, os, struct, subprocess, sys, tempfile, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -315,6 +315,19 @@ class Daemon(unittest.TestCase):
         self.assertEqual(rdf(self.d.name, "lib/brightness"), "5")
         self.run_script([(0.1, [(1, SEL, 1)])] + [(0.2 + i * 0.05, [(1, UP, 1)]) for i in range(12)])
         self.assertEqual(rdf(self.d.name, "lib/brightness"), "100")
+
+    def test_full_suspend_runs_systemctl_and_restores_backlight(self):
+        hw = self.mod.Hw(self.conf)
+        calls = []
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run):
+            hw.suspend("unit test")
+        self.assertIn(["systemctl", "suspend"], calls)
+        self.assertEqual(calls[0], ["sync"])
+        self.assertEqual(self.bl(), 178)
+        self.assertFalse(os.path.exists(os.path.join(self.d.name, "run", "suspended")))
 
     def test_short_power_press_sleeps_and_wakes(self):
         P = 116

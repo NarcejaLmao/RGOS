@@ -50,6 +50,7 @@ class EvPads:
     def __init__(self, pattern="/dev/input/event*"):
         self.pattern, self.fds, self.names, self.next_scan = pattern, {}, {}, 0.0
         self.profiles = {}
+        self.keybits = {}
 
     def scan(self):
         now = time.time()
@@ -77,6 +78,7 @@ class EvPads:
             except OSError:
                 keys = set(CODES)
             self.profiles[path] = make_profile(keys)
+            self.keybits[path] = keys
 
     def read(self):
         """Return a list of (type, code, value) events from all input devices."""
@@ -92,6 +94,7 @@ class EvPads:
                     os.close(fd)
                     del self.fds[path], self.names[path]
                     self.profiles.pop(path, None)
+                    self.keybits.pop(path, None)
                     break
                 if not data:
                     break
