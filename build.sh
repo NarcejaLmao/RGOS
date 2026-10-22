@@ -262,18 +262,36 @@ flycast_build() {
   local src="$WORK/flycast-src" sysroot="$WORK/flycast-sysroot" bld="$WORK/flycast-build" out="$WORK/flycast-out"
   local tag=${FLYCAST_TAG:-v2.5} cpu=${FLYCAST_CPUFLAGS:--mcpu=cortex-a53} c triplet=aarch64-linux-gnu
   if [ -z "${FLYCAST_REBUILD:-}" ] && [ -x "$out/flycast" ]; then echo "using cached Flycast build: $out/flycast"; return 0; fi
-  for c in cmake pkg-config git debootstrap ${CROSS}gcc ${CROSS}g++ ${CROSS}strip; do
+  for c in cmake pkg-config git debootstrap dpkg-deb tar make ${CROSS}gcc ${CROSS}g++ ${CROSS}strip; do
     command -v "$c" >/dev/null || { echo "Flycast build: missing host tool '$c' (x86-64 host: apt install cmake pkg-config g++-aarch64-linux-gnu)"; return 1; }
   done
   # 1. sysroot with the arm64 development packages (same Debian suite as the rootfs, so the libraries match at run time).
   #    --foreign: only unpack the packages, nothing has to run in the arm64 chroot. Everything Flycast links against is
   #    already in the rootfs at run time (SDL2 via pygame, ALSA via alsa-utils, EGL/GLES/GBM/DRM, zlib); curl and libzip are
   #    avoided (bundled / off) so no new runtime packages are needed.
-  if [ ! -f "$sysroot/.rgos-ok" ]; then
+  # (a sysroot left by an older run has the .rgos-ok marker but no unpacked -dev packages: treat that as stale and redo it)
+  if [ ! -f "$sysroot/.rgos-ok" ] || [ ! -e "$sysroot/usr/include/SDL2/SDL.h" ]; then
     sudo rm -rf "$sysroot"
     sudo debootstrap --arch=arm64 --foreign --variant=minbase --components=main \
       --include=libsdl2-dev,libegl-dev,libgles-dev,libgbm-dev,libdrm-dev,libasound2-dev,libudev-dev,zlib1g-dev,libc6-dev,linux-libc-dev \
       "$SUITE" "$sysroot" http://deb.debian.org/debian || { echo "Flycast build: could not create the arm64 sysroot"; return 1; }
+    # --foreign only unpacks the "required" packages; the --include'd -dev packages (and their dependencies) are merely
+    # downloaded into the apt cache and would be installed by the second stage, which never runs here. Unpack every
+    # downloaded .deb into the sysroot by hand so the headers, .so symlinks and .pc/.cmake files are really there.
+    local deb ndeb=0
+    for deb in "$sysroot"/var/cache/apt/archives/*.deb; do
+      [ -f "$deb" ] || continue
+      dpkg-deb --fsys-tarfile "$deb" | sudo tar -xf - -C "$sysroot" --keep-directory-symlink --no-same-owner \
+        || { echo "Flycast build: could not unpack $deb into the sysroot"; sudo rm -rf "$sysroot"; return 1; }
+      ndeb=$((ndeb+1))
+    done
+    [ "$ndeb" -gt 0 ] || { echo "Flycast build: debootstrap downloaded no packages into $sysroot/var/cache/apt/archives"; sudo rm -rf "$sysroot"; return 1; }
+    # sanity check: the development files CMake needs must now exist, otherwise do not mark the sysroot as good
+    if ! sudo test -e "$sysroot/usr/include/SDL2/SDL.h" || ! sudo test -e "$sysroot/usr/include/EGL/egl.h" \
+       || ! sudo test -e "$sysroot/usr/include/GLES2/gl2.h" || ! sudo test -e "$sysroot/usr/include/gbm.h"; then
+      echo "Flycast build: sysroot is missing SDL2/EGL/GLES2/GBM headers after unpacking $ndeb packages"
+      sudo rm -rf "$sysroot"; return 1
+    fi
     sudo touch "$sysroot/.rgos-ok"
   fi
   # 2. sources, with the submodules Flycast vendors (libchdr, imgui, glslang, ...)
@@ -305,8 +323,10 @@ TOOLCHAIN
   # (If your Flycast version names an option differently, CMake only warns; add overrides through FLYCAST_CMAKE_ARGS.)
   cmake -S "$src" -B "$bld" -DCMAKE_TOOLCHAIN_FILE="$bld/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
     -DUSE_GLES=ON -DUSE_VULKAN=OFF -DUSE_HOST_SDL=ON -DUSE_HOST_LIBZIP=OFF -DUSE_LIBCURL=OFF -DUSE_BREAKPAD=OFF \
-    -DENABLE_CTEST=OFF ${FLYCAST_CMAKE_ARGS:-} || { echo "Flycast build: cmake configure failed"; return 1; }
-  cmake --build "$bld" -j"$J" || { echo "Flycast build: compile failed"; return 1; }
+    -DENABLE_CTEST=OFF ${FLYCAST_CMAKE_ARGS:-} 2>&1 | tee "$WORK/flycast-configure.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast build: cmake configure failed (log: $WORK/flycast-configure.log)"; return 1; }
+  cmake --build "$bld" -j"$J" 2>&1 | tee "$WORK/flycast-compile.log"
+  [ "${PIPESTATUS[0]}" = 0 ] || { echo "Flycast build: compile failed (log: $WORK/flycast-compile.log)"; return 1; }
   [ -f "$bld/flycast" ] || { echo "Flycast build: no flycast binary produced in $bld"; return 1; }
   mkdir -p "$out"; cp "$bld/flycast" "$out/flycast"; ${CROSS}strip "$out/flycast" || true
   echo "built Flycast $tag -> $out/flycast"
@@ -320,7 +340,7 @@ flycast_install() {
     sudo ln -sf /opt/flycast/flycast "$WORK/rootfs/usr/local/bin/flycast"
     # every shared library the binary needs must exist in the rootfs, or the tool fails at run time
     for lib in $(readelf -d "$WORK/flycast-out/flycast" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
-      sudo find "$WORK/rootfs/lib" "$WORK/rootfs/usr/lib" -name "$lib" 2>/dev/null | grep -q . || missing="$missing $lib"
+      [ -n "$(sudo find "$WORK/rootfs/lib" "$WORK/rootfs/usr/lib" -name "$lib" -print -quit 2>/dev/null)" ] || missing="$missing $lib"
     done
     [ -z "$missing" ] || echo "WARNING: Flycast needs libraries that are not in the rootfs:$missing (add their Debian packages to the debootstrap --include list)"
     echo "installed standalone Flycast"
