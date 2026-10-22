@@ -150,6 +150,10 @@ class Input:
             self.held.clear()
             self.repeat.clear()
             evs = []
+            for e in pygame.event.get():           # keyboard / joystick events must not act in the dark either
+                if e.type == pygame.QUIT:
+                    out.append("quit")
+            return out
         for t, c, v in evs:
             if t == EV_KEY and c in EV_CODES:
                 self.ev_seen = True
@@ -1614,8 +1618,11 @@ def main():
             pygame.draw.rect(canvas, ACCENT, (bx + 66, by + 17, max(6, 130 * bri_pct // 100), 10), border_radius=5)
             canvas.blit(f_small.render("%d%%" % bri_pct, True, TEXT), (bx + 208, by + 14))
 
+        asleep = os.path.exists(SCREENOFF_FILE)
+        if asleep:                              # screen asleep (rgos-hw): show black (even if the backlight cannot be switched) and idle
+            canvas.fill((0, 0, 0))
         present()
-        clock.tick(30)
+        clock.tick(4 if asleep else 30)
 
     if not windowed:
         fbout.set_graphics(False)

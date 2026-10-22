@@ -156,32 +156,59 @@ class Hw:
         log("screen", "on" if on else "off")
 
     # ---- full system suspend
+    MIN_SLEEP_S = 1.5        # a suspend that "resumed" sooner than this did not really happen (see suspend())
+
+    @staticmethod
+    def _slept():
+        """Seconds the system has spent suspended so far (CLOCK_BOOTTIME keeps counting in suspend, CLOCK_MONOTONIC stops)."""
+        try:
+            return time.clock_gettime(time.CLOCK_BOOTTIME) - time.clock_gettime(time.CLOCK_MONOTONIC)
+        except (AttributeError, OSError):
+            return 0.0
+
     def suspend(self, reason="power key"):
-        """Freeze the entire Linux session; systemctl returns only after the device resumes."""
+        """Freeze the entire Linux session; systemctl returns only after the device resumes.
+
+        Returns True when the system really slept. Returns False when the kernel refused to suspend or woke again at
+        once (the "screen goes dark and comes straight back" case); the caller then falls back to soft_sleep()."""
         log("full system suspend:", reason)
         os.makedirs(RUN, exist_ok=True)
         hwctl.write_run(RUN + "/suspended", str(int(time.time())))
         # Darken the panel before entering suspend. The kernel then freezes all processes, not just the game.
         self.bl.set(0)
+        ok = False
+        before = self._slept()
         try:
             subprocess.run(["sync"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, check=False, timeout=10)
             result = subprocess.run(["systemctl", "suspend"], stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                                     text=True, check=False)
+            slept = self._slept() - before
             if result.returncode:
                 log("system suspend failed (rc=%d): %s" % (result.returncode, (result.stderr or "").strip()))
+            elif slept < self.MIN_SLEEP_S:
+                log("system suspend returned after %.2fs asleep: woke at once" % slept)
             else:
-                log("system resumed")
+                ok = True
+                log("system resumed after %.0fs" % slept)
         except (OSError, subprocess.SubprocessError) as e:
             log("system suspend error:", e)
         finally:
             # Runs after resume, or immediately if this kernel cannot suspend.
-            self.bl.set(self.level)
+            if ok:
+                self.bl.set(self.level)
             try:
                 os.unlink(RUN + "/suspended")
             except OSError:
                 pass
+        return ok
+
+    def soft_sleep(self):
+        """Sleep without kernel suspend: panel dark, game/port paused, menu ignores buttons, wake on the next power press."""
+        log("soft sleep (screen off, waiting for the power key)")
+        self.screen_on = True            # screen() ignores a call that changes nothing
+        self.screen(False)
 
     # ---- power off
     def poweroff(self, reason):
@@ -252,6 +279,9 @@ def daemon():
     wakeup_enabled = set()
     t_power = None                      # when the power key went down (None = up)
     long_done = False
+    skip_short = False                  # this press only woke the device: its release must not sleep it again
+    suspend_works = True                # cleared when the kernel cannot (or will not) suspend: sleep with the screen off instead
+    ignore_power_until = 0.0            # right after a real resume: the key press that woke us must not count as a new press
     next_batt, next_audio, audio_tries = 0.0, 0.0, 0
     audio_conf = conf.get("audio", {})
     try:
@@ -274,10 +304,18 @@ def daemon():
                 if t != EV_KEY:
                     continue
                 if c in hw.power_codes:
+                    if time.time() < ignore_power_until:
+                        t_power = None
+                        continue
                     if v == 1 and t_power is None:
                         t_power, long_done = time.time(), False
+                        if not hw.screen_on:         # asleep with the screen off: this press wakes the device
+                            hw.screen(True)
+                            skip_short = True
                     elif v == 0 and t_power is not None:
-                        if not long_done:
+                        if skip_short:
+                            skip_short = False
+                        elif not long_done:
                             if hw.short == "suspend":
                                 # Let the key-up IRQ settle before entering suspend, then
                                 # discard queued input events so the same press cannot
@@ -287,7 +325,22 @@ def daemon():
                                     pads.read()
                                 except Exception:
                                     pass
-                                hw.suspend("short power press")
+                                if suspend_works:
+                                    if hw.suspend("short power press"):
+                                        ignore_power_until = time.time() + 1.0
+                                        try:
+                                            pads.read()
+                                        except Exception:
+                                            pass
+                                    else:
+                                        suspend_works = False
+                                        log("kernel suspend does not work here: using soft sleep from now on")
+                                if not suspend_works:
+                                    hw.soft_sleep()
+                                    try:
+                                        pads.read()          # drop what was queued while going to sleep
+                                    except Exception:
+                                        pass
                             elif hw.short == "screen":
                                 hw.screen(not hw.screen_on)
                             elif hw.short == "poweroff":

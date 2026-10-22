@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Chunk 7 tests: hwctl (backlight/battery/audio/motor), ffpad (rumble handshake) and the rgos-hw daemon logic, all
 against fake sysfs trees and a scripted fake input device (no hardware needed). Run: python3 tests/test_chunk7.py"""
-import ctypes, importlib.machinery, importlib.util, json, os, struct, sys, tempfile, unittest
+import ctypes, importlib.machinery, importlib.util, json, os, struct, subprocess, sys, tempfile, unittest
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -237,6 +237,20 @@ def load_daemon():
     return mod
 
 
+class WakeSources(unittest.TestCase):
+    def test_only_power_key_devices_can_wake_system(self):
+        m = load_daemon()
+        with tempfile.TemporaryDirectory() as root:
+            mk(root, "class/input/event0/device/power/wakeup", "enabled")
+            mk(root, "class/input/event1/device/power/wakeup", "enabled")
+            class Pads:
+                keybits = {"/dev/input/event0": {116, 115}, "/dev/input/event1": {304, 305}}
+            enabled = m.configure_wake_sources(Pads(), set(), sys_root=root)
+            self.assertEqual(rdf(root, "class/input/event0/device/power/wakeup").strip(), "enabled")
+            self.assertEqual(rdf(root, "class/input/event1/device/power/wakeup").strip(), "disabled")
+            self.assertEqual(enabled, {"/dev/input/event0", "/dev/input/event1"})
+
+
 class Daemon(unittest.TestCase):
     """Runs rgos-hw's main loop with a fake clock, fake input events and fake sysfs."""
     def setUp(self):
@@ -316,6 +330,61 @@ class Daemon(unittest.TestCase):
         self.run_script([(0.1, [(1, SEL, 1)])] + [(0.2 + i * 0.05, [(1, UP, 1)]) for i in range(12)])
         self.assertEqual(rdf(self.d.name, "lib/brightness"), "100")
 
+    def test_full_suspend_runs_systemctl_and_restores_backlight(self):
+        hw = self.mod.Hw(self.conf)
+        calls = []
+        def fake_run(args, **kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args, 0, "", "")
+        asleep = iter(range(0, 1000, 30))                      # every reading of the suspended-time clock is 30 s later
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(self.mod.Hw, "_slept", staticmethod(lambda: next(asleep))):
+            self.assertTrue(hw.suspend("unit test"))
+        self.assertIn(["systemctl", "suspend"], calls)
+        self.assertEqual(calls[0], ["sync"])
+        self.assertEqual(self.bl(), 178)
+        self.assertFalse(os.path.exists(os.path.join(self.d.name, "run", "suspended")))
+
+    def test_suspend_that_wakes_at_once_is_reported_and_leaves_screen_dark(self):
+        hw = self.mod.Hw(self.conf)
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(args, 0, "", "")
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=fake_run), \
+                mock.patch.object(self.mod.Hw, "_slept", staticmethod(lambda: 5.0)):       # the suspended-time clock never moved
+            self.assertFalse(hw.suspend("unit test"))
+        self.assertEqual(self.bl(), 0)                         # no instant flash back on: the caller decides what happens next
+
+    def test_failed_suspend_falls_back_to_soft_sleep_until_power_pressed_again(self):
+        P = 116
+        self.conf["power_key"]["short"] = "suspend"
+        calls, state = [], []
+        orig = self.mod.Hw.screen
+        def spy(s, on):
+            orig(s, on); state.append((round(self.t[0] - 1000, 1), on, self.bl(), os.path.exists(self.mod.SCREENOFF)))
+        def fake_suspend(s, reason="power key"):
+            calls.append(reason); return False
+        with mock.patch.object(self.mod.Hw, "screen", spy), mock.patch.object(self.mod.Hw, "suspend", fake_suspend):
+            self.run_script([(0.5, [(1, P, 1)]), (0.7, [(1, P, 0)]),            # short press: tries suspend, falls back to soft sleep
+                             (3.0, [(1, P, 1)]), (3.2, [(1, P, 0)]),            # press wakes it; releasing must not sleep it again
+                             (5.0, [(1, P, 1)]), (5.2, [(1, P, 0)])])           # next press: straight to soft sleep (no new suspend try)
+        self.assertEqual(calls, ["short power press"])                          # kernel suspend is only tried once
+        self.assertEqual([(on, bl, off) for _t, on, bl, off in state],
+                         [(False, 0, True), (True, 178, False), (False, 0, True),
+                          (True, 178, False)])                                  # the last one is the daemon waking the screen as it exits
+        self.assertEqual(self.poweroffs, [])
+
+    def test_wake_press_echo_after_real_suspend_does_not_sleep_again(self):
+        P = 116
+        self.conf["power_key"]["short"] = "suspend"
+        calls = []
+        def fake_suspend(s, reason="power key"):
+            calls.append(reason); return True
+        with mock.patch.object(self.mod.Hw, "suspend", fake_suspend):
+            self.run_script([(0.5, [(1, P, 1)]), (0.7, [(1, P, 0)]),            # suspends and resumes
+                             (0.9, [(1, P, 1)]), (1.1, [(1, P, 0)]),            # the key press that woke it, delivered late
+                             (3.0, [(1, P, 1)]), (3.2, [(1, P, 0)])])           # a real new press
+        self.assertEqual(len(calls), 2)
+
     def test_short_power_press_sleeps_and_wakes(self):
         P = 116
         state = {}
@@ -375,10 +444,12 @@ class Daemon(unittest.TestCase):
         self.t[0] += 500; hw.battery_tick()
         self.assertEqual(self.poweroffs, [])
 
-    def test_no_config_exits_immediately(self):
-        self.conf = None
-        with mock.patch.object(hwctl, "load_conf", lambda *a, **k: None):
-            self.assertEqual(self.mod.daemon(), 0)
+    def test_no_config_uses_generic_power_key_suspend(self):
+        self.conf = None                                       # no /etc/rgos/hw-<device>.json: the daemon still handles the power key
+        calls = []
+        with mock.patch.object(self.mod.Hw, "suspend", lambda s, reason="": calls.append(reason) or True):
+            self.run_script([(0.5, [(1, 116, 1)]), (0.7, [(1, 116, 0)])])
+        self.assertEqual(calls, ["short power press"])
 
 
 if __name__ == "__main__":
