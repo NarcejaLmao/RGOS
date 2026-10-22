@@ -167,5 +167,29 @@ class ShippedVideosTest(unittest.TestCase):
         self.assertIn("W, H = 720, 480", src)
 
 
+class BootSplashServiceTest(unittest.TestCase):
+    """The video must start from its own early service, not from the menu."""
+    def read(self, *p):
+        return open(os.path.join(OVL, *p)).read()
+
+    def test_service_is_early_and_non_blocking(self):
+        u = self.read("etc", "systemd", "system", "rgos-splash.service")
+        self.assertIn("DefaultDependencies=no", u)
+        self.assertIn("Before=rgos.service", u)
+        self.assertNotIn("Before=sysinit.target", u)          # the rest of boot must not wait for the video
+        self.assertIn("TimeoutStartSec=", u)
+        self.assertNotRegex(u, r"(?m)^(After|Requires|Wants)=.*(local-fs|sdcard|udev-settle)")   # no waiting for mounts
+
+    def test_launcher_waits_for_the_video(self):
+        u = self.read("etc", "systemd", "system", "rgos.service")
+        self.assertRegex(u, r"(?m)^After=.*rgos-splash\.service")
+
+    def test_script_marks_done_so_menu_skips_it(self):
+        s = self.read("opt", "rgos", "rgos-splash")
+        self.assertIn('"splash-done"', s)
+        self.assertIn("mark_done()", s)
+        self.assertIn('SPLASH_DONE = os.path.join(RUN_DIR, "splash-done")', self.read("opt", "rgos", "menu.py"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""RG OS boot splash: plays the startup video as early in boot as possible, from rgos-splash.service.
+
+Runs on its own (no menu, no ROM scan, no SD sync): it only needs /dev/fb0, so the video starts as soon as the kernel
+framebuffer exists instead of waiting for the launcher. rgos.service is ordered after this unit, so the launcher takes the
+screen over only when the video is done. A button press skips the video.
+
+On exit it writes /run/rgos/splash-done; menu.py sees that marker and does not play the splash a second time.
+Settings > Startup splash (on / silent / off) is honoured. Any failure is logged and ignored: it must never hold up boot.
+"""
+import io, json, os, sys, time
+
+sys.path.insert(0, "/opt/rgos")
+RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
+STATE_FILE = os.environ.get("RGOS_STATE", "/var/lib/rgos/state.json")
+ROMS_ROOT = os.environ.get("RGOS_ROMS", "/media/roms")
+SPLASH_DONE = os.path.join(RUN_DIR, "splash-done")
+CANVAS = (720, 480)                  # same logical canvas as menu.py; fbout scales it to the panel
+
+
+def log(msg):
+    sys.stderr.write("%s rgos-splash: %s\n" % (time.strftime("%H:%M:%S"), msg))
+    sys.stderr.flush()
+
+
+def device():
+    try:
+        with open("/etc/rgos-device") as f:
+            return f.read().strip() or "rg34xx-sp"
+    except OSError:
+        return "rg34xx-sp"
+
+
+def mark_done():
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        open(SPLASH_DONE, "w").close()
+    except OSError:
+        pass
+
+
+def wait_for_fb(timeout=8.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if os.path.exists(os.environ.get("RGOS_FB_DEV", "/dev/fb0")):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def main():
+    import splash
+    try:
+        with open(STATE_FILE) as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+    mode = splash.mode_of(state)
+    if mode == "off":
+        log("splash is off")
+        return
+    path = splash.find_splash(device(), ROMS_ROOT)
+    if not path:
+        log("no video found")
+        return
+    if not wait_for_fb():
+        log("no framebuffer")
+        return
+
+    os.environ["SDL_VIDEODRIVER"] = "dummy"          # off-screen canvas only; pixels go to /dev/fb0 through fbout
+    os.environ.setdefault("SDL_AUDIODRIVER", "alsa")
+    os.environ.setdefault("RGOS_FB_DBUF", "0")        # same settings as rgos-session: single buffer, no vsync/pan ioctls
+    os.environ.setdefault("RGOS_FB_VSYNC", "0")
+    import pygame
+    import fbout
+    from evpad import EvPads, EV_KEY
+
+    pygame.display.init()
+    pygame.display.set_mode(CANVAS)
+    fb = fbout.FbOut()
+    fbout.set_graphics(True)                         # keep the kernel console from drawing over the video
+    canvas = pygame.Surface(CANVAS)
+    W, H = CANVAS
+
+    with open(path, "rb") as f:
+        data = f.read()
+    frames, conf, snd = splash.split_mjpeg(data), splash.read_conf(path), None
+    log("%s, %d frames at %g fps" % (path, len(frames), conf["fps"]))
+
+    if mode == "on" and conf["sound"]:
+        try:
+            pygame.mixer.init(22050, -16, 1, 1024)
+            snd = pygame.mixer.Sound(conf["sound"])
+            snd.play()
+        except Exception as e:                       # no sound card yet / busy: the video still plays
+            log("no sound (%s)" % e)
+            snd = None
+
+    def decode(b):
+        return pygame.image.load(io.BytesIO(b), "frame.jpg").convert()
+
+    def show(img):
+        iw, ih = img.get_size()
+        if (iw, ih) == (W, H):
+            canvas.blit(img, (0, 0))
+        else:                                        # a video of another size (own file on the card): fit it
+            sc = min(W / iw, H / ih)
+            sw, sh = max(1, int(iw * sc)), max(1, int(ih * sc))
+            canvas.fill((0, 0, 0))
+            canvas.blit(pygame.transform.smoothscale(img, (sw, sh)), ((W - sw) // 2, (H - sh) // 2))
+        fb.present(canvas)
+
+    pads = EvPads()
+
+    def pressed():
+        pads.scan()
+        return any(t == EV_KEY and v == 1 for t, c, v in pads.read())
+
+    pressed()                                        # open the devices and drop anything pressed during boot
+    n = splash.play(data, frames, conf["fps"], decode, show, pressed)
+    log("%d of %d frames shown" % (n, len(frames)))
+    if snd:
+        snd.stop()
+    if pygame.mixer.get_init():
+        pygame.mixer.quit()
+    canvas.fill((0, 0, 0))
+    fb.present(canvas)                               # leave a black screen for the launcher (console stays in graphics mode)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        log("failed: %r" % (e,))
+    finally:
+        mark_done()                                  # played, skipped or failed: the menu must not play it again
+    sys.exit(0)

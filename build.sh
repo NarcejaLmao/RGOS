@@ -231,7 +231,7 @@ apply_overlay() {
                  "$WORK/rootfs/opt/rgos/rgos-perf" "$WORK/rootfs/opt/rgos/rgos-videoprobe" \
                  "$WORK/rootfs/opt/rgos/rgos-hw" "$WORK/rootfs/opt/rgos/rgos-hwprobe" "$WORK/rootfs/opt/rgos/rgos-poweroff" \
                  "$WORK/rootfs/opt/rgos/rgos-inputprobe" "$WORK/rootfs/opt/rgos/rgos-wifi" "$WORK/rootfs/opt/rgos/rgos-wifi-dhcp" \
-                 "$WORK/rootfs/opt/rgos/rgos-sdcard" "$WORK/rootfs/opt/rgos/sdcard.py"
+                 "$WORK/rootfs/opt/rgos/rgos-sdcard" "$WORK/rootfs/opt/rgos/sdcard.py" "$WORK/rootfs/opt/rgos/rgos-splash"
   # enable the volume-button service here (not only in rootfs()) so `./build.sh update` picks it up too
   sudo mkdir -p "$WORK/rootfs/etc/systemd/system/multi-user.target.wants"
   sudo ln -sf /etc/systemd/system/rgos-volume.service "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/rgos-volume.service"
@@ -242,6 +242,9 @@ apply_overlay() {
   sudo ln -sf /etc/systemd/system/rgos-wifi.service "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/rgos-wifi.service"
   # rgos-hw exits at once on devices without /etc/rgos/hw-<device>.json, so enabling it everywhere changes nothing on the RG34XX-SP
   sudo ln -sf /etc/systemd/system/rgos-hw.service "$WORK/rootfs/etc/systemd/system/multi-user.target.wants/rgos-hw.service"
+  # boot splash video: plays from rgos-splash.service as soon as the framebuffer exists (not from the menu); rgos.service waits for it
+  sudo mkdir -p "$WORK/rootfs/etc/systemd/system/sysinit.target.wants"
+  sudo ln -sf /etc/systemd/system/rgos-splash.service "$WORK/rootfs/etc/systemd/system/sysinit.target.wants/rgos-splash.service"
 }
 rootfs() {
   need debootstrap
