@@ -1,0 +1,2 @@
+::respawn:/bin/sh /opt/rgos/rgos-session
+::shutdown:/bin/umount -a -r
