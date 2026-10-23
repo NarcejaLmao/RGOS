@@ -12,6 +12,25 @@ sdcard.SYS_DEV_BLOCK = D + "/devblock"
 CALLS, BLKID = [], {}
 
 
+# The code under test mounts on the real /media/roms and /media/roms2 (only `mount` is faked), so it also tries to create
+# those folders. That needs root: CI runners are not root. Skip creating them; every other makedirs still runs for real.
+_real_makedirs = os.makedirs
+
+
+def _safe_makedirs(path, *a, **k):
+    if str(path).startswith("/media/"):
+        return None
+    return _real_makedirs(path, *a, **k)
+
+
+def setUpModule():
+    os.makedirs = _safe_makedirs
+
+
+def tearDownModule():
+    os.makedirs = _real_makedirs
+
+
 def fake_sh(args, timeout=15):
     CALLS.append(args)
     if args[0] == "blkid":
