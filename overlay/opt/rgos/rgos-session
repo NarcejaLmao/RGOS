@@ -210,44 +210,48 @@ run_retroarch_ui() {
     ra_run "menu" "" --menu
     return 0
 }
+# Run one port launcher script: run_port <script>
+#   * the script's folder is its working directory; it runs in its own session/process group (setsid) so that
+#     rgos-portkey (SELECT+START held 1 s) and the cleanup below can end the whole group
+#   * tuning knobs come from /etc/rgos/ports.conf; the performance profile (rgos-perf) is undone when the port ends
 run_port() {
-    local script=$1 dir pid kpid pin
-    dir=$(dirname "$script")
-    if [ ! -f "$script" ]; then echo "cannot launch port: $script" >> "$PORTLOG"; return; fi
-    {
-        echo "=== $(date)  port: $script"
-    } >> "$PORTLOG"
-    mkdir -p /media/roms/saves/ports/data /media/roms/saves/ports/config /var/lib/rgos/shader-cache 2>/dev/null
+    local script=$1 dir pid kpid pin=
     local PORT_NICE=-5 MESA_NO_ERROR=1 MESA_GLTHREAD=false PIN_HELPERS=0
+    dir=$(dirname "$script")
+    if [ ! -f "$script" ]; then echo "cannot launch port: $script" >> "$PORTLOG"; return 0; fi
+    echo "=== $(date)  port: $script" >> "$PORTLOG"
+    mkdir -p /media/roms/saves/ports/data /media/roms/saves/ports/config /var/lib/rgos/shader-cache 2>/dev/null
     [ -r /etc/rgos/ports.conf ] && . /etc/rgos/ports.conf
-    # Launcher scripts edited on Windows have CRLF line endings; bash then fails on the first line ("bash\r: not found").
-    grep -q $'\r' "$script" 2>/dev/null && { sed -i 's/\r$//' "$script" 2>/dev/null && echo "converted CRLF line endings in $script" >> "$PORTLOG"; }
-    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1          # performance profile, undone below
+    # Launchers edited on Windows have CRLF line endings; bash would then fail on the first line ("bash\r: not found").
+    if grep -q $'\r' "$script" 2>/dev/null && sed -i 's/\r$//' "$script" 2>/dev/null; then
+        echo "converted CRLF line endings in $script" >> "$PORTLOG"
+    fi
+    /opt/rgos/rgos-perf on >> "$PORTLOG" 2>&1
     ra_graphics 1       # text console off the screen while the port owns KMS (same as for RetroArch)
     (
         cd "$dir" || exit 1
-        # The session itself runs with SDL_VIDEODRIVER=dummy (the menu draws through the framebuffer). That value must NOT
-        # reach a port: SDL would pick the dummy driver and the game runs (or exits) without ever showing a picture.
-        # Let SDL choose its real driver (KMSDRM). RGOS_* only configure the menu's own framebuffer output.
+        # The session runs with SDL_VIDEODRIVER=dummy (the menu draws through the framebuffer). It must NOT reach a
+        # port: SDL would pick the dummy driver and the game would run without ever showing a picture. RGOS_* only
+        # configure the menu's own framebuffer output.
         unset SDL_VIDEODRIVER RGOS_VIDEO RGOS_FB_DBUF RGOS_FB_VSYNC
         export ROMS_ROOT=/media/roms PORTS_DIR=/media/roms/roms/ports
         export SDL_GAMECONTROLLERCONFIG_FILE=/etc/rgos/gamecontrollerdb.txt
         export XDG_DATA_HOME=/media/roms/saves/ports/data XDG_CONFIG_HOME=/media/roms/saves/ports/config
         export LD_LIBRARY_PATH="$dir/libs.aarch64:$dir/lib:$dir/libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"   # no trailing ":" (it would add the cwd)
-        # persistent shader cache (on the root partition, kept across updates): no recompile stutter on later runs
+        # persistent shader cache on the root partition (kept across updates): no recompile stutter on later runs
         export MESA_SHADER_CACHE_DIR=/var/lib/rgos/shader-cache MESA_SHADER_CACHE_MAX_SIZE=256M
         export MESA_NO_ERROR mesa_glthread=$MESA_GLTHREAD
         exec nice -n "$PORT_NICE" setsid bash "$script" >> "$PORTLOG" 2>&1 < /dev/null
     ) &
     pid=$!
     echo "$pid" > /run/rgos/port.pid        # rgos-hw pauses this process group while the screen is off
-    if [ "$PIN_HELPERS" = 1 ]; then pin="taskset -c 0 nice -n -10"; else pin=; fi
+    [ "$PIN_HELPERS" = 1 ] && pin="taskset -c 0 nice -n -10"
     $pin python3 /opt/rgos/rgos-portkey "$pid" >> "$PORTLOG" 2>&1 &
     kpid=$!
     wait "$pid"
     echo "--- port exited (rc=$?)" >> "$PORTLOG"
     kill "$kpid" 2>/dev/null
-    kill -KILL -- "-$pid" 2>/dev/null    # leftovers of the port's process group
+    kill -KILL -- "-$pid" 2>/dev/null       # leftovers of the port's process group
     rm -f /run/rgos/port.pid
     ra_graphics 0
     /opt/rgos/rgos-perf off >> "$PORTLOG" 2>&1

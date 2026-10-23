@@ -84,6 +84,13 @@ class PortMaster(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(self.roms, "roms", "ports", "PortMaster", "PortMaster.sh")))
         self.assertEqual(os.path.realpath(self.link), os.path.realpath(os.path.join(self.roms, "roms")))
 
+    def test_app_is_told_to_use_alsa(self):
+        self.write_releases([release("2026.06.23-0015", "stable")])
+        self.set_app('echo "AUDIO=$SDL_AUDIODRIVER"')
+        rc, out = self.run_script()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("AUDIO=alsa", out)
+
     def test_falls_back_to_newest_when_no_stable_exists(self):
         self.write_releases([release("2026.09.13-0343", "alpha")])
         rc, out = self.run_script()
