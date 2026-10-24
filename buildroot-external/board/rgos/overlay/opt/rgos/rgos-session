@@ -74,7 +74,9 @@ firstboot_roms() {
     done
     [ -z "$missing" ] || { echo "firstboot: required command(s) missing:$missing - this initramfs was built without util-linux/exfatprogs; rebuild it with ./build.sh build (or update)" >> "$log"; return 0; }
 
-    # Never format a partition that already has a filesystem. blkid must be present in this image.
+    # Only format a partition created by this invocation. A pre-existing partition
+    # with an undetected filesystem may contain user data; never infer that it is blank.
+    created_p3=0
     if [ -b "$p3" ]; then
         if ! command -v blkid >/dev/null 2>&1; then
             echo "firstboot: blkid missing; refusing to format existing $p3" >> "$log"
@@ -82,9 +84,11 @@ firstboot_roms() {
         fi
         fstype=$(blkid -s TYPE -o value "$p3" 2>/dev/null || true)
         if [ -n "$fstype" ]; then
-            [ "$fstype" = exfat ] || echo "firstboot: $p3 already has filesystem $fstype; leaving it unchanged" >> "$log"
+            echo "firstboot: $p3 already has filesystem $fstype; leaving it unchanged" >> "$log"
             return 0
         fi
+        echo "firstboot: existing $p3 has no detectable filesystem; refusing to format it to protect possible data" >> "$log"
+        return 0
     else
         echo "RG OS: first boot, setting up storage..." > /dev/tty1 2>/dev/null
         # Partition 3 starts at the next 1 MiB boundary after p2 and explicitly spans
@@ -100,8 +104,10 @@ firstboot_roms() {
         partx -a "$disk" >> "$log" 2>&1 || partx -u "$disk" >> "$log" 2>&1
         n=0; while [ ! -b "$p3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n+1)); done
         [ -b "$p3" ] || { echo "firstboot: $p3 did not appear after partition-table update" >> "$log"; return 0; }
+        created_p3=1
     fi
 
+    [ "$created_p3" -eq 1 ] || { echo "firstboot: refusing to format pre-existing $p3" >> "$log"; return 0; }
     mkfs.exfat -L ROMS "$p3" >> "$log" 2>&1 \
       && echo "firstboot: created exFAT ROMS on $p3" >> "$log" \
       || echo "firstboot: mkfs.exfat failed on $p3" >> "$log"
