@@ -523,8 +523,17 @@ def icon_favorites(c, cx, cy, col, bg):
 
 
 def icon_power(c, cx, cy, col, bg):
-    pygame.draw.arc(c, col, (cx - 25, cy - 25, 50, 50), math.radians(45), math.radians(315), 5)
-    pygame.draw.line(c, col, (cx, cy - 31), (cx, cy + 1), 5)
+    # Power symbol: a ring open at the top plus a vertical bar, drawn with round caps and centred on the tile.
+    r, t = 24, 5
+    cy += 3
+    pts = [(cx + r * math.sin(math.radians(a)), cy - r * math.cos(math.radians(a))) for a in range(38, 323, 4)]
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        pygame.draw.line(c, col, (x1, y1), (x2, y2), t)
+    for x, y in pts:
+        pygame.draw.circle(c, col, (int(x), int(y)), t // 2)
+    pygame.draw.line(c, col, (cx, cy - r - 4), (cx, cy - 4), t)
+    pygame.draw.circle(c, col, (cx, cy - r - 4), t // 2)
+    pygame.draw.circle(c, col, (cx, cy - 4), t // 2)
 
 
 def icon_settings(c, cx, cy, col, bg):
