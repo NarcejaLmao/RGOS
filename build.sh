@@ -63,7 +63,7 @@ fetch_pygame() {
 }
 
 # Tools rgos-session needs on the device to create + format the exFAT ROMS partition on first boot (and to log diagnostics).
-REQUIRED_TARGET_TOOLS="sfdisk partx mkfs.exfat blkid timeout"
+REQUIRED_TARGET_TOOLS="sfdisk partx mkfs.exfat blkid"
 
 # Print the REQUIRED_TARGET_TOOLS that are NOT inside the given rootfs.cpio.gz (empty output = all present).
 rootfs_missing_tools() {
