@@ -76,13 +76,26 @@ def menu_api():
 
 
 def pick_core(sid, state, default_core, compatible_cores):
-    """The user's choice for this system if installed, else the system default if installed, else the first compatible core."""
-    wanted = (state.get("emulators") or {}).get(sid) or default_core(sid)
-    for c in (wanted, default_core(sid)):
+    """Choose an installed core while treating malformed settings as absent."""
+    # A valid JSON file can still contain a list, null, or malformed field types.
+    # Never let user-editable settings crash the game launcher or form a path.
+    if not isinstance(state, dict):
+        log("settings root is not an object; ignoring emulator preferences")
+        state = {}
+    emulators = state.get("emulators")
+    if not isinstance(emulators, dict):
+        emulators = {}
+    wanted = emulators.get(sid)
+    if not isinstance(wanted, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", wanted):
+        wanted = ""
+    fallback = default_core(sid)
+    if not isinstance(fallback, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", fallback):
+        fallback = ""
+    for c in (wanted, fallback):
         if c and core_file(c):
             return c
     for c in compatible_cores(sid):
-        if core_file(c):
+        if isinstance(c, str) and re.fullmatch(r"[A-Za-z0-9_.+-]+", c) and core_file(c):
             return c
     return ""
 
