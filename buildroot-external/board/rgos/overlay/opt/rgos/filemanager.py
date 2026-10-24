@@ -142,7 +142,13 @@ class FileManager:
             self.entries = [{"name": os.path.basename(r.rstrip("/")) or r, "path": r, "dir": True, "size": 0, "root": True}
                             for r in self.roots]
         else:
-            self.entries = list_dir(self.cwd)
+            # Do not expose symlinks that resolve outside the configured storage roots.
+            # enter() already rejects navigation through them, but listing them as folders
+            # made them look usable and could expose external targets in metadata/actions.
+            self.entries = [
+                e for e in list_dir(self.cwd)
+                if any(inside(e["path"], r) for r in self.roots)
+            ]
         if keep:
             for i, e in enumerate(self.entries):
                 if e["name"] == keep:
