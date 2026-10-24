@@ -76,26 +76,13 @@ def menu_api():
 
 
 def pick_core(sid, state, default_core, compatible_cores):
-    """Choose an installed core while treating malformed settings as absent."""
-    # A valid JSON file can still contain a list, null, or malformed field types.
-    # Never let user-editable settings crash the game launcher or form a path.
-    if not isinstance(state, dict):
-        log("settings root is not an object; ignoring emulator preferences")
-        state = {}
-    emulators = state.get("emulators")
-    if not isinstance(emulators, dict):
-        emulators = {}
-    wanted = emulators.get(sid)
-    if not isinstance(wanted, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", wanted):
-        wanted = ""
-    fallback = default_core(sid)
-    if not isinstance(fallback, str) or not re.fullmatch(r"[A-Za-z0-9_.+-]+", fallback):
-        fallback = ""
-    for c in (wanted, fallback):
+    """The user's choice for this system if installed, else the system default if installed, else the first compatible core."""
+    wanted = (state.get("emulators") or {}).get(sid) or default_core(sid)
+    for c in (wanted, default_core(sid)):
         if c and core_file(c):
             return c
     for c in compatible_cores(sid):
-        if isinstance(c, str) and re.fullmatch(r"[A-Za-z0-9_.+-]+", c) and core_file(c):
+        if core_file(c):
             return c
     return ""
 
@@ -134,33 +121,13 @@ def run_config(sid, roms_root, audio_device):
 
 
 def make_dirs(sid, roms_root):
-    """Create launch directories and refuse to launch if save storage is not writable.
-
-    RetroArch can still run when its save/state paths are unwritable, but progress may
-    then fail to persist. Treat save/state storage as required; BIOS and screenshots
-    remain optional so a missing optional directory does not prevent a game launch.
-    """
-    optional = [os.path.join(roms_root, "bios"), os.path.join(roms_root, "screenshots")]
-    required = ([os.path.join(roms_root, "saves", sid), os.path.join(roms_root, "states", sid)] if sid
-                else [os.path.join(roms_root, "saves"), os.path.join(roms_root, "states")])
-    for d in optional:
+    for d in ([os.path.join(roms_root, "bios"), os.path.join(roms_root, "screenshots")]
+              + ([os.path.join(roms_root, "saves", sid), os.path.join(roms_root, "states", sid)] if sid
+                 else [os.path.join(roms_root, "saves"), os.path.join(roms_root, "states")])):
         try:
             os.makedirs(d, exist_ok=True)
         except OSError as e:
-            log("cannot create optional directory %s: %s" % (d, e))
-    for d in required:
-        try:
-            os.makedirs(d, exist_ok=True)
-            # os.access() alone is unreliable for root and some mounted filesystems.
-            # Actually create and remove a unique probe file before starting the emulator.
-            probe = os.path.join(d, ".rgos-write-test-%d" % os.getpid())
-            fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            os.close(fd)
-            os.unlink(probe)
-        except OSError as e:
-            log("required save storage is not writable at %s: %s" % (d, e))
-            return False
-    return True
+            log("cannot create %s: %s (saves may be lost)" % (d, e))
 
 
 def tail(path, n=12):
@@ -198,10 +165,7 @@ def build_command(core_path, content, roms_root, cfg_run):
 
 def launch_retroarch(sid, core, core_path, content):
     os.makedirs(RUN_DIR, exist_ok=True)
-    if not make_dirs(sid, ROMS_ROOT):
-        show_error("RG OS: save storage is unavailable",
-                   "The saves/states folders on %s are not writable. Check the SD card, free space, and mount status, then try again. The game was not started to avoid losing progress." % ROMS_ROOT)
-        return 1
+    make_dirs(sid, ROMS_ROOT)
     cfg_run = os.path.join(RUN_DIR, "retroarch-run.cfg")
     with open(cfg_run, "w") as f:
         f.write(run_config(sid, ROMS_ROOT, alsa_device()))
