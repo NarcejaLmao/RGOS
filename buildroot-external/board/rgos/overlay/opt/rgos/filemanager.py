@@ -50,9 +50,10 @@ def unique_name(folder, name):
         n += 1
 
 
-def list_dir(path):
-    """Entries of a folder: folders first, then files, each sorted without regard to case. Hidden files are skipped."""
+def list_dir(path, roots=None):
+    """List visible entries, hiding symlinks that resolve outside allowed storage roots."""
     out = []
+    roots = roots or [path]
     try:
         names = os.listdir(path)
     except OSError:
@@ -60,13 +61,18 @@ def list_dir(path):
     for nm in names:
         if nm.startswith("."):
             continue
-        p = os.path.join(path, nm)
+        entry_path = os.path.join(path, nm)
+        # A symlink may point to the system partition or another external location.
+        # Hide it before querying its target's type/size, rather than merely blocking
+        # navigation later in enter().
+        if os.path.islink(entry_path) and not any(inside(entry_path, root) for root in roots):
+            continue
         try:
-            isdir = os.path.isdir(p)
-            size = 0 if isdir else os.path.getsize(p)
+            isdir = os.path.isdir(entry_path)
+            size = 0 if isdir else os.path.getsize(entry_path)
         except OSError:
             continue
-        out.append({"name": nm, "path": p, "dir": isdir, "size": size})
+        out.append({"name": nm, "path": entry_path, "dir": isdir, "size": size})
     out.sort(key=lambda e: (not e["dir"], e["name"].casefold()))
     return out
 
@@ -142,13 +148,7 @@ class FileManager:
             self.entries = [{"name": os.path.basename(r.rstrip("/")) or r, "path": r, "dir": True, "size": 0, "root": True}
                             for r in self.roots]
         else:
-            # Do not expose symlinks that resolve outside the configured storage roots.
-            # enter() already rejects navigation through them, but listing them as folders
-            # made them look usable and could expose external targets in metadata/actions.
-            self.entries = [
-                e for e in list_dir(self.cwd)
-                if any(inside(e["path"], r) for r in self.roots)
-            ]
+            self.entries = list_dir(self.cwd, self.roots)
         if keep:
             for i, e in enumerate(self.entries):
                 if e["name"] == keep:
@@ -309,15 +309,6 @@ class FileManager:
         except OSError as ex:
             self.msg = "Failed: %s" % (ex.strerror or ex)
             return False
-        # Keep clipboard/selection references in sync with the renamed path. Without
-        # this, renaming a copied or cut item leaves a stale path in the clipboard,
-        # so Paste silently skips it (or a marked selection loses the renamed item).
-        old_path = e["path"]
-        self.clip = [dst if os.path.normpath(c) == os.path.normpath(old_path) else c
-                     for c in self.clip]
-        if old_path in self.marked:
-            self.marked.discard(old_path)
-            self.marked.add(dst)
         self.msg = "Renamed"
         self.refresh(keep=new_name)
         return True
