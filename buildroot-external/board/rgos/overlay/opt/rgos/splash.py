@@ -54,12 +54,8 @@ def read_conf(path):
     conf = {}
     try:
         with open(base + ".json") as f:
-            loaded = json.load(f)
-        # Valid JSON is not necessarily a configuration object: arrays, strings,
-        # numbers and null must not crash later calls to conf.get().
-        if isinstance(loaded, dict):
-            conf = loaded
-    except (OSError, ValueError, TypeError):
+            conf = json.load(f)
+    except Exception:
         pass
     try:
         fps = float(conf.get("fps", DEFAULT_FPS))

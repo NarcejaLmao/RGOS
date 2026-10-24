@@ -283,9 +283,25 @@ class Battery:
     """First power_supply of type Battery (conf["battery"]["supply"] = a name picks one). read() -> dict or None."""
 
     def __init__(self, conf=None, sys_root="/sys"):
-        c = (conf or {}).get("battery", {}) if conf else {}
-        self.vmin = float(c.get("empty_v", 3.3))
-        self.vmax = float(c.get("full_v", 4.15))
+        c = (conf or {}).get("battery", {}) if isinstance(conf, dict) else {}
+        if not isinstance(c, dict):
+            c = {}
+
+        # Bad user overrides must not make battery reporting crash.  In
+        # particular, equal voltage endpoints would divide by zero in read().
+        try:
+            vmin = float(c.get("empty_v", 3.3))
+            if not 2.0 <= vmin <= 4.5:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            vmin = 3.3
+        try:
+            vmax = float(c.get("full_v", 4.15))
+            if not vmin < vmax <= 5.0:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            vmax = 4.15 if vmin < 4.15 else min(5.0, vmin + 0.1)
+        self.vmin, self.vmax = vmin, vmax
         self.node = None
         base = os.path.join(sys_root, "class/power_supply")
         want = c.get("supply", "auto")

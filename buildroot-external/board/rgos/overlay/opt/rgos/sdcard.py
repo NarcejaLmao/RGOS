@@ -65,35 +65,13 @@ def sh(args, timeout=15):
 
 
 def load_conf():
-    """Load SD-card settings while rejecting malformed values from JSON config files.
-
-    A bad type in an optional override must not break card discovery or make
-    strings such as "false" behave like True.
-    """
     conf = dict(DEFAULTS)
     for path in CONF_FILES:
         try:
             with open(path) as f:
                 data = json.load(f)
-            if not isinstance(data, dict):
-                continue
-            for key, value in data.items():
-                if key not in DEFAULTS:
-                    continue
-                if key in ("enabled", "create_folders", "readonly"):
-                    if isinstance(value, bool):
-                        conf[key] = value
-                elif key == "mountpoint":
-                    if isinstance(value, str) and value.startswith("/") and value != "/" and "\0" not in value:
-                        conf[key] = os.path.normpath(value)
-                elif key == "fs":
-                    if isinstance(value, list):
-                        valid = [fs for fs in value if isinstance(fs, str) and fs in MOUNT_TYPES]
-                        if valid:
-                            conf[key] = list(dict.fromkeys(valid))
-                elif key == "min_mb":
-                    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 1048576:
-                        conf[key] = value
+            if isinstance(data, dict):
+                conf.update({k: v for k, v in data.items() if k in DEFAULTS})
         except (OSError, ValueError):
             pass
     return conf
