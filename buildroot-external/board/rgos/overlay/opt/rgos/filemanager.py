@@ -72,17 +72,36 @@ def list_dir(path):
 
 
 def tree_size(path):
-    """Total bytes below path (a file counts as itself)."""
-    if not os.path.isdir(path):
-        try:
+    """Total bytes below path without following symlinks into other trees."""
+    # A symlink is an item in its own right. Do not follow it when estimating
+    # a folder's size: it may point outside the ROM storage or at a huge tree.
+    try:
+        if os.path.islink(path):
+            return os.lstat(path).st_size
+        if not os.path.isdir(path):
             return os.path.getsize(path)
-        except OSError:
-            return 0
+    except OSError:
+        return 0
+
     total = 0
-    for base, _dirs, files in os.walk(path):
-        for f in files:
+    for base, dirs, files in os.walk(path, followlinks=False):
+        # os.walk lists symlinked directories in dirs even when it will not
+        # descend into them. Count the link itself, not the target's contents.
+        kept_dirs = []
+        for name in dirs:
+            p = os.path.join(base, name)
+            if os.path.islink(p):
+                try:
+                    total += os.lstat(p).st_size
+                except OSError:
+                    pass
+            else:
+                kept_dirs.append(name)
+        dirs[:] = kept_dirs
+        for name in files:
+            p = os.path.join(base, name)
             try:
-                total += os.path.getsize(os.path.join(base, f))
+                total += os.lstat(p).st_size
             except OSError:
                 pass
     return total
