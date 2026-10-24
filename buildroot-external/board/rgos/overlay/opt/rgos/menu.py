@@ -1667,16 +1667,18 @@ def main():
             subs = {"games": "%d games" % len(all_games),
                     "recents": "%d recent" % len(recent_games()),
                     "favorites": "%d favorites" % len(favorite_games()),
-                    "tools": "File Manager, ports, RetroArch",
+                    "tools": "Files, ports, RetroArch",
                     "settings": "Theme, Wi-Fi, info, controls",
                     "power": "Shut down RG OS"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
                 bx, by, sel = x0 + (i % 3) * (bw + gap), top_y + (i // 3) * (bh + gap), i == home_idx
                 draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 18, 6, sel)
-                ICONS[hid](canvas, bx + 42, by + bh // 2 - 4, ACCENT if sel else DIM, SEL_BG if sel else PANEL)
+                cx = bx + bw // 2                                       # icon on top, title and subtitle centred below it
+                ICONS[hid](canvas, cx, by + 44, ACCENT if sel else DIM, SEL_BG if sel else PANEL)
                 title = f_row.render(hname, True, TEXT if sel else DIM)
-                canvas.blit(title, (bx + 78, by + bh // 2 - 22))
-                canvas.blit(f_small.render(fit(f_small, subs[hid], bw - 88), True, DIM), (bx + 78, by + bh // 2 + 8))
+                canvas.blit(title, (cx - title.get_width() // 2, by + 84))
+                sub = f_small.render(fit(f_small, subs[hid], bw - 24), True, DIM)
+                canvas.blit(sub, (cx - sub.get_width() // 2, by + 114))
             hint = "A Open   X Rescan   START+SELECT Power off"
         elif view == "tools":
             for i, (_tid, tname, tdesc, _tgt) in enumerate(TOOLS):
