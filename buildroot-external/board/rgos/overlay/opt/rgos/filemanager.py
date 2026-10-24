@@ -50,10 +50,9 @@ def unique_name(folder, name):
         n += 1
 
 
-def list_dir(path, roots=None):
-    """List visible entries, hiding symlinks that resolve outside allowed storage roots."""
+def list_dir(path):
+    """Entries of a folder: folders first, then files, each sorted without regard to case. Hidden files are skipped."""
     out = []
-    roots = roots or [path]
     try:
         names = os.listdir(path)
     except OSError:
@@ -61,18 +60,13 @@ def list_dir(path, roots=None):
     for nm in names:
         if nm.startswith("."):
             continue
-        entry_path = os.path.join(path, nm)
-        # A symlink may point to the system partition or another external location.
-        # Hide it before querying its target's type/size, rather than merely blocking
-        # navigation later in enter().
-        if os.path.islink(entry_path) and not any(inside(entry_path, root) for root in roots):
-            continue
+        p = os.path.join(path, nm)
         try:
-            isdir = os.path.isdir(entry_path)
-            size = 0 if isdir else os.path.getsize(entry_path)
+            isdir = os.path.isdir(p)
+            size = 0 if isdir else os.path.getsize(p)
         except OSError:
             continue
-        out.append({"name": nm, "path": entry_path, "dir": isdir, "size": size})
+        out.append({"name": nm, "path": p, "dir": isdir, "size": size})
     out.sort(key=lambda e: (not e["dir"], e["name"].casefold()))
     return out
 
@@ -148,7 +142,7 @@ class FileManager:
             self.entries = [{"name": os.path.basename(r.rstrip("/")) or r, "path": r, "dir": True, "size": 0, "root": True}
                             for r in self.roots]
         else:
-            self.entries = list_dir(self.cwd, self.roots)
+            self.entries = list_dir(self.cwd)
         if keep:
             for i, e in enumerate(self.entries):
                 if e["name"] == keep:
