@@ -89,11 +89,20 @@ def tree_size(path):
 
 
 def copy_item(src, dst_folder):
-    """Copy a file or folder into dst_folder (never overwrites). Returns the new path."""
-    if os.path.isdir(src) and inside(dst_folder, src):
+    """Copy a file or folder into dst_folder (never overwrites). Returns the new path.
+
+    Treat a symlink itself as the item, even when it points to a directory. Otherwise
+    copytree() would follow a directory symlink passed as the source and could copy
+    data from outside the file manager's storage roots.
+    """
+    src_is_link = os.path.islink(src)
+    src_is_dir = not src_is_link and os.path.isdir(src)
+    if src_is_dir and inside(dst_folder, src):
         raise OSError("Cannot copy a folder into itself")
     dst = os.path.join(dst_folder, unique_name(dst_folder, os.path.basename(src)))
-    if os.path.isdir(src):
+    if src_is_link:
+        os.symlink(os.readlink(src), dst)
+    elif src_is_dir:
         shutil.copytree(src, dst, symlinks=True)
     else:
         shutil.copy2(src, dst)
@@ -102,7 +111,7 @@ def copy_item(src, dst_folder):
 
 def move_item(src, dst_folder):
     """Move a file or folder into dst_folder (never overwrites). Returns the new path."""
-    if os.path.isdir(src) and inside(dst_folder, src):
+    if not os.path.islink(src) and os.path.isdir(src) and inside(dst_folder, src):
         raise OSError("Cannot move a folder into itself")
     if os.path.realpath(os.path.dirname(src)) == os.path.realpath(dst_folder):
         return src                                  # already there
