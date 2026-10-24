@@ -15,17 +15,11 @@ MAX_NAME = 120
 
 
 def human_size(n):
-    """Format a byte count using binary units (1536 -> '1.5 KB')."""
-    try:
-        n = max(0.0, float(n))
-    except (TypeError, ValueError, OverflowError):
-        n = 0.0
-    if not n < float("inf"):
-        n = 0.0
-    units = ("B", "KB", "MB", "GB", "TB", "PB", "EB")
-    for unit in units:
-        if n < 1024 or unit == units[-1]:
-            return ("%d %s" % (int(n), unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+    """1536 -> '1.5 KB'."""
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
         n /= 1024.0
 
 
