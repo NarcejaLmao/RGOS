@@ -283,24 +283,87 @@ def apply_tar(tar, bootdir):
     finally:
         tf.close()
     say("  installing")
-    for name in payload:                # everything is verified: replace, one atomic rename per file
-        dst = os.path.join(bootdir, name)
-        if os.path.isfile(dst):
-            try:                        # best-effort backup for a manual rollback
-                shutil.copyfile(dst, dst + ".prev.tmp")
-                os.replace(dst + ".prev.tmp", dst + ".prev")
-            except OSError:
+    idp = os.path.join(bootdir, ID_FILE)
+    # Keep a transaction-local copy of every destination until the complete update,
+    # including its build ID, has been committed. A failed rename must not leave a
+    # mixture of old and new boot files.
+    destinations = [os.path.join(bootdir, name) for name in payload]
+    destinations.append(idp)
+    existed = {}
+    backups = {}
+    changed = []
+    try:
+        for dst in destinations:
+            existed[dst] = os.path.isfile(dst)
+            if existed[dst]:
+                backup = dst + ".rollback"
+                with open(dst, "rb") as src, open(backup, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                    out.flush()
+                    os.fsync(out.fileno())
+                backups[dst] = backup
+        # Preserve the previous build for manual recovery, separately from the
+        # transaction backups used to undo a partially completed installation.
+        for name in payload:
+            dst = os.path.join(bootdir, name)
+            if existed[dst]:
                 try:
-                    os.remove(dst + ".prev.tmp")
+                    shutil.copyfile(dst, dst + ".prev.tmp")
+                    os.replace(dst + ".prev.tmp", dst + ".prev")
+                except OSError:
+                    try:
+                        os.remove(dst + ".prev.tmp")
+                    except OSError:
+                        pass
+        for name in payload:
+            dst = os.path.join(bootdir, name)
+            os.replace(dst + ".new", dst)
+            changed.append(dst)
+        with open(idp + ".new", "w") as f:
+            f.write(uid + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(idp + ".new", idp)
+        changed.append(idp)
+        os.sync()
+    except OSError as e:
+        say("  install failed: %s; restoring previous boot files" % e)
+        rollback_errors = []
+        for dst in reversed(changed):
+            try:
+                if existed.get(dst, False):
+                    os.replace(backups[dst], dst)
+                    backups.pop(dst, None)
+                else:
+                    try:
+                        os.remove(dst)
+                    except FileNotFoundError:
+                        pass
+            except OSError as rollback_error:
+                rollback_errors.append("%s: %s" % (dst, rollback_error))
+        for backup in backups.values():
+            # Deliberately retain any backup that could not be restored; it is
+            # the recovery copy needed to repair the boot partition manually.
+            pass
+        if rollback_errors:
+            say("  WARNING: rollback incomplete; recovery files retained: %s" % "; ".join(rollback_errors))
+        else:
+            for backup in backups.values():
+                try:
+                    os.remove(backup)
                 except OSError:
                     pass
-        os.replace(dst + ".new", dst)
-    idp = os.path.join(bootdir, ID_FILE)
-    with open(idp + ".new", "w") as f:
-        f.write(uid + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(idp + ".new", idp)
+        try:
+            os.remove(idp + ".new")
+        except OSError:
+            pass
+        raise UpdateError("installation failed; " + ("rollback incomplete, see .rollback files" if rollback_errors else "previous boot files restored"))
+    # Commit succeeded; transaction backups are no longer needed.
+    for backup in backups.values():
+        try:
+            os.remove(backup)
+        except OSError:
+            pass
     os.sync()
     return "installed", uid
 
