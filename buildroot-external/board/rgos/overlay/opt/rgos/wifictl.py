@@ -42,9 +42,43 @@ def _read_json(path, default):
 
 def load_conf():
     d = _read_json(CONF_FILE, {})
-    nets = [n for n in d.get("networks", []) if isinstance(n, dict) and isinstance(n.get("ssid"), str) and n["ssid"]]
-    return {"enabled": bool(d.get("enabled", True)), "prio": int(d.get("prio", 0)), "networks": nets,
-            "country": str(d.get("country", ""))}
+    raw_networks = d.get("networks", [])
+    if not isinstance(raw_networks, list):
+        raw_networks = []
+
+    nets = []
+    max_prio = 0
+    for item in raw_networks:
+        if not isinstance(item, dict):
+            continue
+        ssid = item.get("ssid")
+        if not isinstance(ssid, str) or not ssid or len(ssid.encode("utf-8", "ignore")) > 32:
+            continue
+
+        # Validate persisted values before they reach sorting or wpa_supplicant.
+        psk = item.get("psk", "")
+        if not isinstance(psk, str) or (psk and not re.fullmatch(r"[0-9a-fA-F]{64}", psk)):
+            psk = ""
+        try:
+            priority = int(item.get("prio", 0))
+        except (TypeError, ValueError, OverflowError):
+            priority = 0
+        priority = max(-2147483648, min(2147483647, priority))
+        max_prio = max(max_prio, priority)
+        nets.append({"ssid": ssid, "psk": psk, "hidden": bool(item.get("hidden", False)),
+                     "prio": priority})
+
+    try:
+        saved_prio = int(d.get("prio", 0))
+    except (TypeError, ValueError, OverflowError):
+        saved_prio = 0
+    saved_prio = max(-2147483648, min(2147483647, saved_prio))
+
+    country = d.get("country", "")
+    if not isinstance(country, str):
+        country = ""
+    return {"enabled": bool(d.get("enabled", True)), "prio": max(saved_prio, max_prio),
+            "networks": nets, "country": country}
 
 
 def save_conf(conf):
