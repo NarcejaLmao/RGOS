@@ -40,6 +40,66 @@ if [ -d /lib/modules ]; then
     for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -iE 'joypad|adc|pwm|gpio-keys|evdev|joydev|uinput' \
                | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
 fi
+# first boot: the image only carries the FAT boot partition (1) and a minimal ext4 (2). Create the exFAT ROMS partition (3)
+# here, from the end of partition 2 to the last sector of the card, so it is as big as the card allows. Runs only when
+# partition 3 is missing (or was created but never formatted, e.g. power loss); never touches an existing filesystem.
+firstboot_roms() {
+    log=/var/log/rgos-state.log
+    # Wait briefly for the SD card partition nodes to appear during early boot.
+    if ! mountpoint -q /boot; then
+        n=0
+        while [ "$n" -lt 50 ] && ! mountpoint -q /boot; do
+            for d in /dev/mmcblk*p1; do
+                [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break
+            done
+            mountpoint -q /boot && break
+            sleep 0.1
+            n=$((n+1))
+        done
+    fi
+    src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)
+    case "$src" in /dev/mmcblk*p1) disk=${src%p1} ;; *) echo "firstboot: cannot identify boot SD (boot source: ${src:-none})" >> "$log"; return 0 ;; esac
+    base=${disk#/dev/}; p2=${disk}p2; p3=${disk}p3
+    [ -b "$p2" ] || { echo "firstboot: $p2 missing; not creating ROMS" >> "$log"; return 0; }
+    missing=""
+    for cmd in sfdisk partx mkfs.exfat; do
+        command -v "$cmd" >/dev/null 2>&1 || missing="$missing $cmd"
+    done
+    [ -z "$missing" ] || { echo "firstboot: required command(s) missing:$missing - this initramfs was built without util-linux/exfatprogs; rebuild it with ./build.sh build (or update)" >> "$log"; return 0; }
+
+    # Never format a partition that already has a filesystem. blkid must be present in this image.
+    if [ -b "$p3" ]; then
+        if ! command -v blkid >/dev/null 2>&1; then
+            echo "firstboot: blkid missing; refusing to format existing $p3" >> "$log"
+            return 0
+        fi
+        fstype=$(blkid -s TYPE -o value "$p3" 2>/dev/null || true)
+        if [ -n "$fstype" ]; then
+            [ "$fstype" = exfat ] || echo "firstboot: $p3 already has filesystem $fstype; leaving it unchanged" >> "$log"
+            return 0
+        fi
+    else
+        echo "RG OS: first boot, setting up storage..." > /dev/tty1 2>/dev/null
+        # Partition 3 starts at the next 1 MiB boundary after p2 and explicitly spans
+        # the remaining card sectors. Supplying size avoids sfdisk default-size ambiguity.
+        e=$(( $(cat /sys/block/$base/${base}p2/start) + $(cat /sys/block/$base/${base}p2/size) ))
+        start=$(( (e + 2047) / 2048 * 2048 ))
+        total=$(cat /sys/block/$base/size)
+        size=$(( total - start ))
+        [ "$size" -ge 131072 ] || { echo "firstboot: no room for ROMS (start=$start total=$total sectors)" >> "$log"; return 0; }
+        echo "firstboot: creating partition 3 on $disk (start=$start size=$size sectors)" >> "$log"
+        echo "start=$start, size=$size, type=7" | sfdisk --append --no-reread --no-tell-kernel "$disk" >> "$log" 2>&1 \
+          || { echo "firstboot: sfdisk failed creating $p3" >> "$log"; return 0; }
+        partx -a "$disk" >> "$log" 2>&1 || partx -u "$disk" >> "$log" 2>&1
+        n=0; while [ ! -b "$p3" ] && [ "$n" -lt 50 ]; do sleep 0.1; n=$((n+1)); done
+        [ -b "$p3" ] || { echo "firstboot: $p3 did not appear after partition-table update" >> "$log"; return 0; }
+    fi
+
+    mkfs.exfat -L ROMS "$p3" >> "$log" 2>&1 \
+      && echo "firstboot: created exFAT ROMS on $p3" >> "$log" \
+      || echo "firstboot: mkfs.exfat failed on $p3" >> "$log"
+}
+firstboot_roms
 # offline update: <card>/update/*.tar (built by ./build.sh update) is installed on the boot partition, then reboot
 python3 /opt/rgos/rgos-update boot 2>>/var/log/rgos-update.log
 [ $? -eq 10 ] && { sync; reboot -f; sleep 60; }
@@ -60,7 +120,8 @@ python3 /opt/rgos/rgos-sticks >> /var/log/rgos-sticks.log 2>&1 &
     if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
     mountpoint -q /boot || continue
     { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
-      timeout 4 python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
+      T=""; command -v timeout >/dev/null 2>&1 && T="timeout 4"
+      $T python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
       for f in /var/log/rgos-menu.log /var/log/rgos-sticks.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
       echo "--- settings dir"; id; grep -E ' (/|/var|/var/lib|/var/lib/rgos) ' /proc/mounts; ls -ld /var /var/lib /var/lib/rgos 2>&1
       ls -la /var/lib/rgos 2>&1; { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo "write test: ok"; } 2>&1 || echo "write test: FAILED"

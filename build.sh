@@ -4,14 +4,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BR_DIR="${BUILDROOT_DIR:-$ROOT/buildroot}"
 ASSET_DIR="${ROCKNIX_ASSET_DIR:-$ROOT/assets/rocknix}"
 BOOT_DIR="${ROCKNIX_BOOT_DIR:-$ASSET_DIR/extracted/boot-partition}"
-ROOTFS_OVERRIDE="${RGOS_ROOTFS:-$ROOT/output/rgos-rg34xxsp-rootfs.ext4}"
 OUT_DIR="${RGOS_OUT_DIR:-$ROOT/output}"
 IMAGE="${RGOS_IMAGE:-$OUT_DIR/rgos-rg34xxsp.img}"
 RGOS_BUILD_ID="${RGOS_BUILD_ID:-$(date -u +%Y%m%d-%H%M%S)}"
 UPDATE_TAR="${RGOS_UPDATE_TAR:-$OUT_DIR/rgos-update-$RGOS_BUILD_ID.tar}"
 BOOT_SIZE_MIB="${RGOS_BOOT_SIZE_MIB:-512}"
-ROOTFS_EXTRA_MIB="${RGOS_ROOTFS_EXTRA_MIB:-16}"
-ROMS_MIB="${RGOS_ROMS_MIB:-512}"          # size of the exFAT ROMS partition (partition 3); 0 = none
+ROOT_MIB="${RGOS_ROOT_MIB:-1}"            # size of the ext4 partition (partition 2): a bare 1 MiB filesystem, nothing is stored on it
+# The exFAT ROMS partition (partition 3) is NOT in the image: rgos-session creates it on first boot, from the end of
+# partition 2 to the last sector of the card, so it is as big as the card allows.
 
 usage() {
   cat <<USAGE
@@ -19,7 +19,7 @@ Usage: $0 {prepare|fetch-assets|build|image|update|help}
   prepare  Clone Buildroot if missing.
   fetch-assets  Download ROCKNIX H700 image; stage boot files, DTB and the Allwinner bootloader.
   build    Build Buildroot rootfs and assemble a whole-disk .img.
-  image    Assemble a .img from an already-built rootfs and staged ROCKNIX boot files.
+  image    Assemble a .img from the already-built initramfs and staged ROCKNIX boot files.
   update   Rebuild the rootfs and pack an update .tar (output/rgos-update-<id>.tar). Copy it into the update/ folder of the
            exFAT/FAT ROMS partition; the device installs it on the next boot. RGOS_SKIP_BUILDROOT=1 re-packs without running
            Buildroot, RGOS_UPDATE_SLIM=1 leaves the kernel out, RGOS_BUILD_ID=... sets the id.
@@ -29,37 +29,12 @@ Environment:
   ROCKNIX_ASSET_DIR   ROCKNIX asset directory (default: ./assets/rocknix)
   ROCKNIX_BOOT_DIR    Extracted boot partition directory
   ROCKNIX_IMAGE       Optional original ROCKNIX .img; copies raw bootloader sectors
-  RGOS_ROOTFS         Rootfs ext4 path override
   RGOS_IMAGE          Output image path override
   RGOS_BOOT_LABEL     FAT label of the boot partition (default RGOS)
-  RGOS_ROMS_MIB       Size of the exFAT ROMS partition in the image (default 512, 0 = none). Needs mkfs.exfat (apt install exfatprogs)
+  RGOS_ROOT_MIB       Size of the ext4 partition in MiB (default 1, the practical minimum). The exFAT ROMS partition is created
+                      on first boot and fills the rest of the card.
   RGOS_BUILD_ID       Build id stamped into the image / update (default: UTC timestamp)
 USAGE
-}
-
-find_rootfs() {
-  local candidates=(
-    "$ROOTFS_OVERRIDE"
-    "$BR_DIR/output/images/rootfs.ext4"
-    "$BR_DIR/output/images/rootfs.ext4.gz"
-    "$ROOT/output/rgos-rg34xxsp-rootfs.ext4"
-  )
-  local f
-  for f in "${candidates[@]}"; do
-    if [[ -f "$f" ]]; then
-      if [[ "$f" == *.gz ]]; then
-        local expanded="$OUT_DIR/rootfs.ext4"
-        mkdir -p "$OUT_DIR"
-        gzip -dc "$f" > "$expanded"
-        echo "$expanded"
-      else
-        echo "$f"
-      fi
-      return 0
-    fi
-  done
-  echo "ERROR: Could not find an ext4 rootfs. Set RGOS_ROOTFS=/path/to/rootfs.ext4." >&2
-  return 1
 }
 
 # Buildroot no longer ships a python-pygame package, so use the official prebuilt pygame wheel for aarch64 (it bundles SDL2,
@@ -87,6 +62,20 @@ fetch_pygame() {
   echo "Unpacked pygame into $dest"
 }
 
+# Tools rgos-session needs on the device to create + format the exFAT ROMS partition on first boot (and to log diagnostics).
+REQUIRED_TARGET_TOOLS="sfdisk partx mkfs.exfat blkid timeout"
+
+# Print the REQUIRED_TARGET_TOOLS that are NOT inside the given rootfs.cpio.gz (empty output = all present).
+rootfs_missing_tools() {
+  local cpio_gz="$1" listing t missing=""
+  command -v cpio >/dev/null || { echo "ERROR: install cpio" >&2; exit 1; }
+  listing="$(gzip -dc "$cpio_gz" | cpio -t --quiet 2>/dev/null || true)"
+  for t in $REQUIRED_TARGET_TOOLS; do
+    grep -Eq "(^|/)(usr/)?s?bin/${t//./\\.}\$" <<<"$listing" || missing="$missing $t"
+  done
+  echo "${missing# }"
+}
+
 # Stage the files that live on the FAT boot partition (kernel, launcher initramfs + modules, DTB, extlinux.conf) in
 # $OUT_DIR/boot-stage and point BOOT_DIR at it. Used by both the full image and the update tar.
 stage_boot() {
@@ -94,6 +83,10 @@ stage_boot() {
   local initrd stage="$OUT_DIR/boot-stage"
   initrd="$OUT_DIR/rgos-initrd.gz"
   [[ -f "$BR_DIR/output/images/rootfs.cpio.gz" ]] || { echo "ERROR: no initramfs ($BR_DIR/output/images/rootfs.cpio.gz). Run ./build.sh build." >&2; exit 1; }
+  local miss; miss="$(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")"
+  [[ -z "$miss" ]] || { echo "ERROR: the initramfs ($BR_DIR/output/images/rootfs.cpio.gz) lacks: $miss" >&2
+    echo "       Without them the exFAT ROMS partition cannot be created on first boot. Run ./build.sh build (not 'image' / RGOS_SKIP_BUILDROOT=1)," >&2
+    echo "       and check that the BR2_PACKAGE_UTIL_LINUX_* / BR2_PACKAGE_EXFATPROGS / BR2_PACKAGE_COREUTILS options survive 'make menuconfig'." >&2; exit 1; }
   cp -f "$BR_DIR/output/images/rootfs.cpio.gz" "$initrd"
   # ROCKNIX kernel modules (input/ADC/PWM/uinput drivers) go in as a second, concatenated initramfs archive.
   if [[ -d "$ASSET_DIR/modules" ]] && find "$ASSET_DIR/modules" -name '*.ko*' -print -quit | grep -q .; then
@@ -146,11 +139,10 @@ PYEOF
 }
 
 assemble_image() {
-  local rootfs bootfs rootfs_bytes rootfs_mib boot_start boot_sectors root_start root_sectors roms_start roms_sectors total_sectors label bl_bytes bl_sectors
-  rootfs="$(find_rootfs)"
+  local bootfs boot_start boot_sectors root_start root_sectors total_sectors label bl_bytes bl_sectors
   [[ -d "$BOOT_DIR" ]] || { echo "ERROR: ROCKNIX boot files not found: $BOOT_DIR (run ./build.sh fetch-assets)" >&2; exit 1; }
-  for t in sfdisk mkfs.vfat mcopy mkfs.ext4 $( ((ROMS_MIB > 0)) && echo mkfs.exfat ); do
-    command -v "$t" >/dev/null || { echo "ERROR: missing host tool: $t (apt install fdisk dosfstools mtools e2fsprogs exfatprogs)" >&2; exit 1; }
+  for t in sfdisk mkfs.vfat mcopy mkfs.ext4; do
+    command -v "$t" >/dev/null || { echo "ERROR: missing host tool: $t (apt install fdisk dosfstools mtools e2fsprogs)" >&2; exit 1; }
   done
 
   # --- Allwinner bootloader: MANDATORY. Without the eGON.BT0 SPL at byte 8192 the H700 BROM finds nothing to run and
@@ -183,11 +175,8 @@ assemble_image() {
   fi
   boot_sectors=$((BOOT_SIZE_MIB * 2048))
   root_start=$(( ((boot_start + boot_sectors + 2047) / 2048) * 2048 ))
-  rootfs_bytes="$(stat -c '%s' "$rootfs")"
-  rootfs_mib=$(( (rootfs_bytes + 1048575) / 1048576 ))
-  root_sectors=$(( (rootfs_mib + ROOTFS_EXTRA_MIB) * 2048 ))
-  roms_start=$(( ((root_start + root_sectors + 2047) / 2048) * 2048 )); roms_sectors=$(( ROMS_MIB * 2048 ))
-  if (( ROMS_MIB > 0 )); then total_sectors=$(( roms_start + roms_sectors )); else total_sectors=$(( root_start + root_sectors )); fi
+  root_sectors=$(( ROOT_MIB * 2048 ))
+  total_sectors=$(( root_start + root_sectors ))
 
   label="${RGOS_BOOT_LABEL:-RGOS}"        # FAT volume label of the boot partition (max 11 chars); no longer copied from ROCKNIX
   mkdir -p "$OUT_DIR"
@@ -201,12 +190,12 @@ assemble_image() {
   ((${#files[@]})) || { echo "ERROR: boot partition directory is empty: $BOOT_DIR" >&2; exit 1; }
   mcopy -i "$bootfs" -s "${files[@]}" ::/
 
-  local romsfs="$OUT_DIR/rgos-roms-partition.exfat"
-  if (( ROMS_MIB > 0 )); then
-    echo "Creating exFAT ROMS partition (${ROMS_MIB} MiB, label ROMS)..."
-    rm -f "$romsfs"; truncate -s "${ROMS_MIB}M" "$romsfs"
-    mkfs.exfat -L ROMS "$romsfs" >/dev/null
-  fi
+  # Minimal ext4 (partition 2): no journal, no reserved blocks, 16 inodes. The system runs from the initramfs, so it holds nothing.
+  local rootimg="$OUT_DIR/rgos-root-partition.ext4"
+  echo "Creating minimal ext4 partition (${ROOT_MIB} MiB, label RGOS_ROOT)..."
+  rm -f "$rootimg"; truncate -s "${ROOT_MIB}M" "$rootimg"
+  mkfs.ext4 -q -b 1024 -O ^has_journal,^resize_inode,^huge_file,^metadata_csum -N 16 -m 0 -L RGOS_ROOT "$rootimg"
+
   echo "Creating whole-disk image: $IMAGE"
   rm -f "$IMAGE"
   truncate -s $((total_sectors * 512)) "$IMAGE"
@@ -216,13 +205,11 @@ unit: sectors
 
 start=$boot_start, size=$boot_sectors, type=c, bootable
 start=$root_start, size=$root_sectors, type=83
-$( ((ROMS_MIB > 0)) && echo "start=$roms_start, size=$roms_sectors, type=7" )
 PARTITIONS
   # Bootloader goes at byte 8192 (sector 16), AFTER the partition table is written and below the first partition.
   dd if="$blfile" of="$IMAGE" bs=512 seek=16 conv=notrunc status=none
   dd if="$bootfs" of="$IMAGE" bs=512 seek="$boot_start" conv=notrunc status=none
-  dd if="$rootfs" of="$IMAGE" bs=512 seek="$root_start" conv=notrunc status=none
-  (( ROMS_MIB > 0 )) && dd if="$romsfs" of="$IMAGE" bs=512 seek="$roms_start" conv=notrunc status=none
+  dd if="$rootimg" of="$IMAGE" bs=512 seek="$root_start" conv=notrunc status=none
   sync
 
   # Final sanity check on the finished image.
@@ -231,8 +218,8 @@ PARTITIONS
   echo
   echo "Whole-disk image created: $IMAGE"
   ls -lh "$IMAGE"
-  echo "Layout: MBR; bootloader at 8 KiB (${bl_bytes} bytes); FAT '$label' at sector $boot_start; ext4 rootfs at sector $root_start."
-  (( ROMS_MIB > 0 )) && echo "       exFAT 'ROMS' (${ROMS_MIB} MiB) at sector $roms_start - this is the partition Windows shows; put update/*.tar and roms/ there."
+  echo "Layout: MBR; bootloader at 8 KiB (${bl_bytes} bytes); FAT '$label' at sector $boot_start; ext4 (${ROOT_MIB} MiB) at sector $root_start."
+  echo "       exFAT 'ROMS' is created on first boot (rest of the card, from sector $(( ((root_start + root_sectors + 2047) / 2048) * 2048 )) on)."
   return 0
 }
 
@@ -248,11 +235,12 @@ buildroot_make() {
     fetch_pygame
     make -C "$BR_DIR" BR2_EXTERNAL="$ROOT/buildroot-external" rgos_rg34xxsp_defconfig
     make -C "$BR_DIR" -j"$(nproc)"
-    # Buildroot's output path may differ by configuration; also accept the
-    # project-specific rootfs path used by earlier RG OS build scripts.
-    if [[ ! -f "$ROOTFS_OVERRIDE" && -f "$BR_DIR/output/images/rootfs.ext4" ]]; then
-      mkdir -p "$(dirname "$ROOTFS_OVERRIDE")"
-      cp "$BR_DIR/output/images/rootfs.ext4" "$ROOTFS_OVERRIDE"
+    # Buildroot does not notice changed per-package options (or a package that was built before the defconfig gained it):
+    # if the first-boot tools are not in the image, wipe those packages' build dirs and build again.
+    if [[ -n "$(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")" ]]; then
+      echo "Initramfs is missing first-boot tools ($(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")); rebuilding util-linux, exfatprogs, coreutils, busybox ..."
+      make -C "$BR_DIR" util-linux-dirclean exfatprogs-dirclean coreutils-dirclean busybox-dirclean
+      make -C "$BR_DIR" -j"$(nproc)"
     fi
 }
 
