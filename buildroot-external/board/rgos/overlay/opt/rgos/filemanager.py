@@ -309,6 +309,15 @@ class FileManager:
         except OSError as ex:
             self.msg = "Failed: %s" % (ex.strerror or ex)
             return False
+        # Keep clipboard/selection references in sync with the renamed path. Without
+        # this, renaming a copied or cut item leaves a stale path in the clipboard,
+        # so Paste silently skips it (or a marked selection loses the renamed item).
+        old_path = e["path"]
+        self.clip = [dst if os.path.normpath(c) == os.path.normpath(old_path) else c
+                     for c in self.clip]
+        if old_path in self.marked:
+            self.marked.discard(old_path)
+            self.marked.add(dst)
         self.msg = "Renamed"
         self.refresh(keep=new_name)
         return True
