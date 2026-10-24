@@ -447,7 +447,7 @@ def _btn_face(w, h, base, radius):
     key = (w, h, base, radius)
     surf = _BTN_CACHE.get(key)
     if surf is None:
-        if len(_BTN_CACHE) > 200:
+        if len(_BTN_CACHE) > 600:
             _BTN_CACHE.clear()
         top, bot = _mix(base, (255, 255, 255), 0.16), _mix(base, (0, 0, 0), 0.12)
         surf = pygame.Surface((w, h), pygame.SRCALPHA)
@@ -462,18 +462,54 @@ def _btn_face(w, h, base, radius):
     return surf
 
 
+_BTN_ANIM = {}          # (x, y, w, h) -> [highlight 0..1, selected colour, unselected colour]; drives the select animation
+ANIM_STEPS, ANIM_SPEED, LIFT_PX = 24, 16.0, 4   # colour steps (gradient cache), ease speed per second, lift of the home tiles
+ANIM_DT = None                                  # fixed frame time override (used when recording video); None = real time
+_anim_clock = [time.monotonic(), 1 / 30, False]  # last frame stamp, this frame's dt, "something is still moving"
+
+
+def anim_tick():
+    """Call once per frame before drawing: measures the frame time that every button animation advances by,
+    so the motion takes the same real time at any frame rate (no stutter when the frame rate dips)."""
+    now = time.monotonic()
+    dt = ANIM_DT if ANIM_DT else min(0.05, max(0.001, now - _anim_clock[0]))
+    _anim_clock[0], _anim_clock[1] = now, dt
+    moving, _anim_clock[2] = _anim_clock[2], False
+    return moving
+
+
 def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
     """Draw a button that looks raised: soft shadow, darker side edge below the face, gradient face with a top highlight.
-    The face occupies exactly rect; the side and shadow extend `depth` pixels below it."""
+    The face occupies exactly rect; the side and shadow extend `depth` pixels below it. Selecting a button animates it:
+    the colour eases from the card colour to the selected colour, the face lifts a few pixels and the accent outline fades in.
+    Returns (highlight 0..1, lift in px) so callers can animate their contents the same way."""
     x, y, w, h = rect
+    st = _BTN_ANIM.get(rect)
+    if st is None:                             # first sight of this button: no animation, start settled
+        if len(_BTN_ANIM) > 300:
+            _BTN_ANIM.clear()
+        st = _BTN_ANIM[rect] = [1.0 if sel else 0.0, base, base]
+    st[1 if sel else 2] = base
+    target = 1.0 if sel else 0.0
+    if abs(st[0] - target) < 0.002:
+        st[0] = target
+    else:
+        st[0] += (target - st[0]) * (1.0 - math.exp(-_anim_clock[1] * ANIM_SPEED))   # frame-rate independent ease-out
+        _anim_clock[2] = True
+    e = st[0] * st[0] * (3.0 - 2.0 * st[0])                   # smoothstep: gentle start and stop
+    hl = round(e * ANIM_STEPS) / ANIM_STEPS                   # fine steps: invisible, but keeps the gradient cache small
+    base = _mix(st[2], st[1], hl)
+    lift = int(round(LIFT_PX * hl)) if h >= 80 else 0     # only the big home tiles lift; list rows keep their text aligned
+    y -= lift
     side = _mix(base, (0, 0, 0), 0.55)
     sh = pygame.Surface((w, h + depth + 3), pygame.SRCALPHA)
     pygame.draw.rect(sh, (0, 0, 0, 70), (0, 3, w, h + depth), border_radius=radius)
-    surf.blit(sh, (x, y))
+    surf.blit(sh, (x, y + lift))
     pygame.draw.rect(surf, side, (x, y + depth, w, h), border_radius=radius)
     surf.blit(_btn_face(w, h, base, radius), (x, y))
-    if sel:
-        pygame.draw.rect(surf, ACCENT, (x, y, w, h), 2 if h < 80 else 3, border_radius=radius)
+    if hl > 0:
+        pygame.draw.rect(surf, _mix(base, ACCENT, hl), (x, y, w, h), 2 if h < 80 else 3, border_radius=radius)
+    return hl, lift
 
 
 HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("favorites", "Favorites"), ("tools", "Tools"), ("settings", "Settings"), ("power", "Power Off")]
@@ -1622,6 +1658,7 @@ def main():
         if _now != clk_at:
             clk_at, clk = _now, time.strftime("%H:%M")
 
+        anim_moving = anim_tick()
         canvas.fill(BG)
         pygame.draw.rect(canvas, PANEL, (0, 0, W, 64))
         pygame.draw.rect(canvas, ACCENT, (0, 62, W, 2))
@@ -1681,10 +1718,11 @@ def main():
                     "power": "Shut down RG OS"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
                 bx, by, sel = x0 + (i % 3) * (bw + gap), top_y + (i // 3) * (bh + gap), i == home_idx
-                draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 18, 6, sel)
+                hl, lift = draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 18, 6, sel)
+                by -= lift                                              # contents ride up with the face
                 cx = bx + bw // 2                                       # icon on top, title and subtitle centred below it
-                ICONS[hid](canvas, cx, by + 44, ACCENT if sel else DIM, SEL_BG if sel else PANEL)
-                title = f_row.render(hname, True, TEXT if sel else DIM)
+                ICONS[hid](canvas, cx, by + 44, _mix(DIM, ACCENT, hl), _mix(PANEL, SEL_BG, hl))
+                title = f_row.render(hname, True, _mix(DIM, TEXT, hl))
                 canvas.blit(title, (cx - title.get_width() // 2, by + 84))
                 sub = f_small.render(fit(f_small, subs[hid], bw - 24), True, DIM)
                 canvas.blit(sub, (cx - sub.get_width() // 2, by + 114))
@@ -2064,7 +2102,7 @@ def main():
         # nothing pressed for 3 s on a plain list screen and no popup showing: 15 fps is plenty (saves CPU and battery)
         idle = (view in IDLE_VIEWS and not forced and time.monotonic() - last_act > 3.0
                 and time.time() >= max(vol_show_until, bri_show_until))
-        clock.tick(15 if idle else 30)
+        clock.tick(60 if anim_moving else (15 if idle else 30))   # 60 fps only while a button animation is moving
 
     try:
         if pygame.mixer.get_init():
