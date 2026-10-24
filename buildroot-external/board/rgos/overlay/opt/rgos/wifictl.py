@@ -41,36 +41,10 @@ def _read_json(path, default):
 
 
 def load_conf():
-    """Load saved Wi-Fi settings defensively; a damaged field must not break all Wi-Fi commands."""
     d = _read_json(CONF_FILE, {})
-    raw_nets = d.get("networks", [])
-    if not isinstance(raw_nets, list):
-        raw_nets = []
-    nets = []
-    for n in raw_nets:
-        if not isinstance(n, dict):
-            continue
-        ssid = n.get("ssid")
-        if not isinstance(ssid, str) or not ssid or len(ssid.encode("utf-8", "replace")) > 32:
-            continue
-        psk = n.get("psk", "")
-        # WPA supplicant accepts a raw PSK only as exactly 64 hexadecimal digits.
-        if not isinstance(psk, str) or (psk and not re.fullmatch(r"[0-9a-fA-F]{64}", psk)):
-            psk = ""
-        try:
-            priority = int(n.get("prio", 0))
-        except (TypeError, ValueError, OverflowError):
-            priority = 0
-        nets.append({"ssid": ssid, "psk": psk, "hidden": bool(n.get("hidden", False)), "prio": priority})
-    try:
-        priority = int(d.get("prio", 0))
-    except (TypeError, ValueError, OverflowError):
-        priority = max((n["prio"] for n in nets), default=0)
-    country = d.get("country", "")
-    if not isinstance(country, str):
-        country = ""
-    return {"enabled": bool(d.get("enabled", True)), "prio": priority, "networks": nets,
-            "country": country}
+    nets = [n for n in d.get("networks", []) if isinstance(n, dict) and isinstance(n.get("ssid"), str) and n["ssid"]]
+    return {"enabled": bool(d.get("enabled", True)), "prio": int(d.get("prio", 0)), "networks": nets,
+            "country": str(d.get("country", ""))}
 
 
 def save_conf(conf):

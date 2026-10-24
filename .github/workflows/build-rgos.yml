@@ -1,0 +1,143 @@
+name: Build RGOS image or update
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact:
+        description: What to build
+        required: true
+        type: choice
+        options:
+          - img
+          - update-tar
+        default: img
+      build_id:
+        description: Optional build ID (blank uses UTC timestamp)
+        required: false
+        type: string
+        default: ''
+      ddr_variant:
+        description: ROCKNIX H700 memory variant used for boot assets
+        required: true
+        type: choice
+        options:
+          - DDR4
+          - DDR3
+        default: DDR4
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rgos-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # A self-hosted Linux runner with ample disk/RAM may be needed if GitHub-hosted
+    # runner disk space is insufficient for Buildroot plus the upstream image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check out RGOS
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc build-essential cpio curl file g++ gcc git gzip libncurses-dev \
+            make mtools patch perl python3 python3-pip python3-setuptools \
+            rsync sfdisk squashfs-tools unzip wget xz-utils dosfstools \
+            e2fsprogs fdisk util-linux
+
+      - name: Prepare build ID
+        id: metadata
+        shell: bash
+        env:
+          INPUT_BUILD_ID: ${{ inputs.build_id }}
+        run: |
+          set -euo pipefail
+          build_id="$INPUT_BUILD_ID"
+          if [[ -z "$build_id" ]]; then
+            build_id="$(date -u +%Y%m%d-%H%M%S)"
+          fi
+          # Keep IDs safe for the update manifest and artifact filenames.
+          if [[ ! "$build_id" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
+            echo "Invalid build ID: use 1-64 letters, digits, dots, underscores or hyphens." >&2
+            exit 2
+          fi
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+          echo "Building artifact: ${{ inputs.artifact }} (ID: $build_id)"
+
+      - name: Build disk image
+        if: inputs.artifact == 'img'
+        env:
+          RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
+          RGOS_JOBS: '2'
+          RGOS_H700_DDR: ${{ inputs.ddr_variant }}
+        run: |
+          set -euo pipefail
+          ./build.sh prepare
+          ./build.sh build
+          test -s output/rgos-rg34xxsp.img
+
+      - name: Build update tar
+        if: inputs.artifact == 'update-tar'
+        env:
+          RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
+          RGOS_JOBS: '2'
+          RGOS_H700_DDR: ${{ inputs.ddr_variant }}
+        run: |
+          set -euo pipefail
+          ./build.sh prepare
+          ./build.sh update
+          test -s "output/rgos-update-${RGOS_BUILD_ID}.tar"
+
+      - name: Verify update archive
+        if: inputs.artifact == 'update-tar'
+        env:
+          RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
+        run: |
+          python3 - "$RGOS_BUILD_ID" "output/rgos-update-${RGOS_BUILD_ID}.tar" <<'PY'
+          import json, sys, tarfile
+          build_id, path = sys.argv[1:]
+          with tarfile.open(path, 'r:') as archive:
+              names = archive.getnames()
+              if 'manifest.json' not in names:
+                  raise SystemExit('Update tar has no manifest.json')
+              manifest = json.load(archive.extractfile('manifest.json'))
+              if manifest.get('id') != build_id:
+                  raise SystemExit('Update manifest build ID mismatch')
+              if 'boot/rgos-initrd.gz' not in names or 'boot/extlinux/extlinux.conf' not in names:
+                  raise SystemExit('Update tar is missing required boot files')
+              for name, digest in manifest.get('files', {}).items():
+                  member = archive.extractfile('boot/' + name)
+                  if member is None:
+                      raise SystemExit(f'Manifest file missing from archive: {name}')
+                  import hashlib
+                  actual = hashlib.sha256(member.read()).hexdigest()
+                  if actual != digest:
+                      raise SystemExit(f'SHA-256 mismatch: {name}')
+          print(f'Validated update archive: {path}')
+          PY
+
+      - name: Upload disk image
+        if: inputs.artifact == 'img'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgos-${{ steps.metadata.outputs.build_id }}-img
+          path: output/rgos-rg34xxsp.img
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload update tar
+        if: inputs.artifact == 'update-tar'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rgos-${{ steps.metadata.outputs.build_id }}-update-tar
+          path: output/rgos-update-${{ steps.metadata.outputs.build_id }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
