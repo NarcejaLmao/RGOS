@@ -50,6 +50,7 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
 ROMS_DIR = os.path.join(ROMS_ROOT, "roms")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
 STATE_FILE = os.environ.get("RGOS_STATE", "/var/lib/rgos/state.json")
+FAVORITES_FILE = os.environ.get("RGOS_FAVORITES", os.path.join(ROMS_ROOT, "favorites.txt"))
 SPLASH_DONE = os.path.join(RUN_DIR, "splash-done")      # exists once the startup splash has played (/run is cleared at every boot)
 INPUT_CONF = os.environ.get("RGOS_INPUT", "/etc/rgos/input.json")
 EXIT_LAUNCH, EXIT_POWER = 10, 20
@@ -110,7 +111,7 @@ KEYMAP = {pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left",
           pygame.K_RIGHT: "right", pygame.K_RETURN: "a", pygame.K_z: "a",
           pygame.K_ESCAPE: "b", pygame.K_x: "b", pygame.K_q: "l", pygame.K_w: "r",
           pygame.K_PAGEUP: "l", pygame.K_PAGEDOWN: "r", pygame.K_TAB: "select",
-          pygame.K_SPACE: "start", pygame.K_c: "x"}
+          pygame.K_SPACE: "start", pygame.K_c: "x", pygame.K_y: "y"}
 REPEATABLE = {"up", "down", "left", "right", "l", "r"}
 
 
@@ -283,6 +284,35 @@ def save_state(st):
         pass
 
 
+def load_favorites():
+    """Read favorite ROM paths from the persistent, newline-delimited favorites.txt."""
+    try:
+        with open(FAVORITES_FILE, "r", encoding="utf-8") as f:
+            return list(dict.fromkeys(line.strip() for line in f if line.strip()))
+    except OSError:
+        return []
+
+
+def save_favorites(paths):
+    """Persist favorite paths without losing the existing list if writing fails."""
+    try:
+        os.makedirs(os.path.dirname(FAVORITES_FILE) or ".", exist_ok=True)
+        tmp = FAVORITES_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(path + "\n" for path in sorted(set(paths)))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, FAVORITES_FILE)
+        return True
+    except OSError as e:
+        log("favorites save failed: %s" % e)
+        try:
+            os.unlink(FAVORITES_FILE + ".tmp")
+        except OSError:
+            pass
+        return False
+
+
 def installed_cores():
     """Return RetroArch core names actually installed on this device."""
     dirs = ("/usr/lib/aarch64-linux-gnu/libretro", "/usr/lib/libretro",
@@ -446,7 +476,7 @@ def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
         pygame.draw.rect(surf, ACCENT, (x, y, w, h), 2 if h < 80 else 3, border_radius=radius)
 
 
-HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("tools", "Tools"), ("settings", "Settings")]
+HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("favorites", "Favorites"), ("tools", "Tools"), ("settings", "Settings"), ("power", "Power Off")]
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
 TOOLS = [("files", "File Manager", "Browse, copy, move, rename and delete files on the SD cards", "@view:files"),
          ("portmaster", "PortMaster", "Browse, install and update native Linux game ports", "@tool:portmaster"),
@@ -482,6 +512,21 @@ def icon_recents(c, cx, cy, col, bg):
     pygame.draw.circle(c, col, (cx, cy), 4)
 
 
+def icon_favorites(c, cx, cy, col, bg):
+    # Five-point star, centered on the home tile.
+    pts = []
+    for i in range(10):
+        ang = -math.pi / 2 + i * math.pi / 5
+        rad = 29 if i % 2 == 0 else 13
+        pts.append((int(cx + math.cos(ang) * rad), int(cy + math.sin(ang) * rad)))
+    pygame.draw.polygon(c, col, pts)
+
+
+def icon_power(c, cx, cy, col, bg):
+    pygame.draw.arc(c, col, (cx - 25, cy - 25, 50, 50), math.radians(45), math.radians(315), 5)
+    pygame.draw.line(c, col, (cx, cy - 31), (cx, cy + 1), 5)
+
+
 def icon_settings(c, cx, cy, col, bg):
     for y, kx in ((cy - 18, cx - 10), (cy, cx + 14), (cy + 18, cx - 2)):    # three sliders
         pygame.draw.line(c, col, (cx - 32, y), (cx + 32, y), 4)
@@ -498,7 +543,7 @@ def icon_tools(c, cx, cy, col, bg):
     pygame.draw.circle(c, bg, (cx + 34, cy), 2)
 
 
-ICONS = {"games": icon_games, "recents": icon_recents, "tools": icon_tools, "settings": icon_settings}
+ICONS = {"games": icon_games, "recents": icon_recents, "favorites": icon_favorites, "tools": icon_tools, "settings": icon_settings, "power": icon_power}
 
 
 def rd_file(path):
@@ -1083,7 +1128,13 @@ def main():
             _rcache[0], _rcache[1], _rcache[2] = all_games, rec, [by_path[p] for p in rec if p in by_path]
         return _rcache[2]
 
-    # screens: "home" (Games / Recents / Settings) -> "systems" (consoles) -> "games"; "recents"; "settings"
+    favorite_paths = set(load_favorites())
+
+    def favorite_games():
+        by_path = {g["path"]: g for g in all_games}
+        return [by_path[p] for p in load_favorites() if p in by_path]
+
+    # screens: home -> systems/games, recents, favorites, tools and settings
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
     cal = bmap = None
     set_idx, tool_idx, kb = 0, 0, None
@@ -1246,42 +1297,45 @@ def main():
                     (cal if forced_stage == "calib" else bmap).stop()
                     forced_next()
                 continue
-            if view in ("games", "recents"):
-                key = "\0recents" if view == "recents" else (vsys[sys_idx][0] if vsys else "")
-                games = recent_games() if view == "recents" else games_of(vsys[sys_idx][0] if vsys else "")
+            if view in ("games", "recents", "favorites"):
+                key = "\0" + view if view in ("recents", "favorites") else (vsys[sys_idx][0] if vsys else "")
+                games = recent_games() if view == "recents" else (favorite_games() if view == "favorites" else games_of(vsys[sys_idx][0] if vsys else ""))
                 n, idx = len(games), idx_by.get(key, 0)
             if a == "quit":
                 code = EXIT_POWER
             elif a == "menu":                  # MENU / home button: back to the home screen
-                if view in ("systems", "games", "recents", "tools", "settings", "wifi", "info", "files"):
+                if view in ("systems", "games", "recents", "favorites", "tools", "settings", "wifi", "info", "files"):
                     view = "home"
                 elif view == "calib" and cal and cal.state in ("done", "fail"):
                     view = "home"
                 elif view == "bmap" and bmap and bmap.state in ("done", "fail"):
                     view = "home"
-            elif a == "x" and view in ("home", "systems", "games", "recents"):
+            elif a == "x" and view in ("home", "systems", "games", "recents", "favorites"):
                 cur_sid = vsys[sys_idx][0] if vsys else None
                 all_games = scan_roms()        # rescan
                 vsys = visible_systems(all_games)
                 sys_idx = next((i for i, sy in enumerate(vsys) if sy[0] == cur_sid), min(sys_idx, max(0, len(vsys) - 1)))
                 if view == "games" and not any(sy[0] == cur_sid for sy in vsys):
                     view = "systems"           # the system lost its last game
-                elif view in ("games", "recents"):
-                    n = len(recent_games() if view == "recents" else games_of(vsys[sys_idx][0] if vsys else ""))
+                elif view in ("games", "recents", "favorites"):
+                    n = len(recent_games() if view == "recents" else (favorite_games() if view == "favorites" else games_of(vsys[sys_idx][0] if vsys else "")))
                     idx_by[key] = min(idx, max(0, n - 1))
-            elif view == "home":               # 2x2 grid with three boxes: left/right change column, up/down change row
-                col, row = home_idx % 2, home_idx // 2
-                nxt = home_idx
-                if a in ("left", "right"):
-                    nxt = row * 2 + (1 - col)
+            elif view == "home":               # 3-column x 2-row home grid
+                col, row = home_idx % 3, home_idx // 3
+                if a == "left":
+                    home_idx = row * 3 + (col - 1) % 3
+                elif a == "right":
+                    home_idx = row * 3 + (col + 1) % 3
                 elif a in ("up", "down"):
-                    nxt = (1 - row) * 2 + col
-                if a in ("left", "right", "up", "down"):
-                    home_idx = nxt if nxt < len(HOME_ITEMS) else (len(HOME_ITEMS) - 1 if a in ("up", "down") else home_idx)
+                    other = 1 - row
+                    candidate = other * 3 + col
+                    home_idx = candidate if candidate < len(HOME_ITEMS) else home_idx
                 elif a == "a":
                     view = HOME_ITEMS[home_idx][0]
-                    if view == "games":
-                        view = "systems"       # Games -> list of consoles (Game Boy Advance, Ports, ...) -> games
+                    if view == "power":
+                        code = EXIT_POWER
+                    elif view == "games":
+                        view = "systems"       # Games -> consoles -> games
                         sys_idx = min(sys_idx, max(0, len(vsys) - 1))
             elif view == "systems":
                 if vsys and a in ("down", "right"):
@@ -1292,7 +1346,7 @@ def main():
                     view = "games"
                 elif a == "b":
                     view = "home"
-            elif view in ("games", "recents"):
+            elif view in ("games", "recents", "favorites"):
                 if a == "b":
                     view = "systems" if view == "games" else "home"
                 elif n and a == "down":
@@ -1303,6 +1357,18 @@ def main():
                     idx_by[key] = min(n - 1, idx + rows)
                 elif n and a in ("l", "left"):
                     idx_by[key] = max(0, idx - rows)
+                elif a == "y" and n and view == "games":
+                    path = games[idx]["path"]
+                    if path in favorite_paths:
+                        favorite_paths.discard(path)
+                        action = "Removed from favorites"
+                    else:
+                        favorite_paths.add(path)
+                        action = "Added to favorites"
+                    if save_favorites(favorite_paths):
+                        log("%s: %s" % (action, path))
+                    else:
+                        favorite_paths = set(load_favorites())
                 elif a == "a" and n:
                     code = launch(games[idx]["path"], games[idx])
             elif view == "tools":
@@ -1538,6 +1604,8 @@ def main():
         sid, stag, score, _ext, sname = vsys[sys_idx] if vsys else NO_SYSTEM
         if view == "recents":
             games, key = recent_games(), "\0recents"
+        elif view == "favorites":
+            games, key = favorite_games(), "\0favorites"
         else:
             games, key = games_of(sid), sid
         idx = min(idx_by.get(key, 0), max(0, len(games) - 1))
@@ -1557,6 +1625,8 @@ def main():
             info = "Games   %s" % clk
         elif view == "recents":
             info = "Recents   %d game%s   %s" % (len(games), "" if len(games) == 1 else "s", clk)
+        elif view == "favorites":
+            info = "Favorites   %d game%s   %s" % (len(games), "" if len(games) == 1 else "s", clk)
         elif view == "tools":
             info = "Tools   %s" % clk
         elif view == "files" or (view == "kbd" and kb.field.startswith("fm_")):
@@ -1591,19 +1661,22 @@ def main():
         canvas.blit(s, (right - s.get_width(), 24))
 
         if view == "home":
-            gap = 20
-            bw, bh = min(320, (W - 20 - gap) // 2), 160
-            x0 = (W - (2 * bw + gap)) // 2
+            gap = 14
+            bw, bh = (W - 40 - 2 * gap) // 3, 148
+            x0 = (W - (3 * bw + 2 * gap)) // 2
             subs = {"games": "%d games" % len(all_games),
                     "recents": "%d recent" % len(recent_games()),
-                    "tools": "File Manager, PortMaster, RetroArch",
-                    "settings": "Theme, Wi-Fi, info, sticks, buttons"}
+                    "favorites": "%d favorites" % len(favorite_games()),
+                    "tools": "File Manager, ports, RetroArch",
+                    "settings": "Theme, Wi-Fi, info, controls",
+                    "power": "Shut down RG OS"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
-                bx, by, sel = x0 + (i % 2) * (bw + gap), top_y + (i // 2) * (bh + gap), i == home_idx
-                draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 22, 8, sel)
-                ICONS[hid](canvas, bx + 70, by + bh // 2, ACCENT if sel else DIM, SEL_BG if sel else PANEL)
-                canvas.blit(f_logo.render(hname, True, TEXT if sel else DIM), (bx + 124, by + bh // 2 - 28))
-                canvas.blit(f_small.render(fit(f_small, subs[hid], bw - 126 - 10), True, DIM), (bx + 126, by + bh // 2 + 12))
+                bx, by, sel = x0 + (i % 3) * (bw + gap), top_y + (i // 3) * (bh + gap), i == home_idx
+                draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 18, 6, sel)
+                ICONS[hid](canvas, bx + 42, by + bh // 2 - 4, ACCENT if sel else DIM, SEL_BG if sel else PANEL)
+                title = f_row.render(hname, True, TEXT if sel else DIM)
+                canvas.blit(title, (bx + 78, by + bh // 2 - 22))
+                canvas.blit(f_small.render(fit(f_small, subs[hid], bw - 88), True, DIM), (bx + 78, by + bh // 2 + 8))
             hint = "A Open   X Rescan   START+SELECT Power off"
         elif view == "tools":
             for i, (_tid, tname, tdesc, _tgt) in enumerate(TOOLS):
@@ -1888,6 +1961,10 @@ def main():
                 msg = ["No recent games yet.",
                        "Games you run show up here, newest first.",
                        "(B = back)"]
+            elif view == "favorites":
+                msg = ["No favorite games yet.",
+                       "In a game's list, highlight a game and press Y.",
+                       "Favorites are saved to favorites.txt."]
             else:
                 msg = ["No games found.",
                        "Put GBA ROMs in roms/gba/, NES ROMs in roms/nes/",
@@ -1907,11 +1984,17 @@ def main():
                 if gi == idx:
                     pygame.draw.rect(canvas, SEL_BG, (list_x, y, list_w, row_h - 4), border_radius=8)
                     pygame.draw.rect(canvas, ACCENT, (list_x, y, 5, row_h - 4), border_radius=3)
-                badge = f_tiny.render("SD2", True, ACCENT) if games[gi].get("card", 1) == 2 else None
-                canvas.blit(f_row.render(fit(f_row, games[gi]["title"], list_w - 40 - (36 if badge else 0)),
+                badges = []
+                if games[gi]["path"] in favorite_paths:
+                    badges.append("★")
+                if games[gi].get("card", 1) == 2:
+                    badges.append("SD2")
+                suffix = "  ".join(badges)
+                canvas.blit(f_row.render(fit(f_row, games[gi]["title"], list_w - 40 - (len(suffix) * 10 if suffix else 0)),
                                          True, TEXT if gi == idx else DIM), (list_x + 18, y + 9))
-                if badge:
-                    canvas.blit(badge, (list_x + list_w - 34, y + 14))
+                if suffix:
+                    bt = f_tiny.render(suffix, True, ACCENT)
+                    canvas.blit(bt, (list_x + list_w - 14 - bt.get_width(), y + 14))
             if len(games) > rows:
                 bar_h = H - 64 - top_y
                 th = max(24, int(bar_h * rows / len(games)))
@@ -1932,7 +2015,8 @@ def main():
             canvas.blit(f_small.render("%.1f MB" % (g["size"] / 1048576), True, DIM),
                         (px + 15, top_y + 300))
             canvas.blit(f_small.render("Native port", True, DIM), (px + 15, top_y + 322))
-            hint = "A Run   B Back   L/R Page   X Rescan   START+SELECT Power off"
+            hint = ("A Run   Y Favorite/unfavorite   B Back   L/R Page   X Rescan   START+SELECT Power off"
+                    if view == "games" else "A Run   B Back   L/R Page   X Rescan   START+SELECT Power off")
 
         if inp.conf.get("debug") and inp.last_raw:
             hint += "   [" + inp.last_raw + "]"
