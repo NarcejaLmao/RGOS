@@ -288,6 +288,9 @@ def apply_tar(tar, bootdir):
     # transaction data used only if a later rename/write fails.
     changed = []
     existed = {}
+    # Keep transactional copies if rollback itself fails; they may be the only
+    # remaining recovery path for a partially updated boot partition.
+    preserve_rollback = False
     idp = os.path.join(bootdir, ID_FILE)
     rollback_id = idp + ".rollback"
     id_existed = os.path.isfile(idp)
@@ -348,18 +351,22 @@ def apply_tar(tar, bootdir):
             rollback_errors.append("%s: %s" % (ID_FILE, re))
         _cleanup(bootdir)
         if rollback_errors:
-            raise UpdateError("installation failed (%s); rollback incomplete: %s" % (e, "; ".join(rollback_errors)))
+            preserve_rollback = True
+            raise UpdateError("installation failed (%s); rollback incomplete: %s; recovery copies retained with .rollback suffix" % (e, "; ".join(rollback_errors)))
         raise UpdateError("installation failed; previous boot files restored: %s" % e)
     finally:
-        for name in payload:
+        # Never delete the only surviving recovery copies if restoring a file
+        # failed. On success, or after a complete rollback, these are disposable.
+        if not preserve_rollback:
+            for name in payload:
+                try:
+                    os.remove(os.path.join(bootdir, name + ".rollback"))
+                except OSError:
+                    pass
             try:
-                os.remove(os.path.join(bootdir, name + ".rollback"))
+                os.remove(rollback_id)
             except OSError:
                 pass
-        try:
-            os.remove(rollback_id)
-        except OSError:
-            pass
     return "installed", uid
 
 
