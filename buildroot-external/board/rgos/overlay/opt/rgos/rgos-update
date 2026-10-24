@@ -283,25 +283,83 @@ def apply_tar(tar, bootdir):
     finally:
         tf.close()
     say("  installing")
-    for name in payload:                # everything is verified: replace, one atomic rename per file
-        dst = os.path.join(bootdir, name)
-        if os.path.isfile(dst):
-            try:                        # best-effort backup for a manual rollback
-                shutil.copyfile(dst, dst + ".prev.tmp")
-                os.replace(dst + ".prev.tmp", dst + ".prev")
-            except OSError:
-                try:
-                    os.remove(dst + ".prev.tmp")
-                except OSError:
-                    pass
-        os.replace(dst + ".new", dst)
+    # Prepare rollback copies for EVERY destination before changing any live boot file.
+    # The .prev files remain user-accessible backups; .rollback files are temporary
+    # transaction data used only if a later rename/write fails.
+    changed = []
+    existed = {}
     idp = os.path.join(bootdir, ID_FILE)
-    with open(idp + ".new", "w") as f:
-        f.write(uid + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(idp + ".new", idp)
-    os.sync()
+    rollback_id = idp + ".rollback"
+    id_existed = os.path.isfile(idp)
+    try:
+        for name in payload:
+            dst = os.path.join(bootdir, name)
+            existed[name] = os.path.isfile(dst)
+            if existed[name]:
+                # Retain a manual rollback copy, but do not let failure to create it
+                # prevent the update when the transactional copy can be made.
+                try:
+                    shutil.copyfile(dst, dst + ".prev.tmp")
+                    os.replace(dst + ".prev.tmp", dst + ".prev")
+                except OSError:
+                    try:
+                        os.remove(dst + ".prev.tmp")
+                    except OSError:
+                        pass
+                shutil.copyfile(dst, dst + ".rollback")
+        if id_existed:
+            shutil.copyfile(idp, rollback_id)
+
+        # All payloads have been checksum-verified and rollback copies are ready.
+        for name in payload:
+            dst = os.path.join(bootdir, name)
+            os.replace(dst + ".new", dst)
+            changed.append(name)
+        with open(idp + ".new", "w") as f:
+            f.write(uid + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(idp + ".new", idp)
+        os.sync()
+    except OSError as e:
+        # Do not leave a mixture of old and new boot files after a reported failure.
+        rollback_errors = []
+        for name in reversed(changed):
+            dst = os.path.join(bootdir, name)
+            try:
+                if existed.get(name):
+                    os.replace(dst + ".rollback", dst)
+                else:
+                    try:
+                        os.remove(dst)
+                    except FileNotFoundError:
+                        pass
+            except OSError as re:
+                rollback_errors.append("%s: %s" % (name, re))
+        try:
+            if os.path.exists(rollback_id):
+                os.replace(rollback_id, idp)
+            elif not id_existed:
+                try:
+                    os.remove(idp)
+                except FileNotFoundError:
+                    pass
+        except OSError as re:
+            rollback_errors.append("%s: %s" % (ID_FILE, re))
+        _cleanup(bootdir)
+        if rollback_errors:
+            raise UpdateError("installation failed (%s); rollback incomplete: %s" % (e, "; ".join(rollback_errors)))
+        raise UpdateError("installation failed; previous boot files restored: %s" % e)
+    finally:
+        for name in payload:
+            try:
+                os.remove(os.path.join(bootdir, name + ".rollback"))
+            except OSError:
+                pass
+        try:
+            os.remove(rollback_id)
+        except OSError:
+            pass
     return "installed", uid
 
 
