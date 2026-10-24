@@ -78,8 +78,8 @@ jobs:
           RGOS_H700_DDR: ${{ inputs.ddr_variant }}
         run: |
           set -euo pipefail
-          ./build.sh prepare
-          ./build.sh build
+          bash ./build.sh prepare
+          bash ./build.sh build
           test -s output/rgos-rg34xxsp.img
 
       - name: Build update tar
@@ -90,8 +90,8 @@ jobs:
           RGOS_H700_DDR: ${{ inputs.ddr_variant }}
         run: |
           set -euo pipefail
-          ./build.sh prepare
-          ./build.sh update
+          bash ./build.sh prepare
+          bash ./build.sh update
           test -s "output/rgos-update-${RGOS_BUILD_ID}.tar"
 
       - name: Verify update archive
