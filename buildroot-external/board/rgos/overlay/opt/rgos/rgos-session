@@ -17,7 +17,7 @@ mkdir -p /run/rgos /var/lib/rgos /var/log /media/roms /dev/pts /boot
 fixperms() {
     chown -R 0:0 /opt/rgos /etc/rgos /var/lib/rgos 2>/dev/null
     chmod -R a+rwX /etc/rgos /var/lib/rgos 2>/dev/null
-    chmod 755 /usr/bin/systemctl /opt/rgos/rgos-session /opt/rgos/rgos-sticks /opt/rgos/rgos-update /opt/rgos/menu.py 2>/dev/null
+    chmod 755 /usr/bin/systemctl /opt/rgos/rgos-session /opt/rgos/rgos-sticks /opt/rgos/rgos-update /opt/rgos/rgos-launch /opt/rgos/menu.py 2>/dev/null
     chmod a+rw /dev/input/* /dev/uinput /dev/fb* /dev/snd/* /dev/dri/* /dev/tty1 2>/dev/null
 }
 # settings dir (/var/lib/rgos: button map, stick calibration, state) MUST be writable. If it is not (read-only or odd /var/lib
@@ -38,6 +38,13 @@ mkdir -p /usr/share/fonts/truetype/dejavu
 # input drivers (ROCKNIX ships them as modules): gpio-keys / ADC / PWM / joypad / uinput / evdev
 if [ -d /lib/modules ]; then
     for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -iE 'joypad|adc|pwm|gpio-keys|evdev|joydev|uinput' \
+               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
+fi
+# GPU + sound for the emulators: Panfrost (Mali-G31) and the H700 audio codec. Built into some kernels (then nothing is found
+# and this does nothing), modules in others (then there is no udev to load them for us). Dependencies come in via modules.dep.
+if [ -d /lib/modules ]; then
+    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/(drivers/gpu/drm|sound)/' \
+               | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi|snd-soc|snd_soc|snd-pcm|snd_pcm|snd-timer|snd\.ko|soundcore' \
                | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
 fi
 # first boot: the image only carries the FAT boot partition (1) and a minimal ext4 (2). Create the exFAT ROMS partition (3)
@@ -122,12 +129,12 @@ python3 /opt/rgos/rgos-sticks >> /var/log/rgos-sticks.log 2>&1 &
     { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
       T=""; command -v timeout >/dev/null 2>&1 && T="timeout 4"
       $T python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
-      for f in /var/log/rgos-menu.log /var/log/rgos-sticks.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
+      for f in /var/log/rgos-menu.log /var/log/rgos-sticks.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
       echo "--- settings dir"; id; grep -E ' (/|/var|/var/lib|/var/lib/rgos) ' /proc/mounts; ls -ld /var /var/lib /var/lib/rgos 2>&1
       ls -la /var/lib/rgos 2>&1; { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo "write test: ok"; } 2>&1 || echo "write test: FAILED"
       cat /var/log/rgos-state.log 2>&1
       echo "--- /dev/input"; ls -l /dev/input 2>&1; cat /proc/bus/input/devices 2>&1
-      echo "--- /dev/fb0"; ls -l /dev/fb0 2>&1; cat /sys/class/graphics/fb0/virtual_size 2>&1
+      echo "--- /dev/dri"; ls -l /dev/dri 2>&1; cat /sys/kernel/debug/dri/*/name 2>&1; echo "--- /dev/fb0"; ls -l /dev/fb0 2>&1; cat /sys/class/graphics/fb0/virtual_size 2>&1
       echo "--- modules"; lsmod 2>&1; echo "--- dmesg"; dmesg 2>&1 | tail -n 150
     } > /boot/rgos-logs.txt 2>&1; sync
   done ) >/dev/null 2>&1 &
@@ -138,7 +145,8 @@ while true; do
     python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import menu; menu.run()' 2>>"$MENULOG"
     rc=$?
     case $rc in
-      10) : ;;                                  # a game/tool was chosen: this build has no emulators or ports, so just return to the menu
+      10) # a game/tool was chosen: rgos-launch picks the libretro core and runs RetroArch, then we come back to the menu
+          python3 /opt/rgos/rgos-launch "$(cat /run/rgos/launch 2>/dev/null)" 2>>/var/log/rgos-launch.log ;;
       20) sync; poweroff -f; sleep 30 ;;
       *)  { echo; echo "RG OS menu exited (code $rc). Last log lines:"; tail -n 12 "$MENULOG"; } > /dev/tty1 2>/dev/null
           sleep 5 ;;

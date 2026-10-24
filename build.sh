@@ -18,7 +18,7 @@ usage() {
 Usage: $0 {prepare|fetch-assets|build|image|update|help}
   prepare  Clone Buildroot if missing.
   fetch-assets  Download ROCKNIX H700 image; stage boot files, DTB and the Allwinner bootloader.
-  build    Build Buildroot rootfs and assemble a whole-disk .img.
+  build    Download + cross-build RetroArch and the mGBA core with the rootfs, and assemble a whole-disk .img.
   image    Assemble a .img from the already-built initramfs and staged ROCKNIX boot files.
   update   Rebuild the rootfs and pack an update .tar (output/rgos-update-<id>.tar). Copy it into the update/ folder of the
            exFAT/FAT ROMS partition; the device installs it on the next boot. RGOS_SKIP_BUILDROOT=1 re-packs without running
@@ -33,6 +33,7 @@ Environment:
   RGOS_BOOT_LABEL     FAT label of the boot partition (default RGOS)
   RGOS_ROOT_MIB       Size of the ext4 partition in MiB (default 1, the practical minimum). The exFAT ROMS partition is created
                       on first boot and fills the rest of the card.
+  RGOS_MODULE_FILTER  Regex of kernel-module paths copied into the initramfs (default includes input, gpu, sound, fs)
   RGOS_BUILD_ID       Build id stamped into the image / update (default: UTC timestamp)
 USAGE
 }
@@ -40,26 +41,48 @@ USAGE
 # Buildroot no longer ships a python-pygame package, so use the official prebuilt pygame wheel for aarch64 (it bundles SDL2,
 # SDL_image/mixer/ttf, freetype, ...) and unpack it into an extra rootfs overlay. Needs the glibc toolchain (manylinux wheel).
 fetch_pygame() {
-  local mk="$BR_DIR/package/python3/python3.mk" pyver dest tmp pkg ok=0
+  local mk="$BR_DIR/package/python3/python3.mk" pyver dest tmp pkg whl="" abi
   pyver="$(sed -n 's/^PYTHON3_VERSION_MAJOR *= *\([0-9.]*\).*/\1/p' "$mk" 2>/dev/null | head -n 1)"
   [[ -n "$pyver" ]] || { echo "ERROR: cannot read the Python version from $mk" >&2; exit 1; }
   dest="$ROOT/buildroot-external/board/rgos/pygame-overlay/usr/lib/python$pyver/site-packages"
   if [[ -d "$dest/pygame" ]]; then echo "pygame wheel already unpacked for Python $pyver."; return 0; fi
+  if [[ -n "${RGOS_SKIP_PYGAME:-}" ]]; then
+    echo "WARNING: RGOS_SKIP_PYGAME set - building WITHOUT pygame (the menu will not start). Fix the wheel, then re-run ./build.sh build (the rootfs step is quick)." >&2
+    return 0
+  fi
   command -v unzip >/dev/null || { echo "ERROR: install unzip" >&2; exit 1; }
-  python3 -m pip --version >/dev/null 2>&1 || { echo "ERROR: install pip: sudo apt install python3-pip" >&2; exit 1; }
+  abi="cp${pyver/./}"
   tmp="$(mktemp -d)"
-  for pkg in pygame pygame-ce; do
-    echo "Downloading $pkg wheel for aarch64 / CPython $pyver ..."
-    if python3 -m pip download --no-deps --only-binary=:all: --disable-pip-version-check \
-         --platform manylinux2014_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux_2_28_aarch64 \
-         --python-version "$pyver" --implementation cp --abi "cp${pyver/./}" -d "$tmp" "$pkg" >/dev/null 2>"$tmp/err"; then ok=1; break; fi
-    tail -n 3 "$tmp/err" >&2
-  done
-  [[ "$ok" = 1 ]] || { echo "ERROR: no aarch64 pygame wheel for Python $pyver (see above)." >&2; exit 1; }
+  # 1) A wheel you placed yourself: RGOS_PYGAME_WHEEL=/path/x.whl, or any *.whl in assets/wheels/ matching this Python.
+  if [[ -n "${RGOS_PYGAME_WHEEL:-}" ]]; then whl="$RGOS_PYGAME_WHEEL"
+  else
+    whl="$(ls "$ROOT"/assets/wheels/pygame*-"$abi"-*aarch64*.whl 2>/dev/null | tail -n 1 || true)"
+  fi
+  # 2) Otherwise download one. pygame-ce first: it publishes wheels for newer Pythons (3.13/3.14) that classic pygame lacks.
+  if [[ -z "$whl" ]]; then
+    python3 -m pip --version >/dev/null 2>&1 || { echo "ERROR: install pip: sudo apt install python3-pip" >&2; exit 1; }
+    for pkg in pygame-ce pygame; do
+      echo "Downloading $pkg wheel for aarch64 / CPython $pyver ..."
+      if python3 -m pip download --no-deps --only-binary=:all: --disable-pip-version-check \
+           --platform manylinux2014_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux_2_28_aarch64 \
+           --python-version "$pyver" --implementation cp --abi "$abi" -d "$tmp" "$pkg" >/dev/null 2>"$tmp/err"; then
+        whl="$(ls "$tmp"/*.whl | head -n 1)"; break
+      fi
+      tail -n 3 "$tmp/err" >&2
+    done
+  fi
+  if [[ -z "$whl" || ! -f "$whl" ]]; then
+    echo "ERROR: no aarch64 pygame wheel for Python $pyver." >&2
+    echo "       Options: (a) download pygame_ce-*-$abi-*manylinux*aarch64.whl by hand from https://pypi.org/project/pygame-ce/#files" >&2
+    echo "                    and put it in $ROOT/assets/wheels/ (or RGOS_PYGAME_WHEEL=/path/to.whl);" >&2
+    echo "                (b) use a Buildroot release with Python 3.12/3.13;" >&2
+    echo "                (c) RGOS_SKIP_PYGAME=1 ./build.sh build   to compile everything else now (menu will lack pygame)." >&2
+    rm -rf "$tmp"; exit 1
+  fi
   rm -rf "$ROOT/buildroot-external/board/rgos/pygame-overlay"; mkdir -p "$dest"
-  unzip -q -o "$tmp"/*.whl -d "$dest"
+  unzip -q -o "$whl" -d "$dest"
   rm -rf "$tmp"
-  echo "Unpacked pygame into $dest"
+  echo "Unpacked $(basename "$whl") into $dest"
 }
 
 # Tools rgos-session needs on the device to create + format the exFAT ROMS partition on first boot (and to log diagnostics).
@@ -76,6 +99,18 @@ rootfs_missing_tools() {
   echo "${missing# }"
 }
 
+# Print the emulation files that are NOT inside the given rootfs.cpio.gz (empty output = RetroArch and the GBA core are there).
+# Buildroot silently drops defconfig lines it does not understand, so check the result instead of trusting the config.
+EMU_FILES="usr/bin/retroarch usr/lib/libretro/mgba_libretro.so"
+rootfs_missing_emu() {
+  local listing f missing=""
+  listing="$(gzip -dc "$1" | cpio -t --quiet 2>/dev/null || true)"
+  for f in $EMU_FILES; do
+    grep -Eq "(^|/)${f//./\\.}\$" <<<"$listing" || missing="$missing $f"
+  done
+  echo "${missing# }"
+}
+
 # Stage the files that live on the FAT boot partition (kernel, launcher initramfs + modules, DTB, extlinux.conf) in
 # $OUT_DIR/boot-stage and point BOOT_DIR at it. Used by both the full image and the update tar.
 stage_boot() {
@@ -87,12 +122,21 @@ stage_boot() {
   [[ -z "$miss" ]] || { echo "ERROR: the initramfs ($BR_DIR/output/images/rootfs.cpio.gz) lacks: $miss" >&2
     echo "       Without them the exFAT ROMS partition cannot be created on first boot. Run ./build.sh build (not 'image' / RGOS_SKIP_BUILDROOT=1)," >&2
     echo "       and check that the BR2_PACKAGE_UTIL_LINUX_* / BR2_PACKAGE_EXFATPROGS / BR2_PACKAGE_COREUTILS options survive 'make menuconfig'." >&2; exit 1; }
+  local emu; emu="$(rootfs_missing_emu "$BR_DIR/output/images/rootfs.cpio.gz")"
+  if [[ -n "$emu" ]]; then
+    echo "ERROR: the initramfs has no emulator: missing $emu" >&2
+    echo "       Buildroot dropped the RetroArch / mGBA options. Their state in $BR_DIR/.config:" >&2
+    grep -E 'BR2_PACKAGE_(RETROARCH|RGOS_LIBRETRO_MGBA|MESA3D|SDL2|LIBDRM)\b|BR2_PACKAGE_(RETROARCH|RGOS_LIBRETRO_MGBA)[ =]' "$BR_DIR/.config" >&2 || true
+    echo "       Re-run: make -C $BR_DIR BR2_EXTERNAL=$ROOT/buildroot-external rgos_rg34xxsp_defconfig 2>&1 | grep -iE 'warn|unknown|error'" >&2
+    echo "       and: make -C $BR_DIR BR2_EXTERNAL=$ROOT/buildroot-external menuconfig  (search RETROARCH to see which dependency is unmet)." >&2
+    exit 1
+  fi
   cp -f "$BR_DIR/output/images/rootfs.cpio.gz" "$initrd"
   # ROCKNIX kernel modules (input/ADC/PWM/uinput drivers) go in as a second, concatenated initramfs archive.
   if [[ -d "$ASSET_DIR/modules" ]] && find "$ASSET_DIR/modules" -name '*.ko*' -print -quit | grep -q .; then
     command -v cpio >/dev/null || { echo "ERROR: install cpio" >&2; exit 1; }
     local mtmp="$OUT_DIR/modules-cpio"; rm -rf "$mtmp"; mkdir -p "$mtmp/lib/modules"
-    local filt="${RGOS_MODULE_FILTER:-kernel/(drivers/(input|iio|pwm|gpio|mfd|misc|hid)|lib|crypto|fs/(exfat|fat|nls))/}"
+    local filt="${RGOS_MODULE_FILTER:-kernel/(drivers/(input|iio|pwm|gpio|mfd|misc|hid|gpu|devfreq)|sound|lib|crypto|fs/(exfat|fat|nls))/}"
     local ver
     for ver in "$ASSET_DIR"/modules/*/; do
       ver="$(basename "$ver")"; mkdir -p "$mtmp/lib/modules/$ver"
@@ -223,6 +267,28 @@ PARTITIONS
   return 0
 }
 
+# Buildroot silently drops config lines whose dependencies are not met, which is how a build ends up with no RetroArch.
+# Stop right after the defconfig if RetroArch / mGBA did not survive, and say which dependency is missing.
+ensure_emu_config() {
+  local o bad=""
+  for o in BR2_PACKAGE_RGOS_RETROARCH BR2_PACKAGE_RGOS_LIBRETRO_MGBA BR2_PACKAGE_MESA3D_GBM BR2_PACKAGE_SDL2 BR2_PACKAGE_ALSA_LIB; do
+    grep -q "^$o=y" "$BR_DIR/.config" || bad="$bad $o"
+  done
+  [[ -z "$bad" ]] || { echo "ERROR: Buildroot dropped these options from $BR_DIR/.config:$bad" >&2
+    echo "       Check: make -C $BR_DIR BR2_EXTERNAL=$ROOT/buildroot-external menuconfig  (External options > rgos-retroarch shows what it needs)." >&2; exit 1; }
+}
+
+# Parallel jobs: LLVM (built for Mesa/Panfrost) needs ~4 GiB RAM per compiler process (the biggest LLVM files peak even higher), and the Linux OOM killer ends
+# the build ("g++: Killed signal terminated program cc1plus") when too many run at once. Default: min(cpus, RAM/4GiB).
+# Override with RGOS_JOBS=N.
+build_jobs() {
+  local cpus mem_kb jobs
+  [[ -n "${RGOS_JOBS:-}" ]] && { echo "$RGOS_JOBS"; return; }
+  cpus="$(nproc)"; mem_kb="$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  jobs=$(( mem_kb / 4194304 )); (( jobs >= 1 )) || jobs=1; (( jobs <= cpus )) || jobs=$cpus
+  echo "$jobs"
+}
+
 buildroot_make() {
     # WSL appends Windows directories ("/mnt/c/Program Files/...") to PATH; Buildroot refuses any PATH with whitespace.
     CLEAN_PATH=""
@@ -233,14 +299,25 @@ buildroot_make() {
     done
     export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${CLEAN_PATH:+:$CLEAN_PATH}"
     fetch_pygame
+    free -h | sed -n 1,3p; echo "Using $(build_jobs) parallel jobs (RGOS_JOBS=N to change; low RAM / WSL: see docs/GBA.md)."
     make -C "$BR_DIR" BR2_EXTERNAL="$ROOT/buildroot-external" rgos_rg34xxsp_defconfig
-    make -C "$BR_DIR" -j"$(nproc)"
+    ensure_emu_config
+    # Download the RetroArch and mGBA sources from GitHub now, so a network problem fails here and not an hour into the build.
+    echo "Downloading RetroArch and the mGBA core ..."
+    make -C "$BR_DIR" rgos-retroarch-source rgos-libretro-mgba-source
+    make -C "$BR_DIR" BR2_JLEVEL="$(build_jobs)" -j"$(build_jobs)"
+    # A package built before it was in the config (or with other options) is not rebuilt by Buildroot: force it.
+    if [[ -n "$(rootfs_missing_emu "$BR_DIR/output/images/rootfs.cpio.gz")" ]]; then
+      echo "Initramfs has no RetroArch / mGBA ($(rootfs_missing_emu "$BR_DIR/output/images/rootfs.cpio.gz")); rebuilding rgos-retroarch and rgos-libretro-mgba ..."
+      make -C "$BR_DIR" rgos-libretro-mgba-dirclean rgos-retroarch-dirclean
+      make -C "$BR_DIR" BR2_JLEVEL="$(build_jobs)" -j"$(build_jobs)"
+    fi
     # Buildroot does not notice changed per-package options (or a package that was built before the defconfig gained it):
     # if the first-boot tools are not in the image, wipe those packages' build dirs and build again.
     if [[ -n "$(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")" ]]; then
       echo "Initramfs is missing first-boot tools ($(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")); rebuilding util-linux, exfatprogs, coreutils, busybox ..."
       make -C "$BR_DIR" util-linux-dirclean exfatprogs-dirclean coreutils-dirclean busybox-dirclean
-      make -C "$BR_DIR" -j"$(nproc)"
+      make -C "$BR_DIR" BR2_JLEVEL="$(build_jobs)" -j"$(build_jobs)"
     fi
 }
 
@@ -248,7 +325,7 @@ buildroot_make() {
 # on the device (copied by the Buildroot overlay) or in the build.
 fix_modes() {
   local o="$ROOT/buildroot-external/board/rgos/overlay"
-  chmod +x "$o/usr/bin/systemctl" "$o/opt/rgos/rgos-session" "$o/opt/rgos/rgos-sticks" "$o/opt/rgos/rgos-update" \
+  chmod +x "$o/usr/bin/systemctl" "$o/opt/rgos/rgos-session" "$o/opt/rgos/rgos-sticks" "$o/opt/rgos/rgos-update" "$o/opt/rgos/rgos-launch" \
            "$o/opt/rgos/menu.py" "$ROOT"/build.sh "$ROOT"/scripts/*.sh "$ROOT"/tools/*.py 2>/dev/null || true
 }
 fix_modes
@@ -263,7 +340,7 @@ case "${1:-help}" in
     else
       echo "Using existing Buildroot: $BR_DIR"
     fi
-    echo "Buildroot source prepared."
+    echo "Buildroot source prepared. RetroArch and mGBA are built from source by './build.sh build' (downloaded from GitHub then)."
     ;;
   build)
     [[ -d "$BR_DIR" ]] || { echo "Buildroot not found. Run ./build.sh prepare or set BUILDROOT_DIR." >&2; exit 1; }

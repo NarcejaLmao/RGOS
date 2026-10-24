@@ -1,0 +1,2 @@
+source "$BR2_EXTERNAL_RGOS_PATH/package/rgos-retroarch/Config.in"
+source "$BR2_EXTERNAL_RGOS_PATH/package/rgos-libretro-mgba/Config.in"
