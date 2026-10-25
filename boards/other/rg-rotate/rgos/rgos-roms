@@ -1,7 +1,7 @@
 #!/bin/sh
 # rgos-roms: first-boot creation of the ROMS partition (partition 4, exFAT) on the card RG OS booted from.
 #
-# The image ships with partitions 1 (ROCKNIX, FAT), 2 (STORAGE) and 3 ("uboot") only. PARTITION 3 MUST STAY: the SPL finds U-Boot
+# The image ships with partitions 1 (RGOS, FAT), 2 (STORAGE) and 3 ("uboot") only. PARTITION 3 MUST STAY: the SPL finds U-Boot
 # on the card by the GPT name "uboot"; without it the device ignores the card and boots Android from its internal storage. On the first boot this script
 #   1. backs up the GPT to /boot/rgos-gpt-backup.bin (restore from a PC with `sgdisk -l` if a card ever misbehaves),
 #   2. moves the backup GPT to the real end of the card and creates partition 4 from the first 1 MiB boundary after

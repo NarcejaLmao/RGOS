@@ -1,7 +1,7 @@
 """RG OS file manager: browsing and file operations (no pygame here, so it can be tested on any PC).
 
 menu.py draws the screen and feeds buttons into a FileManager. All paths stay inside the "roots", listed in
-this order: the ROCKNIX boot partition, the optional second SD card, then ROMS. The boot files the device needs to
+this order: the RGOS boot partition, the optional second SD card, then ROMS. The boot files the device needs to
 start (SYSTEM, KERNEL, extlinux, ...) are listed in "protected" and can't be deleted, renamed or moved from here.
 
 Operations: copy, cut/move, paste, rename, new folder, delete, with multi-select (mark) and a
@@ -326,7 +326,7 @@ class FileManager:
             for p in t:
                 if os.path.realpath(p) in roots:        # never delete a whole card
                     continue
-                if self.is_protected(p):                # boot files on the ROCKNIX partition
+                if self.is_protected(p):                # boot files on the RGOS partition
                     skipped += 1
                     continue
                 delete_item(p)

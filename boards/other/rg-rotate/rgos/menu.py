@@ -496,15 +496,15 @@ HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("favorites", "Favorit
 TOOLS = [("files", "File Manager", "Browse, copy, move, rename and delete files on the SD cards", "@view:files"),
          ("portmaster", "PortMaster", "Browse, install and update native Linux game ports", "@tool:portmaster"),
          ("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
-BOOT_ROOT = "/boot"                            # the ROCKNIX FAT partition (partition 1), mounted read-write by rgos-init
-# top-level items on the ROCKNIX partition that the device needs to start; the file manager won't delete, rename or move them
+BOOT_ROOT = "/boot"                            # the RGOS FAT partition (partition 1), mounted read-write by rgos-init
+# top-level items on the RGOS partition that the device needs to start; the file manager won't delete, rename or move them
 BOOT_PROTECTED = ("SYSTEM", "SYSTEM.md5", "KERNEL", "KERNEL.md5", "extlinux", "dtbs", "device_trees", "boot.ini",
                   "rgos-data", "boot.scr", "Image", "uInitrd", "initrd", "initrd.img", "u-boot.bin", "idbloader.img",
                   "trust.img", "uboot.img", "rgos-initrd.cpio")
 
 
 def fm_roots():
-    """Storage the file manager may touch, in the order shown: ROCKNIX (boot partition), the second SD card when it is
+    """Storage the file manager may touch, in the order shown: RGOS (boot partition), the second SD card when it is
     mounted, and ROMS last."""
     roots = []
     if os.path.ismount(BOOT_ROOT):
@@ -518,7 +518,7 @@ def fm_roots():
 
 
 def make_file_manager():
-    return filemanager.FileManager(fm_roots(), labels={BOOT_ROOT: "ROCKNIX", ROMS_ROOT: "ROMS"},
+    return filemanager.FileManager(fm_roots(), labels={BOOT_ROOT: "RGOS", ROMS_ROOT: "ROMS"},
                                    protected={BOOT_ROOT: BOOT_PROTECTED, ROMS_ROOT: ("rgos-data",)})
 
 

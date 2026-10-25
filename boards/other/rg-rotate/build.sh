@@ -6,6 +6,7 @@
 # is bypassed by a tiny RG OS initramfs (initramfs/) loaded through extlinux.conf; extlinux.conf.stock keeps the original.
 #
 # Run as root on Debian/Ubuntu (WSL2 is fine):
+#   (from the repo root: ./build.sh rg-rotate [image|update])
 #   sudo ./build.sh          full SD card image  -> out/rg-rotate-rgos.img
 #   sudo ./build.sh update   offline update tar  -> out/rgos-update-<id>.tar  (copy it to update/ on the ROMS partition and reboot)
 set -euo pipefail
@@ -19,10 +20,11 @@ PSX_REPO="${PSX_REPO:-https://github.com/libretro/pcsx_rearmed.git}"   # PlaySta
 NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
 # Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),
 # with Mesa (Panfrost) for KMS output and SDL2 for input.
-# Also: Snes9x (SNES; Debian non-free, hence --components below) and Beetle WonderSwan (WS / WSC). The Neo Geo Pocket core has no Debian
+# Also: Snes9x (SNES; Debian non-free, hence --components below) and Beetle WonderSwan (WS / WSC). libretro-beetle-psx is NOT in EMU_PKGS:
+# a package missing from the suite aborts debootstrap, so it is installed best-effort later (PlayStation uses pcsx_rearmed, built from source). The Neo Geo Pocket core has no Debian
 # package: it is compiled from source in the rootfs below (NGP_SRC), or drop a prebuilt aarch64 *_libretro.so into cores/ next to build.sh.
 # More libretro cores: EXTRA_PKGS="libretro-nestopia" sudo -E ./build.sh  (Debian package names)
-EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-beetle-wswan,libretro-beetle-psx,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
+EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-beetle-wswan,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
 EXTRA_PKGS="${EXTRA_PKGS:-}"
 # The exFAT ROMS partition (partition 4) is NOT in the image: rgos/rgos-roms creates it on the device's first boot, using all the
 # free space on the card, and formats it exFAT.
@@ -33,12 +35,12 @@ WORK="$HERE/work"; OUT="$HERE/out"; IMG="$OUT/rg-rotate-rgos.img"
 ROOTFS="$WORK/rootfs"
 
 [[ $EUID -eq 0 ]] || { echo "Run as root (sudo ./build.sh)"; exit 1; }
-need=(debootstrap losetup mksquashfs unsquashfs wget gunzip md5sum python3 readelf sfdisk truncate)
+need=(debootstrap losetup mksquashfs unsquashfs wget gunzip md5sum python3 readelf sfdisk truncate fatlabel)
 [[ "$MODE" == "image" ]] && need+=(sgdisk)
 [[ "$(uname -m)" == "aarch64" ]] || need+=(qemu-aarch64-static)
 for t in "${need[@]}"; do
   command -v "$t" >/dev/null || { echo "Missing tool: $t"
-    echo "apt install debootstrap qemu-user-static binfmt-support squashfs-tools wget gdisk"; exit 1; }
+    echo "apt install debootstrap qemu-user-static binfmt-support squashfs-tools wget gdisk dosfstools"; exit 1; }
 done
 
 mkdir -p "$WORK" "$OUT" "$WORK/mnt"
@@ -55,6 +57,9 @@ fi
 echo "==> Copying stock image to $IMG"
 cp --sparse=always "$RX_IMG" "$IMG"
 LOOP="$(losetup -Pf --show "$IMG")"
+# The FAT boot partition (partition 1) is labelled ROCKNIX in the stock image; RG OS calls it RGOS.
+echo "==> Renaming the boot partition label ROCKNIX -> RGOS"
+fatlabel "${LOOP}p1" RGOS
 mount "${LOOP}p1" "$WORK/mnt"
 echo "==> Stock boot partition:"; ls -la "$WORK/mnt"
 echo "==> Stock extlinux config (left untouched):"
@@ -143,8 +148,16 @@ mkdir -p "$ROOTFS/etc/rgos/autoconfig" && cp "$HERE"/config/autoconfig/*.cfg "$R
 # Cores that have no Debian package: Neo Geo Pocket (mednafen_ngp, from NGP_SRC) and PlayStation (pcsx_rearmed, git clone with submodules
 # from PSX_REPO). Prebuilt aarch64 *_libretro.so files in cores/ are copied as they are and those cores are then not built. Anything else is
 # compiled inside the rootfs (native aarch64 under qemu, several minutes) and the compiler is removed again. A failed core build only costs
-# that core (the build goes on and prints a "!!" line; PlayStation then falls back to Beetle PSX from Debian).
+# that core (the build goes on and prints a "!!" line; PlayStation then has no core unless Debian offers libretro-beetle-psx).
 LRDIR="$ROOTFS/usr/local/lib/libretro"; mkdir -p "$LRDIR"
+# Beetle PSX (mednafen_psx) as a PlayStation fallback: not available in every Debian suite/component, so a miss is only a warning
+cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
+if chroot "$ROOTFS" apt-get update >/dev/null 2>&1 \
+   && chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libretro-beetle-psx >/dev/null 2>&1; then
+  echo "==> Installed libretro-beetle-psx (PlayStation fallback core)"
+else
+  echo "   (libretro-beetle-psx is not available in $DEBIAN_SUITE; PlayStation uses pcsx_rearmed only)"
+fi
 if ls "$HERE"/cores/*_libretro.so >/dev/null 2>&1; then
   echo "==> Copying prebuilt cores from cores/"; cp "$HERE"/cores/*_libretro.so "$LRDIR/"
 fi
@@ -282,6 +295,7 @@ python3 "$HERE/initramfs/mkinitramfs.py" "$BB" "$HERE/initramfs/init" "$WORK/mnt
 EXT="$WORK/mnt/extlinux/extlinux.conf"; [[ -f "$EXT" ]] || EXT="$WORK/mnt/extlinux.conf"
 [[ -f "$EXT" ]] || { echo "!! no extlinux.conf on the boot partition"; exit 1; }
 rm -f "$WORK/mnt/white.cpio.gz"                 # leftover from very old builds
+sed -i 's/LABEL=ROCKNIX/LABEL=RGOS/g' "$EXT"       # the kernel command line names the boot partition by label
 cp "$EXT" "$(dirname "$EXT")/extlinux.conf.stock"   # recovery: copy this over extlinux.conf from a PC to boot ROCKNIX's own init again
 echo "==> Patched extlinux config:"
 python3 "$HERE/initramfs/patch-extlinux.py" "$EXT" "/$INITRD_NAME"
@@ -322,6 +336,7 @@ fi
 # The ROMS partition (4) is created by rgos/rgos-roms on the first boot, over all the free space, and formatted exFAT.
 echo "==> Partitions in the image (partition 3 must be 'uboot'; ROMS is created on first boot as partition 4):"
 sfdisk -l "$IMG" 2>/dev/null | grep -E '^(/|Device)' || true
+sgdisk -c 1:RGOS "$IMG" >/dev/null 2>&1 || true   # GPT name of partition 1 (cosmetic)
 sgdisk -i 3 "$IMG" 2>/dev/null | grep -q "^Partition name: 'uboot'" || { echo "!! partition 3 of the image is not 'uboot': the device would boot Android"; exit 1; }
 
 echo

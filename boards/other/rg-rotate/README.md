@@ -12,6 +12,7 @@ with RetroArch (aarch64) and the Gambatte (Game Boy / Game Boy Color), mGBA (Gam
   `rdinit=/rgos-init` in `extlinux.conf`, so the kernel runs `initramfs/init` and ROCKNIX's init never starts. It finds the FAT
   partition that holds `SYSTEM`, loop-mounts it, moves `/flash` into it and `switch_root`s to `rgos-init`. It prints nothing unless
   the card can't be read, never counts down, and keeps retrying instead of giving up. It no longer repartitions p2 either.
+- **Partition label:** `build.sh` relabels the FAT boot partition from `ROCKNIX` to `RGOS` (`fatlabel`), changes `boot=LABEL=ROCKNIX` to `LABEL=RGOS` in `extlinux.conf` (and so in the `.stock` recovery copy), and sets the GPT name of partition 1 to `RGOS`. Cards flashed earlier keep the old label; the initramfs finds the partition by its `SYSTEM` file, so both boot.
 - **Going back to ROCKNIX's init:** from a PC, copy `extlinux/extlinux.conf.stock` over `extlinux/extlinux.conf` on the FAT partition.
 - RG OS (`rgos/`: menu.py, rgos-session, rgos-input, ...) is installed to `/opt/rgos`. `rgos-init` (PID 1) loads display
   modules if needed and runs `rgos-session`; if the session ever exits it shows a white screen instead of panicking.
@@ -68,20 +69,20 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
   with `rgos-data/hw.json`: `{"audio": {"card": 0, "controls": ["Speaker"], "step": 5}}`.
 
 ## Windows drive letters
-- Partition order on the card is fixed: p1 ROCKNIX, p2 STORAGE (ext4, Windows ignores it), p3 uboot (2 MiB, Windows ignores it), p4 ROMS. Windows decides the letters, and
-  it remembers them per partition. ROCKNIX is identical in every flash, so it keeps its old letter; ROMS used to get a new random
+- Partition order on the card is fixed: p1 RGOS, p2 STORAGE (ext4, Windows ignores it), p3 uboot (2 MiB, Windows ignores it), p4 ROMS. Windows decides the letters, and
+  it remembers them per partition. RGOS is identical in every flash, so it keeps its old letter; ROMS used to get a new random
   GUID every time and so took the first free letter. ROMS now has a fixed partition GUID (`ROMS_GUID`
   in `rgos/rgos-roms`), which is what Windows keys the letter on, so a letter you set once in Disk Management (right-click the volume > Change Drive Letter) sticks across re-flashes.
 
 ## File manager drives
-- The Storage list shows, in order: **ROCKNIX** (the FAT boot partition, partition 1), the optional second SD card, and **ROMS** last
+- The Storage list shows, in order: **RGOS** (the FAT boot partition, partition 1), the optional second SD card, and **ROMS** last
   (partition 4, the exFAT partition created on first boot).
-- Boot files on ROCKNIX (`SYSTEM`, `KERNEL`, `extlinux`, `rgos-data`, ...; see `BOOT_PROTECTED` in `rgos/menu.py`) cannot be deleted,
+- Boot files on RGOS (`SYSTEM`, `KERNEL`, `extlinux`, `rgos-data`, ...; see `BOOT_PROTECTED` in `rgos/menu.py`) cannot be deleted,
   renamed or moved from the file manager. Everything else there (e.g. `rgos-logs.txt`) can.
 
 ## Emulation
 - RetroArch and the `gambatte` and `mgba` cores come from Debian packages (see `EMU_PKGS` in `build.sh`); `config/retroarch.cfg` and
-  `config/autoconfig/RG_OS_Gamepad.cfg` are installed to `/etc/rgos/`. Snes9x (Debian non-free: debootstrap runs with `--components=main,non-free`) and `libretro-beetle-wswan` are in `EMU_PKGS`. The Neo Geo Pocket core (`mednafen_ngp`) has no Debian package: `build.sh` compiles it inside the rootfs from `NGP_SRC` (default: libretro/beetle-ngp-libretro master; `NGP_SRC=none` skips it), or copies any prebuilt aarch64 `*_libretro.so` found in `cores/`. `pcsx_rearmed` is built the same way from `PSX_REPO` (needs `git` on the build PC; `PSX_REPO=none` skips it); Debian's `libretro-beetle-psx` is installed as the fallback. If a core build fails the image is still produced without it. Add more cores with `EXTRA_PKGS="libretro-nestopia ..."`.
+  `config/autoconfig/RG_OS_Gamepad.cfg` are installed to `/etc/rgos/`. Snes9x (Debian non-free: debootstrap runs with `--components=main,non-free`) and `libretro-beetle-wswan` are in `EMU_PKGS`. The Neo Geo Pocket core (`mednafen_ngp`) has no Debian package: `build.sh` compiles it inside the rootfs from `NGP_SRC` (default: libretro/beetle-ngp-libretro master; `NGP_SRC=none` skips it), or copies any prebuilt aarch64 `*_libretro.so` found in `cores/`. `pcsx_rearmed` is built the same way from `PSX_REPO` (needs `git` on the build PC; `PSX_REPO=none` skips it); Debian's `libretro-beetle-psx` is installed as a best-effort fallback (skipped with a notice if the suite doesn't have it). If a core build fails the image is still produced without it. Add more cores with `EXTRA_PKGS="libretro-nestopia ..."`.
 - Put ROMs in `roms/gba/` (`.gba`, mGBA; BIOS optional: `gba_bios.bin` in `bios/`), `roms/gb/` (`.gb`), `roms/gbc/` (`.gbc`), `roms/snes/` (`.sfc`, `.smc`), `roms/ws/` (WonderSwan) and `roms/wsc/` (WonderSwan Color), `roms/ngp/` (Neo Geo Pocket) and `roms/ngpc/` (Neo Geo Pocket Color) and `roms/psx/` (PlayStation: `.cue`+`.bin`, `.chd`, `.pbp`, `.m3u`; put a BIOS such as `scph1001.bin` in `bios/`) on the ROMS partition; saves and states go to `saves/<system>/`
   and `states/<system>/` next to them.
 - In a game: MENU+START returns to the launcher, MENU+SELECT opens the RetroArch menu.
