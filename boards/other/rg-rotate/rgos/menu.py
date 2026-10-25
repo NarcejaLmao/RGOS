@@ -347,6 +347,30 @@ def compatible_cores(sid, cores=None):
     return [core for core in SYSTEM_CORE_COMPATIBILITY.get(sid, ()) if core in installed]
 
 
+# Only systems that can actually run are kept: native ports always, RetroArch systems only when at least one compatible core is
+# installed. Systems without a core never show up in the menu and get no ROM folder. RGOS_ALL_SYSTEMS=1 keeps the full list (PC testing).
+if os.environ.get("RGOS_ALL_SYSTEMS") != "1":
+    _have_cores = installed_cores()
+    SYSTEMS = [sy for sy in SYSTEMS if sy[2] != "retroarch" or compatible_cores(sy[0], _have_cores)]
+
+
+def ensure_folders():
+    """Create every folder RG OS uses on the ROMS partition (safe to run on every boot; the first boot creates them all, and a
+    folder you delete comes back). Per-system folders are made for the supported systems only (see SYSTEMS above)."""
+    shared = ("bios", "config", "firmware", "music", "saves", "screenshots", "splash", "states", "update")
+    paths = [os.path.join(ROMS_ROOT, d) for d in shared] + [ROMS_DIR]
+    for sy in SYSTEMS:
+        sid = sy[0]
+        paths += [os.path.join(ROMS_DIR, sid)]
+        if sy[2] == "retroarch":                      # ports are native scripts: no saves/states of their own
+            paths += [os.path.join(ROMS_ROOT, "saves", sid), os.path.join(ROMS_ROOT, "states", sid)]
+    for d in paths:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as e:
+            log("could not create %s: %s" % (d, e))
+
+
 def fit(font, text, width):
     if font.size(text)[0] <= width:
         return text
@@ -1025,6 +1049,7 @@ def _play_next_launcher_track():
 
 def main():
     windowed = os.environ.get("RGOS_WINDOWED") == "1"
+    ensure_folders()
     # RGOS_VIDEO=fb: use SDL's dummy driver for the off-screen canvas and draw into /dev/fb0 through fbout.
     if not windowed and os.environ.get("RGOS_VIDEO") == "fb":
         os.environ["SDL_VIDEODRIVER"] = "dummy"
