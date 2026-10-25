@@ -198,7 +198,6 @@ jobs:
 
       - name: Build disk image (rg-rotate)
         if: inputs.board == 'rg-rotate' && inputs.artifact == 'img'
-        working-directory: boards/other/rg-rotate
         env:
           BUILD_PSX: ${{ inputs.build_psx }}
           ROCKNIX_URL_INPUT: ${{ inputs.rocknix_url }}
@@ -206,8 +205,8 @@ jobs:
           set -euo pipefail
           [[ "$BUILD_PSX" == "true" ]] || export PSX_REPO=none
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
-          sudo -E bash ./build.sh image
-          test -s out/rg-rotate-rgos.img
+          bash ./build.sh rg-rotate image
+          test -s boards/other/rg-rotate/out/rg-rotate-rgos.img
 
       - name: Verify disk image (rg-rotate)
         if: inputs.board == 'rg-rotate' && inputs.artifact == 'img'
@@ -246,7 +245,6 @@ jobs:
 
       - name: Build update tar (rg-rotate)
         if: inputs.board == 'rg-rotate' && inputs.artifact == 'update-tar'
-        working-directory: boards/other/rg-rotate
         env:
           UPDATE_ID: ${{ steps.metadata.outputs.build_id }}
           BUILD_PSX: ${{ inputs.build_psx }}
@@ -257,8 +255,8 @@ jobs:
           [[ "$BUILD_PSX" == "true" ]] || export PSX_REPO=none
           [[ "$INCLUDE_EXTLINUX" != "true" ]] || export UPDATE_EXTLINUX=1
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
-          sudo -E bash ./build.sh update
-          test -s "out/rgos-update-${UPDATE_ID}.tar"
+          bash ./build.sh rg-rotate update
+          test -s "boards/other/rg-rotate/out/rgos-update-${UPDATE_ID}.tar"
 
       - name: Verify update archive (rg-rotate)
         if: inputs.board == 'rg-rotate' && inputs.artifact == 'update-tar'
