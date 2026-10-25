@@ -65,6 +65,9 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
   input device that has them, including the input hub, so it works wherever the hardware puts them. In the launcher a volume bar pops up
   (from `/run/rgos/volume`); in a game RetroArch shows "Volume: N%". From SSH: `python3 /opt/rgos/rgos-volume up|down|mute|set 60`.
 - The launcher's own sounds (splash, music) now use the same ALSA card as the games (`AUDIODEV` is set by `rgos-session`).
+- `rgos-session` loads every kernel module under `sound/` (the T618 codec / audio DSP drivers have vendor names), waits up to 15 s for the card and
+  uses the card's first playback PCM (not always device 0). `rgos-audio.log` in `rgos-logs.txt` shows `/proc/asound/cards`, the playback PCMs, the sound modules and
+  the audio lines of dmesg: an empty card list there means the codec driver or its firmware did not load.
 - If there is no sound or the keys do nothing, `rgos-volume.log` in `rgos-logs.txt` lists the mixer controls found and which were used. Override
   with `rgos-data/hw.json`: `{"audio": {"card": 0, "controls": ["Speaker"], "step": 5}}`.
 

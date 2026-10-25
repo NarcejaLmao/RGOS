@@ -102,7 +102,7 @@ def alsa_device():
             hwctl.audio_enable(card)
         except Exception as e:
             log("audio_enable failed: %s" % e)
-        return "plughw:%d,0" % card
+        return "plughw:%d,%d" % (card, hwctl.audio_pcm(card))
     except Exception as e:
         log("hwctl unusable (%s); ALSA device 'default'" % e)
         return "default"

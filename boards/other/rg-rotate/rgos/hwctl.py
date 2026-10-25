@@ -340,6 +340,16 @@ def audio_card(cards_text=None):
     return int(cards[0][0]) if cards else 0
 
 
+def audio_pcm(card, proc="/proc/asound"):
+    """Lowest playback PCM device number of the card (Unisoc/vendor cards do not always have playback on device 0); 0 if unknown."""
+    devs = []
+    for d in glob.glob(os.path.join(proc, "card%d" % card, "pcm*p")):
+        m = re.search(r"pcm(\d+)p$", d)
+        if m:
+            devs.append(int(m.group(1)))
+    return min(devs) if devs else 0
+
+
 OUTPUT_RE = re.compile(r"speaker|spk|lineout|line out|headphone|headset|\bhp\b|master|playback|digital|pa\b|amp", re.I)
 
 

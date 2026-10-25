@@ -43,14 +43,22 @@ fi
 # GPU + sound for the emulators: Panfrost (Mali-G31) and the H700 audio codec. Built into some kernels (then nothing is found
 # and this does nothing), modules in others (then there is no udev to load them for us). Dependencies come in via modules.dep.
 if [ -d /lib/modules ]; then
-    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/(drivers/gpu/drm|sound)/' \
-               | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi|snd-soc|snd_soc|snd-pcm|snd_pcm|snd-timer|snd\.ko|soundcore' \
+    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/drivers/gpu/drm/' \
+               | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi' \
+               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
+    # sound: every driver under sound/ (the Unisoc T618 codec / audio DSP / ASoC modules have vendor names that no name filter can
+    # list); modprobe pulls the dependencies in from modules.dep and a driver that does not match this hardware just stays idle
+    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/sound/' \
                | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
 fi
-# speaker: wait (up to 5 s) for the sound card, then point the launcher's own sounds (SDL/pygame) at the same ALSA card the games use
-for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q '\[' /proc/asound/cards 2>/dev/null && break; sleep 0.5; done
-acard=$(python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import hwctl; print(hwctl.audio_card())' 2>/dev/null)
-[ -n "$acard" ] && { export AUDIODEV="plughw:$acard,0" SDL_AUDIODRIVER=alsa; echo "audio: card $acard (AUDIODEV=$AUDIODEV)" >> /var/log/rgos-state.log; }
+# speaker: wait (up to 15 s) for the sound card, then point the launcher's own sounds (SDL/pygame) at the same ALSA card the games use
+for _ in $(seq 1 30); do grep -q '\[' /proc/asound/cards 2>/dev/null && break; sleep 0.5; done   # up to 15 s: the audio DSP firmware loads late
+adev=$(python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import hwctl; c = hwctl.audio_card(); print("plughw:%d,%d" % (c, hwctl.audio_pcm(c)))' 2>/dev/null)
+[ -n "$adev" ] && { export AUDIODEV="$adev" SDL_AUDIODRIVER=alsa; echo "audio: AUDIODEV=$AUDIODEV" >> /var/log/rgos-state.log; }
+# what the sound stack looks like (copied into rgos-logs.txt): no card here means the codec driver did not load or its firmware is missing
+{ echo "--- /proc/asound/cards"; cat /proc/asound/cards 2>&1; echo "--- playback PCMs"; ls /proc/asound/card*/pcm*p 2>&1
+  echo "--- sound modules"; lsmod 2>/dev/null | grep -iE 'snd|sprd|agdsp|audio|sc27|vbc|codec'
+  echo "--- dmesg"; dmesg 2>/dev/null | grep -iE 'snd|asoc|alsa|audio|agdsp|vbc|codec|firmware' | tail -n 60; } > /var/log/rgos-audio.log 2>&1
 # offline update: <card>/update/*.tar (built by ./build.sh update) is installed on the boot partition, then reboot
 if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
 python3 /opt/rgos/rgos-update boot 2>>/var/log/rgos-update.log
@@ -107,7 +115,7 @@ python3 /opt/rgos/rgos-input >> /var/log/rgos-input.log 2>&1 &
     { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
       T=""; command -v timeout >/dev/null 2>&1 && T="timeout 4"
       $T python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
-      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
+      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-audio.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
       echo "--- settings dir"; id; grep -E ' (/|/var|/var/lib|/var/lib/rgos) ' /proc/mounts; ls -ld /var /var/lib /var/lib/rgos 2>&1
       ls -la /var/lib/rgos 2>&1; { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo "write test: ok"; } 2>&1 || echo "write test: FAILED"
       cat /var/log/rgos-state.log 2>&1
