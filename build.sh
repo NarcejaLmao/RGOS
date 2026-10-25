@@ -1,6 +1,32 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ./build.sh rg-rotate [image|update]  ->  the Anbernic RG Rotate build (boards/other/rg-rotate/build.sh).
+# It is a separate Debian-based build that needs root (loop devices, debootstrap), so it is re-run through sudo if needed.
+case "${1:-}" in
+  rg-rotate|rg_rotate|rgrotate)
+    shift
+    ROTATE_SH="$ROOT/boards/other/rg-rotate/build.sh"
+    [[ -f "$ROTATE_SH" ]] || { echo "ERROR: $ROTATE_SH not found" >&2; exit 1; }
+    case "${1:-image}" in
+      image|build) rotate_mode=image ;;      # "build" is accepted as an alias for "image"
+      update)      rotate_mode=update ;;
+      help|-h|--help)
+        echo "Usage: $0 rg-rotate [image|update]"
+        echo "  image   (default) full SD card image -> boards/other/rg-rotate/out/rg-rotate-rgos.img"
+        echo "  update  offline update tar           -> boards/other/rg-rotate/out/rgos-update-<id>.tar"
+        echo "Runs as root (uses sudo when needed). Env: ROCKNIX_URL, DEBIAN_SUITE, UPDATE_ID, UPDATE_EXTLINUX=1, PSX_REPO=none, ..."
+        exit 0 ;;
+      *) echo "Unknown rg-rotate mode '$1' (use image or update)" >&2; exit 2 ;;
+    esac
+    if [[ $EUID -ne 0 ]]; then
+      command -v sudo >/dev/null || { echo "ERROR: the RG Rotate build needs root; run it as root or install sudo" >&2; exit 1; }
+      exec sudo -E bash "$ROTATE_SH" "$rotate_mode"
+    fi
+    exec bash "$ROTATE_SH" "$rotate_mode"
+    ;;
+esac
 BR_DIR="${BUILDROOT_DIR:-$ROOT/buildroot}"
 ASSET_DIR="${ROCKNIX_ASSET_DIR:-$ROOT/assets/rocknix}"
 BOOT_DIR="${ROCKNIX_BOOT_DIR:-$ASSET_DIR/extracted/boot-partition}"
@@ -15,7 +41,8 @@ ROOT_MIB="${RGOS_ROOT_MIB:-1}"            # size of the ext4 partition (partitio
 
 usage() {
   cat <<USAGE
-Usage: $0 {prepare|fetch-assets|build|image|update|help}
+Usage: $0 {prepare|fetch-assets|build|image|update|rg-rotate [image|update]|help}
+  rg-rotate  Build the Anbernic RG Rotate image (or update tar) with boards/other/rg-rotate/build.sh; see "$0 rg-rotate help".
   prepare  Clone Buildroot if missing.
   fetch-assets  Download ROCKNIX H700 image; stage boot files, DTB and the Allwinner bootloader.
   build    Download + cross-build RetroArch and the mGBA core with the rootfs, and assemble a whole-disk .img.
