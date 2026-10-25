@@ -1,0 +1,75 @@
+#!/bin/sh
+# rgos-roms: first-boot creation of the ROMS partition (partition 4, exFAT) on the card RG OS booted from.
+#
+# The image ships with partitions 1 (ROCKNIX, FAT), 2 (STORAGE) and 3 ("uboot") only. PARTITION 3 MUST STAY: the SPL finds U-Boot
+# on the card by the GPT name "uboot"; without it the device ignores the card and boots Android from its internal storage. On the first boot this script
+#   1. backs up the GPT to /boot/rgos-gpt-backup.bin (restore from a PC with `sgdisk -l` if a card ever misbehaves),
+#   2. moves the backup GPT to the real end of the card and creates partition 4 from the first 1 MiB boundary after
+#      partition 2 to the LAST usable sector (all free space), label ROMS, fixed GUID, type 0700 -- in ONE sgdisk call,
+#      with exactly the attributes the build used to give it inside the image,
+#   3. makes the kernel see it (partx) and formats it exFAT (label ROMS; exfatprogs has no serial option, Windows keys the drive letter on the fixed partition GUID).
+# Safe to run on every boot: it does nothing once partition 4 is a ROMS partition that holds a filesystem. A power cut
+# in between is picked up on the next boot (partition there but empty -> format it). It never touches a partition 4 that
+# is not named ROMS, never formats one that already holds a filesystem, and never touches partitions 1, 2 and 3.
+# Anything that goes wrong is logged to /var/log/rgos-roms.log (copied to rgos-logs.txt) and RG OS falls back to /boot/roms.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LOG=/var/log/rgos-roms.log
+ROMS_GUID="5E0D5A1C-52F0-4C6B-9D3E-524F4D530003"
+say() { echo "$(date +%T 2>/dev/null) $*" >> "$LOG"; }
+
+src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)
+case "$src" in
+    /dev/mmcblk*p1) disk=${src%p1} ;;
+    *) say "boot partition is '$src', not /dev/mmcblk*p1: not touching any partition table"; exit 0 ;;
+esac
+part="${disk}p4"
+for c in sgdisk mkfs.exfat blkid; do
+    command -v "$c" >/dev/null 2>&1 || { say "$c is missing from the image: cannot create ROMS"; exit 0; }
+done
+
+roms_info() { sgdisk -i 4 "$disk" 2>/dev/null; }
+roms_exists() { roms_info | grep -q '^Partition GUID code'; }
+
+# partition 3 is the SPL's "uboot" partition: if it is not there the card cannot boot, so do not touch the table at all
+if ! sgdisk -i 3 "$disk" 2>/dev/null | grep -q "^Partition name: 'uboot'"; then
+    say "partition 3 is not the 'uboot' partition: refusing to edit the partition table"; exit 0
+fi
+
+# --- 1. partition 4 --------------------------------------------------------------------------------------------------
+if ! roms_exists; then
+    p2_last=$(sgdisk -i 2 "$disk" 2>/dev/null | awk '/^Last sector:/ {print $3; exit}')
+    case "$p2_last" in ''|*[!0-9]*) say "cannot read the end of partition 2 (got '$p2_last'): giving up"; exit 0 ;; esac
+    start=$(( (p2_last + 1 + 2047) / 2048 * 2048 ))
+    say "no partition 4 on $disk (partition 2 ends at sector $p2_last): creating ROMS from sector $start to the end of the card"
+    [ -f /boot/rgos-gpt-backup.bin ] || { sgdisk -b /boot/rgos-gpt-backup.bin "$disk" >> "$LOG" 2>&1; sync; }
+    # -e first: the stock image's backup GPT sits 2 GiB in; it has to move to the card's end or the free space is not free
+    sgdisk -e -n "4:${start}:0" -t 4:0700 -c 4:ROMS -u "4:${ROMS_GUID}" "$disk" >> "$LOG" 2>&1
+    sync
+    if ! roms_exists; then say "partition 4 was NOT created (see sgdisk output above)"; exit 0; fi
+    say "created: $(roms_info | grep -E '^(First|Last) sector|^Partition size' | tr '\n' ' ')"
+fi
+
+# only ever format a partition 3 we own
+if ! roms_info | grep -q "^Partition name: 'ROMS'"; then
+    say "partition 4 exists but is not named ROMS: leaving it alone"; exit 0
+fi
+
+# --- 2. let the kernel see it (partitions 1 and 2 are mounted, so a full re-read is refused; just add p3) ----------
+if [ ! -b "$part" ]; then
+    partx -a -n 4 "$disk" >> "$LOG" 2>&1 || partx -u "$disk" >> "$LOG" 2>&1
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do [ -b "$part" ] && break; sleep 0.25; done
+    [ -b "$part" ] || { say "$part did not appear; it will be picked up on the next boot"; exit 0; }
+fi
+
+# --- 3. exFAT --------------------------------------------------------------------------------------------------------
+fstype=$(blkid -p -o value -s TYPE "$part" 2>/dev/null)
+if [ -n "$fstype" ]; then
+    say "$part already holds '$fstype': nothing to do"; exit 0
+fi
+say "formatting $part as exFAT (label ROMS)"
+if mkfs.exfat -L ROMS "$part" >> "$LOG" 2>&1; then
+    sync; say "ROMS ready: $(blkid -p -o value -s TYPE "$part" 2>/dev/null)"
+else
+    say "mkfs.exfat FAILED on $part (it stays empty and is retried on the next boot)"
+fi
+exit 0

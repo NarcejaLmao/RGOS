@@ -1,0 +1,132 @@
+#!/bin/sh
+# RG OS session (launcher only): set up the system, start the input hub, run the menu. No emulators, no ports.
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+umask 000                                   # everything this session creates is readable/writable by all
+export USER=root LOGNAME=root
+export RGOS_VIDEO=fb RGOS_FB_DBUF=0 RGOS_FB_VSYNC=0 SDL_VIDEODRIVER=dummy
+export XDG_RUNTIME_DIR=/run/rgos HOME=/root PYTHONDONTWRITEBYTECODE=1
+mountpoint -q /proc || mount -t proc proc /proc
+mountpoint -q /sys  || mount -t sysfs sysfs /sys
+mountpoint -q /dev  || mount -t devtmpfs devtmpfs /dev
+mountpoint -q /run  || mount -t tmpfs tmpfs /run
+mountpoint -q /tmp  || mount -t tmpfs tmpfs /tmp
+mkdir -p /run/rgos /var/lib/rgos /var/log /media/roms /dev/pts /boot
+[ "$(id -u)" = 0 ] || echo "WARNING: rgos-session is not running as root (uid $(id -u))" >> /var/log/rgos-state.log
+# RG OS runs entirely as root. Make sure ownership and permissions never get in the way: our files are root-owned, settings
+# and config are writable, and the input / display / sound device nodes are open to everyone.
+fixperms() {
+    chown -R 0:0 /opt/rgos /etc/rgos /var/lib/rgos 2>/dev/null
+    chmod -R a+rwX /etc/rgos /var/lib/rgos 2>/dev/null
+    chmod 755 /usr/bin/systemctl /opt/rgos/rgos-session /opt/rgos/rgos-input /opt/rgos/rgos-volume /opt/rgos/rgos-update /opt/rgos/rgos-launch /opt/rgos/menu.py 2>/dev/null
+    chmod a+rw /dev/input/* /dev/uinput /dev/fb* /dev/snd/* /dev/dri/* /dev/tty1 2>/dev/null
+}
+# settings dir (/var/lib/rgos: button map, state) MUST be writable. If it is not (read-only or odd /var/lib
+# in the image), put a RAM-backed tmpfs there so the button-mapping wizard can still save. Result is logged to rgos-logs.txt.
+if ! { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w; } 2>/dev/null; then
+    mount -t tmpfs -o mode=755 tmpfs /var/lib/rgos 2>/dev/null \
+      || { mount -t tmpfs -o mode=755 tmpfs /var/lib 2>/dev/null && mkdir -p /var/lib/rgos; }
+    echo "settings dir was not writable; tmpfs fallback: $({ touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo ok; } 2>&1 || echo FAILED)" >> /var/log/rgos-state.log 2>&1
+fi
+mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+# the 16 s sunxi hardware watchdog must stay off ('V' = magic close)
+for w in /dev/watchdog /dev/watchdog0; do [ -c "$w" ] && { exec 8>"$w"; echo V >&8; exec 8>&-; break; }; done 2>/dev/null
+# backlight to maximum
+for b in /sys/class/backlight/*; do [ -w "$b/brightness" ] && cat "$b/max_brightness" > "$b/brightness" 2>/dev/null; done
+# the menu looks for the Debian font path
+mkdir -p /usr/share/fonts/truetype/dejavu
+[ -e /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ] || ln -sf /usr/share/fonts/dejavu/DejaVuSans.ttf /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+# input drivers (ROCKNIX ships them as modules): gpio-keys / PWM / joypad (the button driver) / uinput / evdev
+if [ -d /lib/modules ]; then
+    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -iE 'joypad|pwm|gpio-keys|evdev|uinput' \
+               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
+fi
+# GPU + sound for the emulators: Panfrost (Mali-G31) and the H700 audio codec. Built into some kernels (then nothing is found
+# and this does nothing), modules in others (then there is no udev to load them for us). Dependencies come in via modules.dep.
+if [ -d /lib/modules ]; then
+    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/(drivers/gpu/drm|sound)/' \
+               | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi|snd-soc|snd_soc|snd-pcm|snd_pcm|snd-timer|snd\.ko|soundcore' \
+               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
+fi
+# speaker: wait (up to 5 s) for the sound card, then point the launcher's own sounds (SDL/pygame) at the same ALSA card the games use
+for _ in 1 2 3 4 5 6 7 8 9 10; do grep -q '\[' /proc/asound/cards 2>/dev/null && break; sleep 0.5; done
+acard=$(python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import hwctl; print(hwctl.audio_card())' 2>/dev/null)
+[ -n "$acard" ] && { export AUDIODEV="plughw:$acard,0" SDL_AUDIODRIVER=alsa; echo "audio: card $acard (AUDIODEV=$AUDIODEV)" >> /var/log/rgos-state.log; }
+# offline update: <card>/update/*.tar (built by ./build.sh update) is installed on the boot partition, then reboot
+if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
+python3 /opt/rgos/rgos-update boot 2>>/var/log/rgos-update.log
+[ $? -eq 10 ] && { sync; reboot -f; sleep 60; }
+fixperms
+# first boot: create partition 4 (exFAT, all the free space on the card) and format it; a no-op once it exists (rgos/rgos-roms)
+sh /opt/rgos/rgos-roms 2>>/var/log/rgos-roms.log
+# ROMS = partition 4 (ext4; FAT32/exFAT cards from the earlier builds still mount) of the card we booted from, on /media/roms.
+if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
+roms=""; case "$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)" in /dev/mmcblk*p1) src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts); roms="${src%p1}p4" ;; esac
+if [ -n "$roms" ] && [ -b "$roms" ] && ! mountpoint -q /media/roms; then
+    { grep -qw exfat /proc/filesystems || modprobe exfat 2>/dev/null; mount -t exfat -o noatime,umask=000 "$roms" /media/roms 2>/dev/null; } \
+      || mount -t vfat -o noatime,umask=000 "$roms" /media/roms 2>/dev/null \
+      || mount -t ext4 -o noatime "$roms" /media/roms 2>/dev/null \
+      || echo "could not mount $roms on /media/roms (exfat/vfat/ext4 all failed)" >> /var/log/rgos-state.log
+    mountpoint -q /media/roms && mkdir -p /media/roms/update /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/gba 2>/dev/null
+fi
+# settings and other data (button map, Wi-Fi, SSH keys, Bluetooth pairings, menu state) live on the ROMS partition in rgos-data/, next to
+# the ROMs, saves and states. First time: copy the old /boot/rgos-data across (via a temp dir, so a half copy is never used).
+# Only for a real ROMS partition; without one /var/lib/rgos stays on the FAT boot partition (bound by rgos-init).
+case "$(awk '$2=="/media/roms"{print $1; exit}' /proc/mounts)" in
+  /dev/mmcblk*)
+    RD=/media/roms/rgos-data
+    if [ ! -d "$RD" ]; then
+        rm -rf "$RD.tmp"; mkdir -p "$RD.tmp" 2>/dev/null
+        { [ ! -d /boot/rgos-data ] || cp -R /boot/rgos-data/. "$RD.tmp/" 2>/dev/null; } && mv "$RD.tmp" "$RD" 2>/dev/null
+    fi
+    if [ -d "$RD" ] && touch "$RD/.w" 2>/dev/null && rm -f "$RD/.w" && mount --bind "$RD" /var/lib/rgos 2>/dev/null; then
+        echo "settings: /var/lib/rgos is on the ROMS partition ($RD)" >> /var/log/rgos-state.log
+    else
+        echo "settings: could not use $RD, staying on the boot partition" >> /var/log/rgos-state.log
+    fi ;;
+esac
+# no usable ROMS partition (the default now): use /boot/roms on the FAT partition so ROMs, saves and states still work
+if ! mountpoint -q /media/roms && mountpoint -q /boot && mkdir -p /boot/roms 2>/dev/null; then
+    mount --bind /boot/roms /media/roms 2>/dev/null \
+      && mkdir -p /media/roms/update /media/roms/roms/gb /media/roms/roms/gbc /media/roms/roms/gba 2>/dev/null \
+      && echo "ROMS: using /boot/roms on the FAT partition (no ext4 ROMS partition)" >> /var/log/rgos-state.log
+fi
+# network services: Wi-Fi, then Bluetooth and SSH/SFTP (each logs to /var/log and is copied to rgos-logs.txt below)
+mountpoint -q /dev/pts || mount -t devpts devpts /dev/pts 2>/dev/null          # ssh login shells need a pty
+[ -e /var/run ] || ln -s /run /var/run 2>/dev/null                              # /var is a tmpfs: dbus/bluez expect /var/run -> /run
+python3 /opt/rgos/wifictl.py daemon >> /var/log/rgos-wifi.log 2>&1 &
+python3 /opt/rgos/btctl.py start >> /var/log/rgos-bt.log 2>&1 &
+python3 /opt/rgos/sshctl.py boot >> /var/log/rgos-ssh.log 2>&1 &
+# volume buttons + speaker: un-mutes the output, restores the saved volume, VOL+/VOL-/mute keys, writes /run/rgos/volume for the popup
+python3 /opt/rgos/rgos-volume >> /var/log/rgos-volume.log 2>&1 &
+# input hub: gpio-keys buttons -> one virtual button pad
+python3 /opt/rgos/rgos-input >> /var/log/rgos-input.log 2>&1 &
+# diagnostics for the PC: copy the logs to the FAT boot partition (rgos-logs.txt) at 8, 28 and 58 s
+( prev=0; for t in 8 28 58; do sleep $((t-prev)); prev=$t
+    if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
+    mountpoint -q /boot || continue
+    { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
+      T=""; command -v timeout >/dev/null 2>&1 && T="timeout 4"
+      $T python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
+      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
+      echo "--- settings dir"; id; grep -E ' (/|/var|/var/lib|/var/lib/rgos) ' /proc/mounts; ls -ld /var /var/lib /var/lib/rgos 2>&1
+      ls -la /var/lib/rgos 2>&1; { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo "write test: ok"; } 2>&1 || echo "write test: FAILED"
+      cat /var/log/rgos-state.log 2>&1
+      echo "--- /dev/input"; ls -l /dev/input 2>&1; cat /proc/bus/input/devices 2>&1
+      echo "--- /dev/dri"; ls -l /dev/dri 2>&1; cat /sys/kernel/debug/dri/*/name 2>&1; echo "--- /dev/fb0"; ls -l /dev/fb0 2>&1; cat /sys/class/graphics/fb0/virtual_size 2>&1
+      echo "--- modules"; lsmod 2>&1; echo "--- dmesg"; dmesg 2>&1 | tail -n 150
+    } > /boot/rgos-logs.txt 2>&1; sync
+  done ) >/dev/null 2>&1 &
+( for t in 2 5 10 20; do sleep $t; fixperms; done ) >/dev/null 2>&1 &   # uinput / input nodes appear after the hub starts
+MENULOG=/var/log/rgos-menu.log
+while true; do
+    rm -f /run/rgos/launch
+    python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import menu; menu.run()' 2>>"$MENULOG"
+    rc=$?
+    case $rc in
+      10) # a game/tool was chosen: rgos-launch picks the libretro core and runs RetroArch, then we come back to the menu
+          python3 /opt/rgos/rgos-launch "$(cat /run/rgos/launch 2>/dev/null)" 2>>/var/log/rgos-launch.log ;;
+      20) sync; poweroff -f; sleep 30 ;;
+      *)  { echo; echo "RG OS menu exited (code $rc). Last log lines:"; tail -n 12 "$MENULOG"; } > /dev/tty1 2>/dev/null
+          sleep 5 ;;
+    esac
+done

@@ -1,0 +1,26 @@
+#!/bin/sh
+# busybox udhcpc script for the Wi-Fi daemon (wifictl.py): applies the lease with iproute2.
+[ -n "$interface" ] || exit 0
+case "$1" in
+  deconfig)
+    ip -4 addr flush dev "$interface" 2>/dev/null
+    ip link set "$interface" up 2>/dev/null
+    ;;
+  bound|renew)
+    bits="$mask"
+    if [ -z "$bits" ] && [ -n "$subnet" ]; then            # dotted netmask -> prefix length
+      bits=0; for o in $(echo "$subnet" | tr . ' '); do
+        while [ "$o" -gt 0 ]; do bits=$((bits + (o & 1))); o=$((o >> 1)); done
+      done
+    fi
+    ip -4 addr flush dev "$interface" 2>/dev/null
+    ip addr add "$ip/${bits:-24}" ${broadcast:+broadcast "$broadcast"} dev "$interface"
+    ip route flush dev "$interface" 2>/dev/null
+    for r in $router; do ip route add default via "$r" dev "$interface" metric 10 2>/dev/null; done
+    mkdir -p /run/rgos
+    : > /run/rgos/resolv.conf
+    for d in $dns; do echo "nameserver $d" >> /run/rgos/resolv.conf; done
+    [ -n "$domain" ] && echo "search $domain" >> /run/rgos/resolv.conf
+    ;;
+esac
+exit 0

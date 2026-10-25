@@ -1,0 +1,244 @@
+#!/usr/bin/env python3
+"""rgos-volume: volume buttons + speaker setup for RG OS.
+
+* At start it picks the speaker's ALSA card, switches on the output (un-mutes the speaker / amp / headphone switches) and
+  restores the last volume (/var/lib/rgos/volume.json, default 70 %), so the launcher's sounds and the games are audible.
+* VOL+ / VOL- (KEY_VOLUMEUP 115 / KEY_VOLUMEDOWN 114, with key repeat) change the volume in 5 % steps; KEY_MUTE (113) toggles mute.
+  The keys are read from EVERY input device that has them, including the RG OS input hub (which forwards them from the
+  gpio-keys device it grabs), so it does not matter which device the hardware puts them on.
+* The level is written to /run/rgos/volume as "<percent> <stamp>" (the launcher shows its volume popup from that file) and
+  shown inside a running RetroArch as an on-screen message.
+
+Overrides (/var/lib/rgos/hw.json, optional):  {"audio": {"card": 0, "controls": ["Speaker", "Headphone"], "step": 5}}
+  card      ALSA card number (default: the first card that is not HDMI)
+  controls  mixer controls to set to the volume (default: every playback-volume control that looks like an output)
+Log: /var/log/rgos-volume.log (copied to rgos-logs.txt), including the mixer controls found, so a card with odd control names can be configured.
+
+usage: rgos-volume            run the daemon
+       rgos-volume up|down|mute|set N   change the volume once (for scripts / SSH) and exit
+"""
+import fcntl, glob, json, os, re, select, struct, subprocess, sys, time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
+VOLUME_FILE = os.environ.get("RGOS_VOLUME_FILE", os.path.join(RUN_DIR, "volume"))
+STATE_FILE = os.environ.get("RGOS_VOLUME_STATE", "/var/lib/rgos/volume.json")
+USER_CONF = "/var/lib/rgos/hw.json"
+DEFAULT_PCT = 70
+EVFMT = struct.Struct("llHHi")
+EV_KEY = 1
+KEY_MUTE, KEY_VOLUMEDOWN, KEY_VOLUMEUP = 113, 114, 115
+EVIOCGBIT_KEY = 0x80604521                       # _IOC(_IOC_READ, 'E', 0x20 + EV_KEY, 96)
+PREFER = ("master", "speaker", "spk", "headphone", "playback", "pcm", "digital", "dac", "lineout", "line out")
+SKIP = re.compile(r"capture|mic|adc|input|\bin\b|sidetone|boost|agc|alc", re.I)
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def run(args, timeout=5):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def read_json(path):
+    try:
+        with open(path) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+class Mixer:
+    def __init__(self):
+        import hwctl
+        self.hwctl = hwctl
+        conf = read_json(USER_CONF).get("audio", {})
+        if not isinstance(conf, dict):
+            conf = {}
+        self.step = max(1, min(25, int(conf.get("step", 5) or 5)))
+        self.card = None
+        self.controls = []
+        self.switches = []
+        self.want_card, self.want_controls = conf.get("card"), conf.get("controls")
+        self.setup()
+
+    def setup(self):
+        """(Re)discover the card and controls. The sound card can appear a few seconds after boot: callers retry."""
+        hw = self.hwctl
+        self.card = int(self.want_card) if str(self.want_card or "").isdigit() else hw.audio_card()
+        names = re.findall(r"Simple mixer control '([^']+)',0", run(["amixer", "-c", str(self.card), "scontrols"]))
+        vol = [n for n in names if "pvolume" in run(["amixer", "-c", str(self.card), "sget", n]).lower()]
+        if isinstance(self.want_controls, list) and self.want_controls:
+            self.controls = [n for n in self.want_controls if n in names]
+        else:
+            outs = [n for n in vol if not SKIP.search(n) and hw.OUTPUT_RE.search(n)]
+            self.controls = outs or [n for n in vol if not SKIP.search(n)][:1]
+        self.controls.sort(key=lambda n: next((i for i, p in enumerate(PREFER) if p in n.lower()), len(PREFER)))
+        try:
+            self.switches = hw.audio_enable(self.card)           # un-mute speaker / amp / headphone switches
+        except Exception as e:
+            self.switches = []
+            log("audio_enable failed: %r" % e)
+        msg = ("card %s; mixer controls: %s; volume controls used: %s; switches on: %s"
+               % (self.card, names or "NONE", self.controls or "NONE", self.switches or "none"))
+        if msg != getattr(self, "_last", None):
+            self._last = msg
+            log(msg)
+
+    def set_percent(self, pct):
+        for n in self.controls:
+            run(["amixer", "-c", str(self.card), "-q", "sset", n, "%d%%" % pct])
+
+    def set_mute(self, mute):
+        # only touch the output switches; "unmute" on them is also what audio_enable does at boot
+        for n in self.switches:
+            run(["amixer", "-c", str(self.card), "-q", "sset", n, "mute" if mute else "unmute"])
+
+
+class State:
+    def __init__(self):
+        d = read_json(STATE_FILE)
+        p = d.get("pct")
+        self.pct = int(p) if isinstance(p, int) and 0 <= p <= 100 else DEFAULT_PCT
+        self.mute = bool(d.get("mute", False))
+
+    def save(self):
+        try:
+            os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+            tmp = STATE_FILE + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump({"pct": self.pct, "mute": self.mute}, f)
+            os.replace(tmp, STATE_FILE)
+        except OSError as e:
+            log("cannot save %s: %r" % (STATE_FILE, e))
+
+
+def publish(pct, mute):
+    """/run/rgos/volume = '<percent> <stamp>' (the launcher polls it; a new stamp pops the volume bar up)."""
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        tmp = VOLUME_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write("%d %d\n" % (0 if mute else pct, time.time() * 1000))
+        os.replace(tmp, VOLUME_FILE)
+    except OSError as e:
+        log("cannot write %s: %r" % (VOLUME_FILE, e))
+
+
+def apply(mixer, st, announce=True):
+    mixer.set_percent(st.pct)
+    mixer.set_mute(st.mute)
+    st.save()
+    publish(st.pct, st.mute)
+    if announce:
+        try:
+            mixer.hwctl.retroarch_msg("Volume: muted" if st.mute else "Volume: %d%%" % st.pct)
+        except Exception:
+            pass
+    log("volume %d%%%s" % (st.pct, " (muted)" if st.mute else ""))
+
+
+def change(mixer, st, key):
+    if key == KEY_MUTE:
+        st.mute = not st.mute
+    elif key == KEY_VOLUMEUP:
+        st.mute = False
+        st.pct = min(100, st.pct + mixer.step)
+    elif key == KEY_VOLUMEDOWN:
+        st.pct = max(0, st.pct - mixer.step)
+    apply(mixer, st)
+
+
+# ---------------------------------------------------------------- input devices that carry the volume keys
+def has_volume_keys(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+    except OSError:
+        return False
+    try:
+        buf = bytearray(96)
+        fcntl.ioctl(fd, EVIOCGBIT_KEY, buf)
+        return any(buf[k // 8] & (1 << (k % 8)) for k in (KEY_VOLUMEUP, KEY_VOLUMEDOWN))
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def scan(have):
+    out = {}
+    for p in sorted(glob.glob("/dev/input/event*")):
+        if p not in have and has_volume_keys(p):
+            try:
+                out[p] = os.open(p, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                try:
+                    name = open("/sys/class/input/%s/device/name" % os.path.basename(p)).read().strip()
+                except OSError:
+                    name = "?"
+                log("volume keys from %s (%s)" % (p, name))
+            except OSError as e:
+                log("cannot open %s: %r" % (p, e))
+    return out
+
+
+def daemon():
+    mixer = Mixer()
+    st = State()
+    # the codec can show up late: retry the discovery for a while if nothing usable was found
+    for _ in range(20):
+        if mixer.controls or mixer.switches:
+            break
+        time.sleep(0.5)
+        mixer.setup()
+    apply(mixer, st, announce=False)
+    fds, last_scan = {}, 0.0
+    while True:
+        if time.time() - last_scan > 3.0:
+            last_scan = time.time()
+            fds.update(scan(set(fds)))
+        if not fds:
+            time.sleep(1.0)
+            continue
+        try:
+            ready, _, _ = select.select(list(fds.values()), [], [], 1.0)
+        except (OSError, ValueError):
+            ready = []
+        for fd in ready:
+            try:
+                data = os.read(fd, EVFMT.size * 32)
+            except BlockingIOError:
+                continue
+            except OSError:                                   # device went away (unplugged / re-created)
+                for p, f in list(fds.items()):
+                    if f == fd:
+                        os.close(fd)
+                        del fds[p]
+                continue
+            for off in range(0, len(data) - EVFMT.size + 1, EVFMT.size):
+                _s, _u, typ, code, val = EVFMT.unpack_from(data, off)
+                if typ == EV_KEY and val in (1, 2) and code in (KEY_VOLUMEUP, KEY_VOLUMEDOWN, KEY_MUTE):
+                    if code == KEY_MUTE and val == 2:         # no auto-repeat for mute
+                        continue
+                    change(mixer, st, code)
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] in ("up", "down", "mute", "set"):
+        mixer, st = Mixer(), State()
+        if argv[1] == "set" and len(argv) > 2 and argv[2].isdigit():
+            st.pct, st.mute = max(0, min(100, int(argv[2]))), False
+            apply(mixer, st)
+        else:
+            change(mixer, st, {"up": KEY_VOLUMEUP, "down": KEY_VOLUMEDOWN, "mute": KEY_MUTE}.get(argv[1], 0))
+        return 0
+    daemon()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

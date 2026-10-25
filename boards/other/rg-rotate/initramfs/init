@@ -1,0 +1,67 @@
+#!/bin/busybox sh
+# RG OS initramfs /init. Replaces ROCKNIX's own init (the one that shows "NEVER TOUCH boot=..." and waits 60 s).
+# The kernel starts this through rdinit=/rgos-init (set in extlinux.conf by build.sh), so ROCKNIX's built-in /init never runs.
+#
+# Job: find the FAT boot partition that holds SYSTEM, loop-mount SYSTEM (the Debian squashfs) on /sysroot, move the
+# /flash mount into it and switch_root to /usr/sbin/rgos-init. Nothing is printed unless something goes wrong, there is
+# no countdown, and a missing partition is retried instead of giving up.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+/bin/busybox --install -s /bin 2>/dev/null
+
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+[ -c /dev/console ] && exec </dev/console >/dev/console 2>&1
+
+klog() { echo "rgos-initramfs: $*" > /dev/kmsg 2>/dev/null; }
+say()  { klog "$*"; echo "RG OS: $*"; }
+
+# boot= from the kernel command line (ROCKNIX passes boot=LABEL=ROCKNIX or a UUID/device); only a hint, we fall back to a scan
+WANT=""
+for a in $(cat /proc/cmdline); do case "$a" in boot=*) WANT=${a#boot=} ;; esac; done
+
+# mount $1 on /flash and succeed only if it is a FAT partition that carries SYSTEM
+try_dev() {
+  [ -b "$1" ] || return 1
+  mount -t vfat -o rw,noatime "$1" /flash 2>/dev/null || mount -t vfat -o ro "$1" /flash 2>/dev/null || return 1
+  [ -f /flash/SYSTEM ] && return 0
+  umount /flash 2>/dev/null
+  return 1
+}
+
+find_boot() {
+  if [ -n "$WANT" ]; then
+    case "$WANT" in /dev/*) hint=$WANT ;; *) hint=$(findfs "$WANT" 2>/dev/null) ;; esac
+    [ -n "$hint" ] && try_dev "$hint" && return 0
+  fi
+  for d in /dev/mmcblk*p1 /dev/sd[a-z]1 /dev/nvme*n*p1; do try_dev "$d" && return 0; done
+  return 1
+}
+
+# the SD card can appear a moment after the kernel starts us; poll quickly, say something only if it takes long
+n=0
+until find_boot; do
+  n=$((n + 1))
+  [ "$n" -eq 40 ] && say "waiting for the boot partition (the one with SYSTEM)..."
+  sleep 0.25 2>/dev/null || sleep 1
+done
+klog "boot partition found after $n tries (boot=$WANT)"
+
+n=0
+until mount -t squashfs -o ro,loop /flash/SYSTEM /sysroot 2>/dev/null; do
+  n=$((n + 1))
+  [ "$n" -eq 5 ] && say "cannot mount /flash/SYSTEM (card error? re-flash the image)"
+  sleep 1
+done
+
+for d in flash proc sys dev; do mkdir -p "/sysroot/$d" 2>/dev/null; done
+mount -o move /flash /sysroot/flash
+mount -o move /proc  /sysroot/proc
+mount -o move /sys   /sysroot/sys
+mount -o move /dev   /sysroot/dev
+
+for i in /usr/sbin/rgos-init /sbin/init; do
+  [ -x "/sysroot$i" ] && exec switch_root /sysroot "$i"
+done
+say "no init found in SYSTEM"
+while :; do sleep 3600; done

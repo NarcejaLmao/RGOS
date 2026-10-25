@@ -1,0 +1,652 @@
+#!/usr/bin/env python3
+"""rgos-input: RG OS input hub = the device's physical buttons -> ONE virtual button pad.
+
+Reads the raw button devices (gpio-keys etc.), translates every key to a canonical code (the codes retroarch.cfg and
+gamecontrollerdb.txt are written for) and re-publishes them as one uinput device, "RG OS Gamepad". Buttons and the D-pad
+only: there is no analog stick, axis, ADC or joystick-axis handling anywhere in RG OS.
+
+  * "sources": which input devices to merge: ["gpio-keys-joypad"] (default when the ROCKNIX joypad node exists in the
+    device tree = RG34XX-SP) or "auto" (every event device that has pad buttons, D-pad keys or a hat; power/volume/lid/
+    touch devices are skipped). A list of name substrings picks devices by hand.
+  * known BTN_* codes pass through, ABS_HAT0X/Y become the D-pad, anything else comes from the table the menu's
+    Settings > Map buttons wizard saved in /var/lib/rgos/button-map.json (or "keymap" {"<code>": "<canonical code>"} in input.json).
+  /etc/rgos/input-<device>.json (device = /etc/rgos-device) is merged over input.json.
+
+usage: rgos-input                run the hub
+       rgos-input reset-buttons  forget the button mapping saved by the menu's Map buttons wizard
+
+Config: optional top-level "enabled": false in /etc/rgos/input.json leaves the raw input devices alone.
+"""
+import errno, fcntl, glob, json, os, select, signal, struct, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+DT = "/proc/device-tree/rocknix-singleadc-joypad"    # only used to recognise the RG34XX-SP (which raw button device to read)
+CONF = "/etc/rgos/input.json"
+FLAG = "/run/rgos/inputhub"
+STATUS = "/run/rgos/inputhub.status"
+RAW_NAME, HUB_NAME = "gpio-keys-joypad", "RG OS Gamepad"
+
+EV_SYN, EV_KEY, EV_ABS = 0, 1, 3
+EVFMT = struct.Struct("llHHi")                # struct input_event, 64-bit
+AMAX = 32767                                  # fallback range of a hat axis whose limits cannot be read
+RULES = "/run/udev/rules.d/91-rgos-hub.rules"  # generated: hides every grabbed source from SDL/RetroArch (only the hub's pad should show up)
+BTNMAP = "/var/lib/rgos/button-map.json"       # written by the menu's Settings > Map buttons wizard
+SWAPAB = "/var/lib/rgos/swap-ab"               # flag file (menu: Settings > Swap A / B buttons): the hub exchanges A and B
+KEYS_PROBE, KEYS_RAW = "/run/rgos/keys.probe", "/run/rgos/keys.raw"
+# the codes the pad publishes
+CANON_KEYS = [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
+              0x220, 0x221, 0x222, 0x223]
+# Some drivers expose the older BTN_TRIGGER/BTN_THUMB
+# codes instead of BTN_SOUTH/EAST/NORTH/WEST. Normalize those common layouts to
+# the same RG OS face/shoulder-button codes, so the TSP works without a wizard.
+AUTO_KEY_ALIASES = {
+    0x120: 0x130,  # BTN_TRIGGER -> bottom face / B
+    0x121: 0x131,  # BTN_THUMB -> right face / A
+    0x122: 0x133,  # BTN_THUMB2 -> left face / X
+    0x123: 0x134,  # BTN_TOP -> top face / Y
+    0x124: 0x136,  # BTN_TOP2 -> L
+    0x125: 0x137,  # BTN_PINKIE -> R
+    0x126: 0x138,  # BTN_BASE  -> L2   (BASE..BASE6 = L2 R2 SELECT START MODE L3)
+    0x127: 0x139,  # BTN_BASE2 -> R2
+    0x128: 0x13a,  # BTN_BASE3 -> SELECT
+    0x129: 0x13b,  # BTN_BASE4 -> START
+    0x12a: 0x13c,  # BTN_BASE5 -> MENU
+    0x12b: 0x13d,  # BTN_BASE6 -> L3
+    103: 0x220,    # KEY_UP -> D-pad up
+    108: 0x221,    # KEY_DOWN -> D-pad down
+    105: 0x222,    # KEY_LEFT -> D-pad left
+    106: 0x223,    # KEY_RIGHT -> D-pad right
+    # Keyboard-style handheld layout (what MinUI/OnionOS-type input daemons emit): only used when the code is not
+    # already claimed by a gamepad-style code on the same device.
+    57: 0x131,     # KEY_SPACE -> A
+    29: 0x130,     # KEY_LEFTCTRL -> B
+    42: 0x133,     # KEY_LEFTSHIFT -> X
+    56: 0x134,     # KEY_LEFTALT -> Y
+    18: 0x136,     # KEY_E -> L
+    20: 0x137,     # KEY_T -> R
+    15: 0x138,     # KEY_TAB -> L2
+    14: 0x139,     # KEY_BACKSPACE -> R2
+    97: 0x13a,     # KEY_RIGHTCTRL -> SELECT
+    28: 0x13b,     # KEY_ENTER -> START
+    1: 0x13c,      # KEY_ESC -> MENU
+    102: 0x13c,    # KEY_HOME -> MENU
+    139: 0x13c,    # KEY_MENU -> MENU
+}
+# Fill order for a pad whose button codes are all unknown (no canonical code, no alias): its buttons, sorted by code, are
+# assigned to these canonical codes in turn (the usual "first button = bottom face button" convention).
+ORDERED_FILL = [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e]
+MAP_REPORT = "/run/rgos/input-map.txt"
+EXTRA_KEYS = [114, 115]                       # KEY_VOLUMEDOWN/UP: forwarded untouched so rgos-volume still sees them when a source carries them
+HAT_KEYS = {(0x10, -1): 0x222, (0x10, 1): 0x223, (0x11, -1): 0x220, (0x11, 1): 0x221}   # ABS_HAT0X/Y -> left/right/up/down
+KBD_PAD_KEYS = {57, 29, 42, 56, 18, 20, 97, 28, 1, 102, 139, 15, 14}   # SPACE LCTRL LSHIFT LALT E T RCTRL ENTER ESC HOME MENU TAB BACKSPACE
+GAMEPAD_KEY_RANGE = range(0x100, 0x140)  # BTN_MISC..BTN_DIGI: the pad button codes
+NOT_PADS = ("power", "axp", "lid", "volume", "headphone", "jack", "touch", "hall", "rgos")
+
+
+# ---------------------------------------------------------------- ioctl helpers
+def _ioc(d, t, nr, size):
+    return (d << 30) | (size << 16) | (ord(t) << 8) | nr
+_IOW = lambda t, nr, size: _ioc(1, t, nr, size)
+_IOR = lambda t, nr, size: _ioc(2, t, nr, size)
+_IOWR = lambda t, nr, size: _ioc(3, t, nr, size)
+
+EVIOCGRAB = _IOW("E", 0x90, 4)
+EVIOCGNAME = _IOR("E", 0x06, 128)
+EVIOCGBIT_ABS = _IOR("E", 0x20 + 3, 8)       # which ABS codes a device has (we only look for the hat)
+EVIOCGABS = lambda a: _IOR("E", 0x40 + a, 24)  # struct input_absinfo (hat range)
+EVIOCGBIT_KEY = _IOR("E", 0x20 + EV_KEY, 96)  # KEY_MAX = 0x2ff -> 96 bytes of bitmap
+UI_DEV_CREATE, UI_DEV_DESTROY = _ioc(0, "U", 1, 0), _ioc(0, "U", 2, 0)
+UI_DEV_SETUP = _IOW("U", 3, 92)
+UI_SET_EVBIT, UI_SET_KEYBIT = _IOW("U", 100, 4), _IOW("U", 101, 4)
+UI_SET_FFBIT = _IOW("U", 107, 4)
+EV_FF, FF_RUMBLE = 0x15, 0x50
+
+
+def log(*a):
+    print(time.strftime("%H:%M:%S"), *a, flush=True)
+
+
+def find_raw_event():
+    for p in sorted(glob.glob("/sys/class/input/event*")):
+        try:
+            with open(p + "/device/name") as f:
+                if f.read().strip() == RAW_NAME:
+                    return "/dev/input/" + os.path.basename(p)
+        except OSError:
+            continue
+    return None
+
+
+def key_codes(fd):
+    buf = bytearray(96)
+    fcntl.ioctl(fd, EVIOCGBIT_KEY, buf)
+    return [i for i in range(96 * 8) if buf[i >> 3] >> (i & 7) & 1]
+
+
+def make_uinput(codes, ff=False):
+    fd = None
+    for p in ("/dev/uinput", "/dev/input/uinput"):
+        try:
+            fd = os.open(p, os.O_RDWR | os.O_NONBLOCK | os.O_CLOEXEC)
+            break
+        except OSError:
+            continue
+    if fd is None:
+        raise OSError(errno.ENODEV, "no /dev/uinput (kernel without INPUT_UINPUT?)")
+    try:
+        fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
+        for c in codes:
+            fcntl.ioctl(fd, UI_SET_KEYBIT, c)
+        if ff:                                  # rumble: RetroArch / SDL upload FF_RUMBLE effects to this pad (see ffpad.py)
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_FF)
+            fcntl.ioctl(fd, UI_SET_FFBIT, FF_RUMBLE)
+        # bus HOST(0x19), vendor 'HK' (0x484b) / product 0x14df / version 0x100 = joypad-vendor/product/revision of the DTB;
+        # last field = ff_effects_max
+        fcntl.ioctl(fd, UI_DEV_SETUP, struct.pack("<HHHH80sI", 0x19, 0x484B, 0x14DF, 0x100, HUB_NAME.encode(), 16 if ff else 0))
+        fcntl.ioctl(fd, UI_DEV_CREATE)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+def udev_refresh():
+    """Re-run the udev rules for input devices (they hide the raw pad only while FLAG exists)."""
+    try:
+        subprocess.run(["udevadm", "control", "--reload"], timeout=10)
+        subprocess.run(["udevadm", "trigger", "--action=change", "--subsystem-match=input"], timeout=10)
+        subprocess.run(["udevadm", "settle", "--timeout=5"], timeout=10)
+    except Exception as e:
+        log("udevadm failed:", e)
+
+
+def write_status(text):
+    try:
+        os.makedirs(os.path.dirname(STATUS), exist_ok=True)
+        with open(STATUS + ".tmp", "w") as f:
+            f.write(text + "\n")
+        os.replace(STATUS + ".tmp", STATUS)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------- main loop
+STOP = False
+
+
+def _stop(*_):
+    global STOP
+    STOP = True
+
+
+def load_input_conf(conf=CONF, devfile="/etc/rgos-device", etc="/etc/rgos"):
+    """input.json merged with /etc/rgos/input-<device>.json (top-level keys of the device file replace)."""
+    out = {}
+    try:
+        with open(conf) as f:
+            out = json.load(f)
+        if not isinstance(out, dict):
+            out = {}
+    except Exception:
+        out = {}
+    try:
+        with open(devfile) as f:
+            dev = f.read().strip()
+        with open("%s/input-%s.json" % (etc, dev)) as f:
+            extra = json.load(f)
+        if isinstance(extra, dict):
+            out.update(extra)
+    except Exception:
+        pass
+    return out
+
+
+def load_keymap(iconf):
+    """{(device name or None, type, code, sign): canonical code}. Sources: input.json "keymap" (any device, plain key
+    codes) and the wizard's button-map.json ({"keys": {"<name>|<type>:<code>:<sign>": canonical}})."""
+    km = {}
+    for k, v in (iconf.get("keymap") or {}).items():
+        try:
+            km[(None, 1, int(str(k), 0), 0)] = int(str(v), 0)
+        except ValueError:
+            pass
+    try:
+        with open(BTNMAP) as f:
+            for k, v in (json.load(f).get("keys") or {}).items():
+                name, _, rest = k.rpartition("|")
+                t, c, sg = rest.split(":")
+                km[(name or None, int(t), int(c), int(sg))] = int(v)
+    except Exception:
+        pass
+    return km
+
+
+class Translator:
+    """Turns raw source events into button events of the canonical pad (pure logic, no I/O)."""
+    def __init__(self, keymap=None, legacy=False, auto_map=True):
+        self.keymap, self.legacy = keymap or {}, legacy
+        self.auto_map = bool(auto_map)
+        self.astate = {}
+        self.prof = {}                              # device name -> {"keys": {code: canon}}
+        self.swap = {}                              # canonical code -> code actually published (A/B swap)
+
+    def learn(self, name, keys):
+        """Profile one source from its key capability bits (`keys` = set of codes) and say what was decided."""
+        notes, kmap = [], {}
+        if self.auto_map and not self.legacy:
+            known = {c for c in keys if (name, 1, c, 0) in self.keymap or (None, 1, c, 0) in self.keymap
+                     or c in CANON_KEYS or c in AUTO_KEY_ALIASES or c in EXTRA_KEYS}
+            pad_keys = sorted(c for c in keys if c in GAMEPAD_KEY_RANGE)
+            if pad_keys and not (known & set(pad_keys)):
+                # nothing recognisable among the gamepad-range buttons: assign them in code order
+                for c, canon in zip(pad_keys, ORDERED_FILL):
+                    kmap[c] = canon
+                notes.append("buttons: unknown codes, assigned in order %s" % ", ".join(
+                    "0x%x->0x%x" % (c, kmap[c]) for c in pad_keys[:len(ORDERED_FILL)]))
+            elif known:
+                notes.append("buttons: %d recognised" % len(known))
+            # a device that has BOTH gamepad-style and keyboard-style codes keeps the gamepad ones
+            if set(pad_keys) & set(CANON_KEYS):
+                kmap.update({c: None for c in keys if c in AUTO_KEY_ALIASES and c < 0x100 and c not in (103, 105, 106, 108)})
+        self.prof[name] = {"keys": kmap}
+        return notes
+
+    def key(self, name, code, value):
+        t = self.keymap.get((name, 1, code, 0)) or self.keymap.get((None, 1, code, 0))
+        pk = self.prof.get(name, {}).get("keys", {})
+        if t is None and code in pk:
+            if pk[code] is None:
+                return []                           # shadowed keyboard-style code on a device that also has gamepad codes
+            t = pk[code]
+        if t is None and self.auto_map:
+            t = AUTO_KEY_ALIASES.get(code)
+        if t is None and (self.legacy or code in CANON_KEYS or code in EXTRA_KEYS):
+            t = code
+        if t is None:
+            return []
+        return [(EV_KEY, self.swap.get(t, t), value)]
+
+    def abs(self, name, code, value, rng):
+        """The only ABS events RG OS uses: a hat axis (or a wizard-mapped axis) acting as a D-pad / button.
+        rng = (min, max) of the source axis. Everything else is ignored."""
+        out = []
+        lo, hi = rng
+        if hi <= lo:
+            lo, hi = -AMAX, AMAX
+        mid, half = (lo + hi) / 2.0, max((hi - lo) / 2.0, 1.0)
+        for sign in (-1, 1):
+            canon = self.keymap.get((name, 3, code, sign)) or self.keymap.get((None, 3, code, sign)) or HAT_KEYS.get((code, sign))
+            if canon is None:
+                continue
+            on = (value - mid) * sign >= 0.6 * half
+            k = (name, code, sign)
+            if self.astate.get(k, False) != on:
+                self.astate[k] = on
+                out.append((EV_KEY, canon, 1 if on else 0))
+        return out
+
+
+class Source:
+    """One physical input device that feeds the hub."""
+    def __init__(self, path, name):
+        self.path, self.name = path, name
+        self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        self.rng = {}
+        self.grabbed = False
+
+    def absrange(self, c):
+        r = self.rng.get(c)
+        if r is None:
+            try:
+                buf = bytearray(24)
+                fcntl.ioctl(self.fd, EVIOCGABS(c), buf)
+                _, mn, mx = struct.unpack_from("<3i", buf, 0)
+                r = (mn, mx)
+            except OSError:
+                r = (-AMAX, AMAX)
+            self.rng[c] = r
+        return r
+
+    def grab(self):
+        try:
+            fcntl.ioctl(self.fd, EVIOCGRAB, 1)
+            self.grabbed = True
+        except OSError as e:
+            log("cannot grab %s (%s): %s (duplicate events possible)" % (self.path, self.name, e))
+
+    def close(self):
+        try:
+            if self.grabbed:
+                fcntl.ioctl(self.fd, EVIOCGRAB, 0)
+        except OSError:
+            pass
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+
+
+def _bits(fd, req, n):
+    buf = bytearray(n)
+    fcntl.ioctl(fd, req, buf)
+    return {i for i in range(n * 8) if buf[i >> 3] >> (i & 7) & 1}
+
+
+_REJECTED = {}
+
+
+def _reject(path, name, why):
+    """Say once (per device and reason) why a device is NOT used, so the log shows what the hub saw."""
+    if _REJECTED.get(path) != why:
+        _REJECTED[path] = why
+        log("input skipped %s (%s): %s" % (path, name, why))
+
+
+def scan_sources(spec, have):
+    """Event devices to merge. spec: "auto" or a list of name substrings. `have` = paths already open."""
+    found = []
+    for ev in sorted(glob.glob("/sys/class/input/event*")):
+        path = "/dev/input/" + os.path.basename(ev)
+        if path in have:
+            continue
+        try:
+            with open(ev + "/device/name") as f:
+                name = f.read().strip()
+        except OSError:
+            continue
+        if name == HUB_NAME:
+            continue
+        if spec == "auto":
+            low = name.lower()
+            if any(x in low for x in NOT_PADS):
+                _reject(path, name, "name is a power/volume/lid/jack/touch device")
+                continue
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError as e:
+                _reject(path, name, "cannot open: %s" % e)
+                continue
+            try:
+                keys, axes = _bits(fd, EVIOCGBIT_KEY, 96), _bits(fd, EVIOCGBIT_ABS, 8)
+            except OSError as e:
+                _reject(path, name, "capability ioctl failed: %s" % e)
+                continue
+            finally:
+                os.close(fd)
+            # Accept: standard pad codes; pad-range buttons with a hat or a pad-like name; and keyboard-style handhelds (the TSP's vendor input path may look like a few KEY_* codes: D-pad keys
+            # and/or the SPACE/CTRL/SHIFT/ALT/ENTER/ESC layout). A real keyboard is told apart by its many letter keys.
+            gamepad_keys = keys.intersection(GAMEPAD_KEY_RANGE)
+            has_hat = bool(axes.intersection({0x10, 0x11}))
+            lname = name.lower()
+            gamepad_name = any(word in lname for word in ("gamepad", "joypad", "controller", "gpio-keys", "trimui", "player1"))
+            letters = len(keys.intersection(range(16, 50)))          # KEY_Q..KEY_SLASH region: a real keyboard has nearly all
+            # Some TrimUI Smart Pro kernels expose the controls as a sparse keyboard
+            # device (often only D-pad + a few action keys), rather than a joystick.
+            # Requiring five keys from the legacy layout missed these devices entirely.
+            dpad = keys.intersection({103, 105, 106, 108})
+            handheld_actions = keys.intersection(KBD_PAD_KEYS - {103, 105, 106, 108})
+            sparse_handheld = len(dpad) >= 2 and bool(handheld_actions) and letters < 20
+            kbd_pad = (len(keys.intersection(KBD_PAD_KEYS)) >= 5 or len(dpad) == 4 or sparse_handheld) and letters < 20
+            why = None
+            if keys.intersection(CANON_KEYS):
+                why = "standard pad buttons"
+            elif gamepad_keys and (has_hat or gamepad_name):
+                why = "pad-range buttons"
+            elif kbd_pad:
+                why = "keyboard-style handheld buttons"
+            if why is None:
+                _reject(path, name, "no pad buttons (keys=%d letters=%d hat=%s)" % (len(keys), letters, has_hat))
+                continue
+            log("input candidate %s (%s): %s; buttons=%d hat=%s" % (path, name, why, len(keys), has_hat))
+        elif not any(sub in name for sub in spec):
+            continue
+        found.append((path, name))
+    return found
+
+
+def learn_source(translator, src):
+    """Profile a source for auto-mapping and write what was decided to the log and /run/rgos/input-map.txt."""
+    try:
+        keys = _bits(src.fd, EVIOCGBIT_KEY, 96)
+    except OSError:
+        keys = set()
+    notes = translator.learn(src.name, keys)
+    line = "%s (%s): %s" % (src.path, src.name, "; ".join(notes))
+    log("auto-map", line)
+    try:
+        with open(MAP_REPORT, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def write_rules(names):
+    """Hide the grabbed sources from SDL/RetroArch (only the hub's merged pad should show up)."""
+    try:
+        if not names:
+            os.unlink(RULES)
+            return
+        os.makedirs(os.path.dirname(RULES), exist_ok=True)
+        with open(RULES, "w") as f:
+            for n in sorted(set(names)):
+                q = n.replace("\\", "\\\\").replace('"', '\\"')
+                f.write('SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="%s", ENV{ID_INPUT_JOYSTICK}="", ENV{ID_INPUT_KEY}="1"\n' % q)
+    except OSError:
+        pass
+
+
+class KeyProbe:
+    """While the menu's button wizard runs (flag file), publish the last raw key/hat/trigger press of any source."""
+    def __init__(self):
+        self.n, self.next_check, self.on = 0, 0.0, False
+
+    def feed(self, src, t, c, v):
+        now = time.time()
+        if now >= self.next_check:
+            self.next_check, self.on = now + 0.1, os.path.exists(KEYS_PROBE)
+        if not self.on:
+            return
+        if t == EV_KEY and v == 1:
+            sign = 0
+        elif t == EV_ABS:
+            lo, hi = src.absrange(c)
+            mid, half = (lo + hi) / 2.0, max((hi - lo) / 2.0, 1.0)
+            if abs(v - mid) < 0.6 * half:
+                return
+            sign = 1 if v > mid else -1
+        else:
+            return
+        self.n += 1
+        try:
+            with open(KEYS_RAW + ".tmp", "w") as f:
+                f.write("%d\t%s\t%d\t%d\t%d\n" % (self.n, src.name, t, c, sign))
+            os.replace(KEYS_RAW + ".tmp", KEYS_RAW)
+        except OSError:
+            pass
+
+
+def run():
+    iconf = load_input_conf()
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    if iconf.get("enabled") is False:
+        write_status("hub: disabled in input.json")
+        log("disabled in input.json; leaving the raw input devices alone")
+        while not STOP:
+            time.sleep(3600)
+        return 0
+    os.makedirs("/run/rgos", exist_ok=True)
+    has_dt = os.path.isdir(DT)
+    spec = iconf.get("sources") or ([RAW_NAME] if has_dt else "auto")
+    legacy = spec == [RAW_NAME]                 # RG34XX-SP: publish exactly the raw pad's own key codes, as always
+    translator = Translator(load_keymap(iconf), legacy=legacy, auto_map=bool(iconf.get("auto_map_buttons", True)))
+    if os.path.exists(SWAPAB):
+        translator.swap = {0x130: 0x131, 0x131: 0x130}
+        log("A/B swap is ON (Settings > Swap A / B buttons)")
+    try:
+        os.unlink(MAP_REPORT)
+    except OSError:
+        pass
+    log("hub config: sources %s, legacy codes %s, keymap entries %d, auto-map %s" %
+        (spec, legacy, len(translator.keymap), translator.auto_map))
+
+    # 1. the source devices (wait until at least one exists)
+    srcs = {}
+    while not STOP and not srcs:
+        for path, name in scan_sources(spec, srcs):
+            try:
+                srcs[path] = Source(path, name)
+            except OSError as e:
+                log("cannot open %s: %s" % (path, e))
+        if not srcs:
+            write_status("hub: waiting for input devices (%s)" % (spec if spec == "auto" else ",".join(spec)))
+            time.sleep(1)
+    if STOP:
+        return 0
+    for x in srcs.values():
+        learn_source(translator, x)
+    first = next(iter(srcs.values()))
+    codes = (sorted(set(key_codes(first.fd)) | set(translator.keymap.values())) if legacy
+             else sorted(set(CANON_KEYS + EXTRA_KEYS) | set(translator.keymap.values())))
+    log("sources: %s; %d key codes" % (", ".join("%s (%s)" % (x.path, x.name) for x in srcs.values()), len(codes)))
+
+    # 2. the merged virtual pad (if this fails the source devices stay untouched)
+    ff = motor = None                           # rumble only where /etc/rgos/hw-<device>.json asks for it and a motor exists
+    try:
+        import hwctl, ffpad
+        hwc = hwctl.load_conf()
+        if hwc and hwc.get("rumble", {}).get("ff", True):
+            m = hwctl.Motor(hwc)
+            motor = m if m.available else None
+        log("rumble:", motor.describe() if motor else "off")
+    except Exception as e:
+        log("rumble support unavailable:", e)
+    ufd, tries = None, 0
+    while not STOP and ufd is None:
+        try:
+            ufd = make_uinput(codes, ff=motor is not None)
+        except OSError as e:
+            tries += 1
+            if tries == 1:
+                subprocess.run(["modprobe", "uinput"], stderr=subprocess.DEVNULL)
+            write_status("hub: OFF, uinput: %s" % e)
+            if tries == 1 or tries % 30 == 0:
+                log("cannot create virtual pad:", e, "-> the menu still reads the raw devices; in-game input needs uinput in the kernel")
+            time.sleep(2)
+    if STOP:
+        return 0
+    if motor is not None:
+        r_ = hwc.get("rumble", {})
+        ff = ffpad.FFHandler(ufd, motor, float(r_.get("threshold", 0.15)), int(r_.get("max_ms", 3000)))
+    for x in srcs.values():
+        x.grab()
+    open(FLAG, "w").close()
+    write_rules([x.name for x in srcs.values()])
+    udev_refresh()
+    log("hub up: '%s'" % HUB_NAME)
+
+    probe_keys = KeyProbe()
+    last_status, next_scan = 0.0, time.time() + 3.0
+    try:
+        while not STOP:
+            now = time.time()
+            if now >= next_scan:                  # devices that show up late (or come back) join the hub
+                next_scan = now + 3.0
+                if spec == "auto" or not srcs:
+                    added = False
+                    for path, name in scan_sources(spec, srcs):
+                        try:
+                            x = Source(path, name)
+                        except OSError:
+                            continue
+                        learn_source(translator, x)
+                        x.grab()
+                        srcs[path] = x
+                        added = True
+                        log("source added: %s (%s)" % (path, name))
+                    if added:
+                        write_rules([x.name for x in srcs.values()])
+                        udev_refresh()
+            wait = 0.25
+            if ff is not None:
+                wait = min(wait, ff.next_deadline())
+            r, _, _ = select.select([x.fd for x in srcs.values()] + ([ufd] if ff is not None else []), [], [], wait)
+            if ff is not None:
+                if ufd in r:
+                    ff.service()                  # answer FF uploads/erases, start/stop the motor
+                else:
+                    ff.tick()                     # an effect may just have run out
+            out = bytearray()
+            for x in list(srcs.values()):
+                if x.fd not in r:
+                    continue
+                try:
+                    data = os.read(x.fd, EVFMT.size * 64)
+                except BlockingIOError:
+                    continue
+                except OSError as e:
+                    log("source gone: %s (%s): %s" % (x.path, x.name, e))
+                    x.close()
+                    del srcs[x.path]
+                    write_rules([y.name for y in srcs.values()])
+                    udev_refresh()
+                    if legacy and not srcs:
+                        return 1
+                    continue
+                batch = []
+                for off in range(0, len(data) - EVFMT.size + 1, EVFMT.size):
+                    _, _, t, c, v = EVFMT.unpack_from(data, off)
+                    if t in (EV_KEY, EV_ABS):
+                        probe_keys.feed(x, t, c, v)
+                    if t == EV_KEY:
+                        batch += translator.key(x.name, c, v)
+                    elif t == EV_ABS:
+                        batch += translator.abs(x.name, c, v, x.absrange(c))
+                    elif t == EV_SYN:
+                        batch.append((EV_SYN, 0, 0))
+                for t, c, v in batch:
+                    out += EVFMT.pack(0, 0, t, c, v)
+                if batch and batch[-1][0] != EV_SYN:
+                    out += EVFMT.pack(0, 0, EV_SYN, 0, 0)
+            if out:
+                try:
+                    os.write(ufd, bytes(out))
+                except OSError as e:
+                    if e.errno != errno.EAGAIN:
+                        log("uinput write failed:", e)
+                        return 1
+            if time.time() - last_status > 0.5:
+                last_status = time.time()
+                write_status("hub:ok src:%d" % len(srcs))
+        return 0
+    finally:
+        try:
+            if ff is not None:
+                ff.close()                        # motor off
+            for x in srcs.values():
+                x.close()
+            fcntl.ioctl(ufd, UI_DEV_DESTROY)
+        except OSError:
+            pass
+        for p in (FLAG, STATUS, KEYS_RAW, RULES, MAP_REPORT):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+        udev_refresh()
+
+
+def main():
+    cmd = sys.argv[1] if len(sys.argv) > 1 else "run"
+    if cmd == "reset-buttons":
+        try:
+            os.unlink(BTNMAP)
+            print("removed", BTNMAP)
+        except OSError:
+            print("no button mapping stored")
+        return 0
+    return run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

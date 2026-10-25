@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""RG OS offline updater.
+
+Put an update tar made by `./build.sh update` into the `update/` folder of any exFAT / FAT / ext4 partition (normally the
+ROMS partition of the SD card). On the next boot rgos-session runs `rgos-update boot` before the menu starts: it finds the
+tar, checks it, replaces the files on the FAT boot partition and reboots into the new system.
+
+Tar layout (made by tools/mkupdate.py, i.e. `./build.sh update`):
+  manifest.json                     {"format": 1, "id": "...", "device": "rg-rotate", "files": {"SYSTEM": "<sha256>", ...}}
+  boot/SYSTEM                       the Debian squashfs (the RG OS system itself)
+  boot/SYSTEM.md5                   its md5 line (only if the card has one)
+  boot/rgos-initrd.cpio             the RG OS initramfs
+  boot/KERNEL, boot/KERNEL.md5, boot/device_trees/ums512-rg-rotate.dtb, boot/extlinux/extlinux.conf     optional
+Only those exact file names are ever written, and only inside the boot partition.
+
+Safety:
+  * every file is staged as <name>.new, fsynced and verified against its SHA-256 BEFORE anything is replaced;
+  * a bad tar, wrong device, wrong checksum, too little free space, ... leaves the boot partition untouched;
+  * files are replaced by renaming (no 500 MB copies): the old file becomes <name>.prev, the verified <name>.new takes its place,
+    and any failure renames everything back (manual rollback from a PC: rename <name>.prev over <name>);
+  * the tar is renamed to <name>.applied / <name>.failed afterwards so it never runs twice, and the installed build id is
+    stored in rgos-update.id on the boot partition (an update with the same id is skipped);
+  * a result line is appended to update/rgos-update.log on the card. Details: /var/log/rgos-update.log.
+
+Commands:
+  boot                  locate boot partition + update tar and apply it (called by rgos-session)
+  apply TAR BOOTDIR     apply one tar to an already mounted boot partition (manual use / tests)
+Exit status: 10 = update installed, reboot now; 0 = nothing to do, or the update failed (boot continues normally).
+"""
+import hashlib, json, os, posixpath, re, shutil, subprocess, sys, tarfile, time
+
+BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
+              "extlinux/extlinux.conf")    # also the order they are replaced in (extlinux.conf last, SYSTEM.md5 right after SYSTEM)
+ID_FILE = "rgos-update.id"
+UPD_DIR = "update"
+FORMAT = 1
+MARGIN = 2 << 20                       # free space kept on the boot partition on top of the staged files
+ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+TAR_RE = re.compile(r"\.(tar|tar\.gz|tgz)$", re.I)
+RUN = os.environ.get("RGOS_UPDATE_RUN", "/run/rgos/update")
+LOG_FILE = os.environ.get("RGOS_UPDATE_LOG", "/var/log/rgos-update.log")
+TTY = os.environ.get("RGOS_UPDATE_TTY", "/dev/tty1")
+DEVICE_FILE = os.environ.get("RGOS_DEVICE_FILE", "/etc/rgos-device")
+BOOT_MNT = os.environ.get("RGOS_BOOT_MNT", "/boot")
+
+
+class UpdateError(Exception):
+    pass
+
+
+def log(msg):
+    try:
+        os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
+    except OSError:
+        pass
+
+
+def say(msg):
+    """Log a line and show it on the console (the framebuffer text console, before the menu is up)."""
+    log(msg)
+    try:
+        with open(TTY, "w") as t:
+            t.write(msg + "\r\n")
+    except OSError:
+        pass
+
+
+def sh(args, timeout=30):
+    try:
+        p = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout, universal_newlines=True)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, "%s" % e
+
+
+# ---------------------------------------------------------------- finding partitions
+
+def _natural(s):
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
+
+
+def partitions():
+    """Block devices that can hold files: mmcblkNpM / sdXN, or a whole disk that has no partition table."""
+    try:
+        names = os.listdir("/sys/class/block")
+    except OSError:
+        return []
+    cand = [n for n in names if re.match(r"^(mmcblk\d+(p\d+)?|sd[a-z]+\d*)$", n)]
+    def child(w, o):
+        return re.fullmatch(re.escape(w) + (r"p\d+" if w.startswith("mmcblk") else r"\d+"), o) is not None
+    whole = [n for n in cand if re.match(r"^(mmcblk\d+|sd[a-z]+)$", n)]
+    skip = {w for w in whole if any(child(w, o) for o in cand)}
+    return ["/dev/" + n for n in sorted(cand, key=_natural) if n not in skip]
+
+
+def mounted_at(dev):
+    try:
+        with open("/proc/mounts") as f:
+            for line in f:
+                p = line.split()
+                if len(p) >= 2 and p[0] == dev:
+                    return p[1]
+    except OSError:
+        pass
+    return None
+
+
+def ensure_fs():
+    try:
+        have = open("/proc/filesystems").read()
+    except OSError:
+        have = ""
+    for fs in ("exfat", "vfat"):
+        if not re.search(r"\b%s\b" % fs, have):
+            sh(["modprobe", fs])
+
+
+def mount_dev(dev, mnt, ro):
+    os.makedirs(mnt, exist_ok=True)
+    for fs in ("exfat", "vfat", "ext4"):
+        rc, _ = sh(["mount", "-t", fs, "-o", "noatime," + ("ro" if ro else "rw"), dev, mnt])
+        if rc == 0:
+            return fs
+    return None
+
+
+def is_boot(d):
+    return (os.path.isfile(os.path.join(d, "SYSTEM")) and os.path.isfile(os.path.join(d, "rgos-initrd.cpio"))
+            and os.path.isfile(os.path.join(d, "extlinux", "extlinux.conf")))
+
+
+def find_boot(parts):
+    """The RG OS boot partition (has SYSTEM + rgos-initrd.cpio + extlinux/extlinux.conf), mounted read-write on /boot."""
+    if os.path.ismount(BOOT_MNT) and is_boot(BOOT_MNT):
+        return BOOT_MNT, None
+    probe = os.path.join(RUN, "probe")
+    for dev in parts:
+        if mounted_at(dev) or not mount_dev(dev, probe, True):
+            continue
+        ok = is_boot(probe)
+        sh(["umount", probe])
+        if ok and mount_dev(dev, BOOT_MNT, False):
+            return BOOT_MNT, dev
+    return None
+
+
+def find_update(parts):
+    """First partition with update/*.tar -> (dev, mountpoint, we_mounted_it, update_dir, tar_path), newest name wins."""
+    for dev in parts:
+        mp = mounted_at(dev)
+        ours = mp is None
+        if ours:
+            mp = os.path.join(RUN, "src-" + os.path.basename(dev))
+            if not mount_dev(dev, mp, True):
+                continue
+        try:
+            d = next((os.path.join(mp, e) for e in os.listdir(mp) if e.lower() == UPD_DIR and os.path.isdir(os.path.join(mp, e))), None)
+            tars = sorted(f for f in os.listdir(d) if TAR_RE.search(f) and not f.startswith(".") and os.path.isfile(os.path.join(d, f))) if d else []
+        except OSError:
+            d, tars = None, []
+        if tars:
+            return dev, mp, ours, d, os.path.join(d, tars[-1])
+        if ours:
+            sh(["umount", mp])
+    return None
+
+
+# ---------------------------------------------------------------- the update itself
+
+def sane(name, head):
+    """Cheap magic-number check so a wrong file is never installed as system / kernel / initramfs / device tree."""
+    if name == "SYSTEM":
+        return head[:4] == b"hsqs"                                  # squashfs, little endian
+    if name == "KERNEL":
+        return head[56:60] == b"ARM\x64" or head[:2] in (b"\x1f\x8b", b"MZ")
+    if name.endswith(".dtb"):
+        return head[:4] == b"\xd0\x0d\xfe\xed"
+    if name == "rgos-initrd.cpio":
+        return head[:6] in (b"070701", b"070702") or head[:2] == b"\x1f\x8b"
+    return b"\0" not in head           # *.md5 and extlinux.conf are plain text
+
+
+def read_tar(path):
+    """Open and validate the tar. Returns (tarfile, manifest, {boot file name: member})."""
+    try:
+        tf = tarfile.open(path, "r:*")
+        members = {}
+        for m in tf:
+            if m.isdir():
+                continue
+            if not m.isreg():
+                raise UpdateError("unsupported entry in tar: %s" % m.name)
+            members[posixpath.normpath(m.name)] = m
+    except (tarfile.TarError, OSError, EOFError) as e:
+        raise UpdateError("cannot read tar: %s" % e)
+    allowed = {"manifest.json"} | {"boot/" + f for f in BOOT_FILES}
+    for n in members:
+        if n not in allowed:
+            raise UpdateError("unexpected file in tar: %s" % n)
+    if "manifest.json" not in members:
+        raise UpdateError("manifest.json missing - not an RG OS update")
+    try:
+        man = json.loads(tf.extractfile(members["manifest.json"]).read(1 << 20).decode())
+        assert isinstance(man, dict)
+    except (ValueError, AssertionError, UnicodeDecodeError):
+        raise UpdateError("manifest.json is not valid")
+    if man.get("format") != FORMAT:
+        raise UpdateError("unsupported update format %r" % man.get("format"))
+    if not ID_RE.match(str(man.get("id", ""))):
+        raise UpdateError("manifest has no valid id")
+    try:
+        device = open(DEVICE_FILE).read().strip()
+    except OSError:
+        device = ""
+    if man.get("device") not in ("any", device):
+        raise UpdateError("built for %r, this device is %r" % (man.get("device"), device))
+    payload = {f: members["boot/" + f] for f in BOOT_FILES if "boot/" + f in members}
+    if not payload:
+        raise UpdateError("tar contains no boot files")
+    files = man.get("files")
+    if not isinstance(files, dict) or set(files) != set(payload):
+        raise UpdateError("manifest file list does not match the tar contents")
+    for f in payload:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(files[f])):
+            raise UpdateError("bad checksum entry for %s" % f)
+    return tf, man, payload
+
+
+def _stage(tf, member, name, expect, dest):
+    h, head = hashlib.sha256(), b""
+    src = tf.extractfile(member)
+    with open(dest, "wb") as out:
+        while True:
+            b = src.read(1 << 20)
+            if not b:
+                break
+            if not head:
+                head = b[:64]
+            h.update(b)
+            out.write(b)
+        out.flush()
+        os.fsync(out.fileno())
+    if h.hexdigest() != expect:
+        raise UpdateError("checksum mismatch for %s (damaged tar? copy it again)" % name)
+    if not sane(name, head):
+        raise UpdateError("%s does not look like a valid file of that type" % name)
+
+
+def _cleanup(bootdir):
+    for name in BOOT_FILES:
+        for ext in (".new",):
+            try:
+                os.remove(os.path.join(bootdir, name + ext))
+            except OSError:
+                pass
+
+
+def apply_tar(tar, bootdir):
+    """Install one update tar. Returns 'installed' or 'same'; raises UpdateError (boot partition untouched until all is verified)."""
+    tf, man, payload = read_tar(tar)
+    uid = str(man["id"])
+    try:
+        cur = open(os.path.join(bootdir, ID_FILE)).read().strip()
+    except OSError:
+        cur = ""
+    if cur == uid:
+        return "same", uid
+    _cleanup(bootdir)
+    need = sum(m.size for m in payload.values()) + MARGIN
+    free = lambda: (lambda st: st.f_bavail * st.f_frsize)(os.statvfs(bootdir))
+    if free() < need:                   # only then give up the previous update's .prev backups
+        for name in BOOT_FILES:
+            try:
+                os.remove(os.path.join(bootdir, name + ".prev"))
+            except OSError:
+                pass
+    if free() < need:
+        raise UpdateError("not enough free space on the boot partition (%d MiB needed, %d MiB free)" % (need >> 20, free() >> 20))
+    try:
+        for name, m in payload.items():
+            say("  staging %s (%d KiB)" % (name, m.size >> 10))
+            _stage(tf, m, name, man["files"][name], os.path.join(bootdir, name + ".new"))
+    except (UpdateError, OSError, tarfile.TarError, EOFError) as e:
+        _cleanup(bootdir)
+        raise UpdateError(str(e))
+    finally:
+        tf.close()
+    say("  installing")
+    idp = os.path.join(bootdir, ID_FILE)
+    try:
+        old_id = open(idp).read()
+    except OSError:
+        old_id = None
+    done = []                               # (destination, had_old) for every file already switched over
+    try:
+        for name in payload:
+            dst = os.path.join(bootdir, name)
+            had = os.path.isfile(dst)
+            if had:
+                try:
+                    os.remove(dst + ".prev")        # the build before this one; the running system is never a .prev
+                except OSError:
+                    pass
+                os.replace(dst, dst + ".prev")      # a rename: the running system keeps its open file
+            done.append((dst, had))
+            os.replace(dst + ".new", dst)
+        with open(idp + ".new", "w") as f:
+            f.write(uid + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(idp + ".new", idp)
+        os.sync()
+    except OSError as e:
+        say("  install failed: %s; restoring previous boot files" % e)
+        errors = []
+        for dst, had in reversed(done):
+            try:
+                if had:
+                    os.replace(dst + ".prev", dst)  # puts the old file back over the new one
+                elif os.path.exists(dst):
+                    os.remove(dst)
+            except OSError as re_:
+                errors.append("%s: %s" % (dst, re_))
+        try:
+            if old_id is None:
+                os.remove(idp)
+            else:
+                with open(idp, "w") as f:
+                    f.write(old_id)
+        except OSError:
+            pass
+        _cleanup(bootdir)
+        os.sync()
+        raise UpdateError("installation failed; " + ("rollback incomplete, check the *.prev files" if errors else "previous boot files restored"))
+    os.sync()
+    return "installed", uid
+
+
+# ---------------------------------------------------------------- commands
+
+def _mark(tar, suffix):
+    try:
+        os.replace(tar, tar + suffix)
+    except OSError as e:
+        log("could not rename %s: %s" % (tar, e))
+
+
+def cmd_apply(tar, bootdir):
+    try:
+        status, uid = apply_tar(tar, bootdir)
+    except UpdateError as e:
+        print("FAILED: %s" % e)
+        return 1
+    print("%s: %s" % (status, uid))
+    return 10 if status == "installed" else 0
+
+
+def cmd_boot():
+    parts = []
+    for _ in range(20):                 # the card may still be probing
+        parts = partitions()
+        if parts:
+            break
+        time.sleep(0.5)
+    if not parts:
+        return 0
+    ensure_fs()
+    boot = find_boot(parts)
+    src = find_update(parts)
+    if not src:
+        return 0
+    dev, mp, ours, upd, tar = src
+    base = os.path.basename(tar)
+    try:
+        with open(TTY, "w") as t:
+            t.write("\033[2J\033[H")
+    except OSError:
+        pass
+    say("RG OS update: %s" % base)
+    result, rc, suffix = "", 0, ".failed"
+    if not boot:
+        result = "no RG OS boot partition found"
+    else:
+        try:
+            status, uid = apply_tar(tar, boot[0])
+            suffix = ".applied"
+            if status == "same":
+                result = "build %s is already installed - skipped" % uid
+            else:
+                result, rc = "build %s installed" % uid, 10
+        except UpdateError as e:
+            result = "FAILED: %s" % e
+        except OSError as e:
+            result = "FAILED: %s" % e
+    say("RG OS update: " + result)
+    sh(["mount", "-o", "remount,rw", mp])
+    _mark(tar, suffix)
+    try:
+        with open(os.path.join(upd, "rgos-update.log"), "a") as f:
+            f.write("%s %s: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), base, result))
+    except OSError:
+        pass
+    os.sync()
+    if ours:
+        sh(["umount", mp])
+    say("Restarting..." if rc == 10 else "Continuing with the installed system.")
+    time.sleep(2 if rc == 10 else 6)
+    return rc
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[1] == "boot":
+        return cmd_boot()
+    if len(argv) == 4 and argv[1] == "apply":
+        return cmd_apply(argv[2], argv[3])
+    sys.stderr.write(__doc__)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
