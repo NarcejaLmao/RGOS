@@ -28,14 +28,22 @@ RGOS_RETROARCH_CONF_OPTS = \
 	--disable-sdl --enable-sdl2 --enable-alsa --enable-zlib \
 	--enable-kms --enable-egl --enable-opengles --enable-opengles3
 
+# No X11 on the device: without EGL_NO_X11 Mesa's EGL/eglplatform.h includes
+# <X11/Xlib.h> on Linux, so RetroArch's configure header probe for EGL/eglext.h
+# fails ("Build assumed that EGL/egl.h exists, but cannot locate").
+RGOS_RETROARCH_EGL_CFLAGS = -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS
+RGOS_RETROARCH_FLAGS = \
+	CFLAGS="$(TARGET_CFLAGS) $(RGOS_RETROARCH_EGL_CFLAGS)" \
+	CXXFLAGS="$(TARGET_CXXFLAGS) $(RGOS_RETROARCH_EGL_CFLAGS)"
+
 define RGOS_RETROARCH_CONFIGURE_CMDS
-	cd $(@D) && $(TARGET_MAKE_ENV) $(TARGET_CONFIGURE_OPTS) \
+	cd $(@D) && $(TARGET_MAKE_ENV) $(TARGET_CONFIGURE_OPTS) $(RGOS_RETROARCH_FLAGS) \
 		PKG_CONF_PATH="$(PKG_CONFIG_HOST_BINARY)" \
 		./configure $(RGOS_RETROARCH_CONF_OPTS)
 endef
 
 define RGOS_RETROARCH_BUILD_CMDS
-	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) $(TARGET_CONFIGURE_OPTS) \
+	$(TARGET_MAKE_ENV) $(MAKE) -C $(@D) $(TARGET_CONFIGURE_OPTS) $(RGOS_RETROARCH_FLAGS) \
 		PKG_CONF_PATH="$(PKG_CONFIG_HOST_BINARY)"
 endef
 
