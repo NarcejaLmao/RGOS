@@ -201,9 +201,14 @@ if (( WANT_NGP || WANT_PSX )); then
 fi
 CORES="$(ls "$ROOTFS"/usr/local/lib/libretro/*_libretro.so "$ROOTFS"/usr/lib/*/libretro/*_libretro.so "$ROOTFS"/usr/lib/libretro/*_libretro.so 2>/dev/null | xargs -rn1 basename | tr '\n' ' ' || true)"
 echo "==> libretro cores in the image: ${CORES:-NONE}"
-for c in gambatte mgba snes9x mednafen_wswan mednafen_ngp pcsx_rearmed mednafen_psx; do
-  ls "$ROOTFS"/usr/lib/*/libretro/${c}_libretro.so "$ROOTFS"/usr/lib/libretro/${c}_libretro.so "$ROOTFS"/usr/local/lib/libretro/${c}_libretro.so >/dev/null 2>&1 || echo "!! ${c}_libretro.so is missing from the image (a Debian libretro package missing, or the source build of that core failed)"
+# a core counts as present if ANY of the library directories has it ("ls A B C" fails when just one of the globs is empty, which
+# wrongly reported every core as missing)
+core_present() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
+for c in gambatte mgba snes9x mednafen_wswan mednafen_ngp pcsx_rearmed; do
+  core_present "$c" || echo "!! ${c}_libretro.so is missing from the image (a Debian libretro package missing, or the source build of that core failed)"
 done
+# Beetle PSX is only an optional fallback for pcsx_rearmed
+core_present mednafen_psx || core_present pcsx_rearmed || echo "!! no PlayStation core (neither pcsx_rearmed nor mednafen_psx) is in the image"
 [[ -x "$ROOTFS/usr/bin/retroarch" ]] || echo "!! retroarch is not in the image (package missing from $DEBIAN_SUITE?)"
 # applets the session calls that Debian minbase does not ship as commands
 for a in reboot poweroff halt; do ln -sf /bin/busybox "$ROOTFS/sbin/$a"; done

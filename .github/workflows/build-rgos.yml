@@ -94,12 +94,25 @@ jobs:
           echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
           echo "Building ${{ inputs.board }} artifact: ${{ inputs.artifact }} (ID: $build_id)"
 
+      - name: Restore Buildroot caches (rg34xxsp)
+        if: inputs.board == 'rg34xxsp'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.buildroot-ccache
+            buildroot/dl
+          key: rgos-rg34xxsp-br-${{ hashFiles('buildroot-external/configs/rgos_rg34xxsp_defconfig') }}-${{ github.run_id }}
+          restore-keys: |
+            rgos-rg34xxsp-br-${{ hashFiles('buildroot-external/configs/rgos_rg34xxsp_defconfig') }}-
+            rgos-rg34xxsp-br-
+
       - name: Build disk image (rg34xxsp)
         if: inputs.board == 'rg34xxsp' && inputs.artifact == 'img'
         env:
           RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
           RGOS_JOBS: '2'
           RGOS_H700_DDR: ${{ inputs.ddr_variant }}
+          CCACHE_MAXSIZE: 6G
         run: |
           set -euo pipefail
           bash ./build.sh prepare
@@ -112,11 +125,22 @@ jobs:
           RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
           RGOS_JOBS: '2'
           RGOS_H700_DDR: ${{ inputs.ddr_variant }}
+          CCACHE_MAXSIZE: 6G
         run: |
           set -euo pipefail
           bash ./build.sh prepare
           bash ./build.sh update
           test -s "output/rgos-update-${RGOS_BUILD_ID}.tar"
+
+      # Save even when the build failed: the compiler cache is what makes the next attempt fast (LLVM/Mesa take ~2.5 h from scratch).
+      - name: Save Buildroot caches (rg34xxsp)
+        if: always() && inputs.board == 'rg34xxsp'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.buildroot-ccache
+            buildroot/dl
+          key: rgos-rg34xxsp-br-${{ hashFiles('buildroot-external/configs/rgos_rg34xxsp_defconfig') }}-${{ github.run_id }}
 
       - name: Verify update archive (rg34xxsp)
         if: inputs.board == 'rg34xxsp' && inputs.artifact == 'update-tar'
