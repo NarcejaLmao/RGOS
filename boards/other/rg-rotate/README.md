@@ -59,6 +59,14 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
 - Not tested on hardware: whether the Wi-Fi/Bluetooth chip's kernel drivers and firmware (taken from the stock ROCKNIX image) bring up
   `wlan0` / `hci0`. If one does not show up, `rgos-logs.txt` on the boot partition says why (`no Bluetooth adapter ...`, `no-adapter`).
 
+## Sega systems (Genesis Plus GX)
+- `build.sh` installs `libretro-genesisplusgx` (Debian non-free). One core, six launcher systems, each with its own ROM folder under `roms/`:
+  `genesis` (.md .gen .smd .bin .mdx .68k), `mastersystem` (.sms), `gamegear` (.gg), `sg1000` (.sg), `segacd` (.cue .chd .iso .m3u), `segapico` (.bin .md);
+  cartridge systems also take .zip. A system only shows up in the menu once its core is installed.
+- Sega CD needs a BIOS in `bios/`: `bios_CD_U.bin` (US), `bios_CD_E.bin` (Europe) or `bios_CD_J.bin` (Japan). Pico support in the core is preliminary.
+- 32X is not a Genesis Plus GX system: `sega32x` now maps to PicoDrive only and stays hidden until a `picodrive_libretro.so` is in the image (drop one in `cores/`).
+- The Debian package is 1.7.4 (2022); check that `.chd` Sega CD images load, otherwise use `.cue`/`.bin`.
+
 ## Startup splash
 - `build.sh` installs `splash/splash.mjpg` (+ `splash.json`, `splash.wav`) as `/etc/rgos/splash/`. The launcher (`menu.py`) plays it once, as soon as
   it starts at power on (video + sound; any button skips it), then the home screen appears. It does not replay after a game.

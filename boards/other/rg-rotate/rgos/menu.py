@@ -28,15 +28,15 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            ("gbc", "GBC", "retroarch", (".gbc",), "Game Boy Color"),
            ("nes", "NES", "retroarch", (".nes", ".unf", ".unif"), "Nintendo Entertainment System"),
            ("snes", "SNES", "retroarch", (".sfc", ".smc", ".swc", ".fig", ".bs"), "Super Nintendo Entertainment System"),
-           # Genesis Plus GX-supported Sega platforms. Each has its own ROM folder so
-           # games are grouped correctly even though they all use the same libretro core.
-           ("genesis", "MD", "retroarch", (".md", ".gen", ".smd", ".bin"), "Sega Mega Drive / Genesis"),
-           ("mastersystem", "SMS", "retroarch", (".sms",), "Sega Master System / Mark III"),
-           ("gamegear", "GG", "retroarch", (".gg",), "Sega Game Gear"),
-           ("sg1000", "SG", "retroarch", (".sg", ".sc", ".sf"), "Sega SG-1000 / SC-3000"),
-           ("segacd", "CD", "retroarch", (".cue", ".chd", ".iso", ".m3u", ".ccd"), "Sega CD / Mega-CD"),
+           # Everything Genesis Plus GX runs: Mega Drive, Master System, Game Gear, SG-1000, Sega CD, Pico. Each has its own ROM folder so
+           # games are grouped correctly even though they all use the same libretro core. 32X is NOT one of them (PicoDrive only).
+           ("genesis", "MD", "retroarch", (".md", ".gen", ".smd", ".bin", ".mdx", ".68k", ".zip"), "Sega Mega Drive / Genesis"),
+           ("mastersystem", "SMS", "retroarch", (".sms", ".zip"), "Sega Master System / Mark III"),
+           ("gamegear", "GG", "retroarch", (".gg", ".zip"), "Sega Game Gear"),
+           ("sg1000", "SG", "retroarch", (".sg", ".zip"), "Sega SG-1000"),
+           ("segacd", "CD", "retroarch", (".cue", ".chd", ".iso", ".m3u"), "Sega CD / Mega-CD"),
            ("sega32x", "32X", "retroarch", (".32x", ".md", ".gen", ".smd", ".bin"), "Sega 32X"),
-           ("segapico", "PICO", "retroarch", (".pico", ".bin"), "Sega Pico"),
+           ("segapico", "PICO", "retroarch", (".bin", ".md", ".zip"), "Sega Pico"),
            # Atari consoles: Stella (2600), Atari800 (5200, needs 5200.rom in ROMS/bios/atari5200/), ProSystem (7800).
            ("atari2600", "A26", "retroarch", (".a26", ".bin"), "Atari 2600"),
            ("atari5200", "A52", "retroarch", (".a52", ".bin", ".car"), "Atari 5200"),
@@ -307,7 +307,7 @@ def default_core(sid):
     return {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "fceumm", "snes": "snes9x", "genesis": "genesis_plus_gx",
             "mastersystem": "genesis_plus_gx", "gamegear": "genesis_plus_gx",
             "sg1000": "genesis_plus_gx", "segacd": "genesis_plus_gx",
-            "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx",
+            "sega32x": "picodrive", "segapico": "genesis_plus_gx",
             "arcade": "fbneo", "neogeo": "fbneo",
             "atari2600": "stella2014", "atari5200": "atari800", "atari7800": "prosystem",
             "ngp": "mednafen_ngp", "ngpc": "mednafen_ngp", "psx": "pcsx_rearmed", "ws": "mednafen_wswan", "wsc": "mednafen_wswan"}.get(sid, "")
@@ -326,8 +326,8 @@ SYSTEM_CORE_COMPATIBILITY = {
     "gamegear": ("genesis_plus_gx", "picodrive"),
     "sg1000": ("genesis_plus_gx",),
     "segacd": ("genesis_plus_gx", "picodrive"),
-    "sega32x": ("genesis_plus_gx", "picodrive"),
-    "segapico": ("genesis_plus_gx",),
+    "sega32x": ("picodrive",),
+    "segapico": ("genesis_plus_gx", "picodrive"),
     "atari2600": ("stella2014", "stella"),
     "atari5200": ("atari800",),
     "atari7800": ("prosystem",),
