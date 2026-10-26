@@ -141,6 +141,13 @@ def find_boot(parts):
     return None
 
 
+def _subdir(base, name):
+    try:
+        return next((os.path.join(base, e) for e in os.listdir(base) if e.lower() == name and os.path.isdir(os.path.join(base, e))), None)
+    except OSError:
+        return None
+
+
 def find_update(parts):
     """First partition with update/*.tar -> (dev, mountpoint, we_mounted_it, update_dir, tar_path), newest name wins."""
     for dev in parts:
@@ -150,13 +157,20 @@ def find_update(parts):
             mp = os.path.join(RUN, "src-" + os.path.basename(dev))
             if not mount_dev(dev, mp, True):
                 continue
-        try:
-            d = next((os.path.join(mp, e) for e in os.listdir(mp) if e.lower() == UPD_DIR and os.path.isdir(os.path.join(mp, e))), None)
-            tars = sorted(f for f in os.listdir(d) if TAR_RE.search(f) and not f.startswith(".") and os.path.isfile(os.path.join(d, f))) if d else []
-        except OSError:
-            d, tars = None, []
-        if tars:
-            return dev, mp, ours, d, os.path.join(d, tars[-1])
+        found = None
+        for base in (mp, _subdir(mp, "roms")):
+            d = _subdir(base, UPD_DIR) if base else None
+            if not d:
+                continue
+            try:
+                tars = sorted(f for f in os.listdir(d) if TAR_RE.search(f) and not f.startswith(".") and os.path.isfile(os.path.join(d, f)))
+            except OSError:
+                tars = []
+            if tars:
+                found = (dev, mp, ours, d, os.path.join(d, tars[-1]))
+                break
+        if found:
+            return found
         if ours:
             sh(["umount", mp])
     return None
@@ -245,11 +259,26 @@ def _stage(tf, member, name, expect, dest):
 
 def _cleanup(bootdir):
     for name in BOOT_FILES:
-        for ext in (".new", ".prev.tmp"):
+        for ext in (".new", ".prev.tmp", ".rollback"):
             try:
                 os.remove(os.path.join(bootdir, name + ext))
             except OSError:
                 pass
+
+
+def ensure_writable(bootdir):
+    probe = os.path.join(bootdir, ".rgos-w")
+    for attempt in (0, 1):
+        try:
+            with open(probe, "w") as f:
+                f.write("x")
+            os.remove(probe)
+            return
+        except OSError as e:
+            if attempt == 0:
+                sh(["mount", "-o", "remount,rw", bootdir])
+                continue
+            raise UpdateError("boot partition is not writable (%s); repair the FAT partition on a PC and try again" % e)
 
 
 def apply_tar(tar, bootdir):
@@ -262,6 +291,7 @@ def apply_tar(tar, bootdir):
         cur = ""
     if cur == uid:
         return "same", uid
+    ensure_writable(bootdir)
     _cleanup(bootdir)
     need = sum(m.size for m in payload.values()) + MARGIN
     free = lambda: (lambda st: st.f_bavail * st.f_frsize)(os.statvfs(bootdir))
@@ -284,86 +314,53 @@ def apply_tar(tar, bootdir):
         tf.close()
     say("  installing")
     idp = os.path.join(bootdir, ID_FILE)
-    # Keep a transaction-local copy of every destination until the complete update,
-    # including its build ID, has been committed. A failed rename must not leave a
-    # mixture of old and new boot files.
-    destinations = [os.path.join(bootdir, name) for name in payload]
-    destinations.append(idp)
-    existed = {}
-    backups = {}
-    changed = []
     try:
-        for dst in destinations:
-            existed[dst] = os.path.isfile(dst)
-            if existed[dst]:
-                backup = dst + ".rollback"
-                with open(dst, "rb") as src, open(backup, "wb") as out:
-                    shutil.copyfileobj(src, out)
-                    out.flush()
-                    os.fsync(out.fileno())
-                backups[dst] = backup
-        # Preserve the previous build for manual recovery, separately from the
-        # transaction backups used to undo a partially completed installation.
+        old_id = open(idp).read()
+    except OSError:
+        old_id = None
+    # Backups are RENAMES (old file -> <name>.prev), never copies: a copy needs free space on a boot partition that is
+    # usually nearly full, and running out of it half way used to make every update fail.
+    done = []                               # (destination, had_old) for every file already switched over
+    try:
         for name in payload:
             dst = os.path.join(bootdir, name)
-            if existed[dst]:
+            had = os.path.isfile(dst)
+            if had:
                 try:
-                    shutil.copyfile(dst, dst + ".prev.tmp")
-                    os.replace(dst + ".prev.tmp", dst + ".prev")
+                    os.remove(dst + ".prev")        # the build before this one
                 except OSError:
-                    try:
-                        os.remove(dst + ".prev.tmp")
-                    except OSError:
-                        pass
-        for name in payload:
-            dst = os.path.join(bootdir, name)
+                    pass
+                os.replace(dst, dst + ".prev")
+            done.append((dst, had))
             os.replace(dst + ".new", dst)
-            changed.append(dst)
         with open(idp + ".new", "w") as f:
             f.write(uid + "\n")
             f.flush()
             os.fsync(f.fileno())
         os.replace(idp + ".new", idp)
-        changed.append(idp)
         os.sync()
     except OSError as e:
         say("  install failed: %s; restoring previous boot files" % e)
-        rollback_errors = []
-        for dst in reversed(changed):
+        errors = []
+        for dst, had in reversed(done):
             try:
-                if existed.get(dst, False):
-                    os.replace(backups[dst], dst)
-                    backups.pop(dst, None)
-                else:
-                    try:
-                        os.remove(dst)
-                    except FileNotFoundError:
-                        pass
-            except OSError as rollback_error:
-                rollback_errors.append("%s: %s" % (dst, rollback_error))
-        for backup in backups.values():
-            # Deliberately retain any backup that could not be restored; it is
-            # the recovery copy needed to repair the boot partition manually.
-            pass
-        if rollback_errors:
-            say("  WARNING: rollback incomplete; recovery files retained: %s" % "; ".join(rollback_errors))
-        else:
-            for backup in backups.values():
-                try:
-                    os.remove(backup)
-                except OSError:
-                    pass
+                if had:
+                    os.replace(dst + ".prev", dst)  # puts the old file back over the new one
+                elif os.path.exists(dst):
+                    os.remove(dst)
+            except OSError as re_:
+                errors.append("%s: %s" % (dst, re_))
         try:
-            os.remove(idp + ".new")
+            if old_id is None:
+                os.remove(idp)
+            else:
+                with open(idp, "w") as f:
+                    f.write(old_id)
         except OSError:
             pass
-        raise UpdateError("installation failed; " + ("rollback incomplete, see .rollback files" if rollback_errors else "previous boot files restored"))
-    # Commit succeeded; transaction backups are no longer needed.
-    for backup in backups.values():
-        try:
-            os.remove(backup)
-        except OSError:
-            pass
+        _cleanup(bootdir)
+        os.sync()
+        raise UpdateError("installation failed (%s); %s" % (e, "rollback incomplete, check the *.prev files" if errors else "previous boot files restored"))
     os.sync()
     return "installed", uid
 

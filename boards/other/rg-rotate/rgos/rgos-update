@@ -127,8 +127,9 @@ def mount_dev(dev, mnt, ro):
 
 
 def is_boot(d):
+    # build.sh accepts extlinux/extlinux.conf or a bare extlinux.conf in the root, so the updater must too
     return (os.path.isfile(os.path.join(d, "SYSTEM")) and os.path.isfile(os.path.join(d, "rgos-initrd.cpio"))
-            and os.path.isfile(os.path.join(d, "extlinux", "extlinux.conf")))
+            and (os.path.isfile(os.path.join(d, "extlinux", "extlinux.conf")) or os.path.isfile(os.path.join(d, "extlinux.conf"))))
 
 
 def find_boot(parts):
@@ -146,8 +147,19 @@ def find_boot(parts):
     return None
 
 
+def _subdir(base, name):
+    """Case-insensitive lookup of a sub-folder (FAT/exFAT folders may be called Update, UPDATE, ...)."""
+    try:
+        return next((os.path.join(base, e) for e in os.listdir(base) if e.lower() == name and os.path.isdir(os.path.join(base, e))), None)
+    except OSError:
+        return None
+
+
 def find_update(parts):
-    """First partition with update/*.tar -> (dev, mountpoint, we_mounted_it, update_dir, tar_path), newest name wins."""
+    """First partition with update/*.tar (or roms/update/*.tar) -> (dev, mountpoint, we_mounted_it, update_dir, tar_path), newest name wins.
+
+    roms/update matters when there is no ROMS partition: rgos-session then bind-mounts /boot/roms on /media/roms and creates
+    /media/roms/update there, i.e. <boot partition>/roms/update."""
     for dev in parts:
         mp = mounted_at(dev)
         ours = mp is None
@@ -155,13 +167,21 @@ def find_update(parts):
             mp = os.path.join(RUN, "src-" + os.path.basename(dev))
             if not mount_dev(dev, mp, True):
                 continue
-        try:
-            d = next((os.path.join(mp, e) for e in os.listdir(mp) if e.lower() == UPD_DIR and os.path.isdir(os.path.join(mp, e))), None)
-            tars = sorted(f for f in os.listdir(d) if TAR_RE.search(f) and not f.startswith(".") and os.path.isfile(os.path.join(d, f))) if d else []
-        except OSError:
-            d, tars = None, []
-        if tars:
-            return dev, mp, ours, d, os.path.join(d, tars[-1])
+        found = None
+        roms = _subdir(mp, "roms")
+        for base in (mp, roms):
+            d = _subdir(base, UPD_DIR) if base else None
+            if not d:
+                continue
+            try:
+                tars = sorted(f for f in os.listdir(d) if TAR_RE.search(f) and not f.startswith(".") and os.path.isfile(os.path.join(d, f)))
+            except OSError:
+                tars = []
+            if tars:
+                found = (dev, mp, ours, d, os.path.join(d, tars[-1]))
+                break
+        if found:
+            return found
         if ours:
             sh(["umount", mp])
     return None
@@ -257,6 +277,23 @@ def _cleanup(bootdir):
                 pass
 
 
+def ensure_writable(bootdir):
+    """The initramfs may have had to mount the FAT partition read-only (dirty flag). Try to fix that, else say so clearly."""
+    probe = os.path.join(bootdir, ".rgos-w")
+    for attempt in (0, 1):
+        try:
+            with open(probe, "w") as f:
+                f.write("x")
+            os.remove(probe)
+            return
+        except OSError as e:
+            if attempt == 0:
+                sh(["mount", "-o", "remount,rw", bootdir])
+                continue
+            raise UpdateError("boot partition is not writable (%s). Put the card in a PC and let it repair the FAT partition "
+                              "(Windows: right-click > Properties > Tools > Check), then try again" % e)
+
+
 def apply_tar(tar, bootdir):
     """Install one update tar. Returns 'installed' or 'same'; raises UpdateError (boot partition untouched until all is verified)."""
     tf, man, payload = read_tar(tar)
@@ -267,6 +304,7 @@ def apply_tar(tar, bootdir):
         cur = ""
     if cur == uid:
         return "same", uid
+    ensure_writable(bootdir)
     _cleanup(bootdir)
     need = sum(m.size for m in payload.values()) + MARGIN
     free = lambda: (lambda st: st.f_bavail * st.f_frsize)(os.statvfs(bootdir))
@@ -277,7 +315,9 @@ def apply_tar(tar, bootdir):
             except OSError:
                 pass
     if free() < need:
-        raise UpdateError("not enough free space on the boot partition (%d MiB needed, %d MiB free)" % (need >> 20, free() >> 20))
+        raise UpdateError("not enough free space on the boot partition: the new files are staged next to the old ones, so about "
+                          "%d MiB must be free and only %d MiB is. Delete big files in the FAT partition's root (rgos-bootinfo.txt, "
+                          "*.prev, *.new, extlinux.conf.stock, old logs, ROMs in roms/) and try again" % ((need + (1 << 20) - 1) >> 20, free() >> 20))
     try:
         for name, m in payload.items():
             say("  staging %s (%d KiB)" % (name, m.size >> 10))
