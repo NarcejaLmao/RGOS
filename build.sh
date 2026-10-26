@@ -1,394 +1,509 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# rgos: Debian + RG OS launcher for Anbernic handhelds, built on top of the stock ROCKNIX SD image of each device.
+#
+#   rg-rotate   Anbernic RG Rotate  (Unisoc T618)   GPT, U-Boot found by the SPL through the "uboot" partition
+#   rg34xxsp    Anbernic RG34XXSP   (Allwinner H700) MBR, U-Boot in front of partition 1 (stock ROCKNIX H700 image)
+#
+# For each device the stock ROCKNIX image is downloaded and ONLY its SYSTEM squashfs is replaced with a bare-bones Debian arm64 that
+# starts the RG OS menu (white screen only as a fallback). The partition table, bootloader area, kernel and device tree(s) are left
+# byte-for-byte alone (RG34XXSP: dtb.img is copied from the stock device_trees/ folder, exactly what the ROCKNIX install guide tells you to
+# do by hand). ROCKNIX's init (which waits 60 s and prints "NEVER TOUCH boot=...") is bypassed by a tiny RG OS initramfs (initramfs/)
+# loaded through extlinux.conf; extlinux.conf.stock keeps the original.
+#
+# Run as root on Debian/Ubuntu (WSL2 is fine). A device is ALWAYS required; running it with no argument only prints this help:
+#   ./build.sh rg34xxsp            SD card image for the RG34XXSP        -> out/rg34xxsp-rgos.img
+#   ./build.sh rg-rotate           SD card image for the RG Rotate       -> out/rg-rotate-rgos.img
+#   ./build.sh all                 every device above, one after the other
+#   ./build.sh <device|all> update offline update tar                    -> out/rgos-update-<device>-<id>.tar
+#                                  (copy it to update/ on the ROMS partition and reboot)
+# It re-runs itself through sudo when not root.
+set -euo pipefail
 
-# ./build.sh rg-rotate [image|update]  ->  the Anbernic RG Rotate build (boards/other/rg-rotate/build.sh).
-# It is a separate Debian-based build that needs root (loop devices, debootstrap), so it is re-run through sudo if needed.
-case "${1:-}" in
-  rg-rotate|rg_rotate|rgrotate)
-    shift
-    ROTATE_SH="$ROOT/boards/other/rg-rotate/build.sh"
-    [[ -f "$ROTATE_SH" ]] || { echo "ERROR: $ROTATE_SH not found" >&2; exit 1; }
-    case "${1:-image}" in
-      image|build) rotate_mode=image ;;      # "build" is accepted as an alias for "image"
-      update)      rotate_mode=update ;;
-      help|-h|--help)
-        echo "Usage: $0 rg-rotate [image|update]"
-        echo "  image   (default) full SD card image -> boards/other/rg-rotate/out/rg-rotate-rgos.img"
-        echo "  update  offline update tar           -> boards/other/rg-rotate/out/rgos-update-<id>.tar"
-        echo "Runs as root (uses sudo when needed). Env: ROCKNIX_URL, DEBIAN_SUITE, UPDATE_ID, UPDATE_EXTLINUX=1, PSX_REPO=none, ..."
-        exit 0 ;;
-      *) echo "Unknown rg-rotate mode '$1' (use image or update)" >&2; exit 2 ;;
-    esac
-    if [[ $EUID -ne 0 ]]; then
-      command -v sudo >/dev/null || { echo "ERROR: the RG Rotate build needs root; run it as root or install sudo" >&2; exit 1; }
-      exec sudo -E bash "$ROTATE_SH" "$rotate_mode"
-    fi
-    exec bash "$ROTATE_SH" "$rotate_mode"
-    ;;
-esac
-BR_DIR="${BUILDROOT_DIR:-$ROOT/buildroot}"
-ASSET_DIR="${ROCKNIX_ASSET_DIR:-$ROOT/assets/rocknix}"
-BOOT_DIR="${ROCKNIX_BOOT_DIR:-$ASSET_DIR/extracted/boot-partition}"
-OUT_DIR="${RGOS_OUT_DIR:-$ROOT/output}"
-IMAGE="${RGOS_IMAGE:-$OUT_DIR/rgos-rg34xxsp.img}"
-RGOS_BUILD_ID="${RGOS_BUILD_ID:-$(date -u +%Y%m%d-%H%M%S)}"
-UPDATE_TAR="${RGOS_UPDATE_TAR:-$OUT_DIR/rgos-update-$RGOS_BUILD_ID.tar}"
-BOOT_SIZE_MIB="${RGOS_BOOT_SIZE_MIB:-512}"
-ROOT_MIB="${RGOS_ROOT_MIB:-1}"            # size of the ext4 partition (partition 2): a bare 1 MiB filesystem, nothing is stored on it
-# The exFAT ROMS partition (partition 3) is NOT in the image: rgos-session creates it on first boot, from the end of
-# partition 2 to the last sector of the card, so it is as big as the card allows.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ALL_DEVICES=(rg-rotate rg34xxsp)
 
 usage() {
-  cat <<USAGE
-Usage: $0 {prepare|fetch-assets|build|image|update|rg-rotate [image|update]|help}
-  rg-rotate  Build the Anbernic RG Rotate image (or update tar) with boards/other/rg-rotate/build.sh; see "$0 rg-rotate help".
-  prepare  Clone Buildroot if missing.
-  fetch-assets  Download ROCKNIX H700 image; stage boot files, DTB and the Allwinner bootloader.
-  build    Download + cross-build RetroArch and the mGBA core with the rootfs, and assemble a whole-disk .img.
-  image    Assemble a .img from the already-built initramfs and staged ROCKNIX boot files.
-  update   Rebuild the rootfs and pack an update .tar (output/rgos-update-<id>.tar). Copy it into the update/ folder of the
-           exFAT/FAT ROMS partition; the device installs it on the next boot. RGOS_SKIP_BUILDROOT=1 re-packs without running
-           Buildroot, RGOS_UPDATE_SLIM=1 leaves the kernel out, RGOS_BUILD_ID=... sets the id.
+  cat <<EOF
+usage: sudo ./build.sh <device> [image|update]
 
-Environment:
-  BUILDROOT_DIR       Buildroot source directory (default: ./buildroot)
-  ROCKNIX_ASSET_DIR   ROCKNIX asset directory (default: ./assets/rocknix)
-  ROCKNIX_BOOT_DIR    Extracted boot partition directory
-  ROCKNIX_IMAGE       Optional original ROCKNIX .img; copies raw bootloader sectors
-  RGOS_IMAGE          Output image path override
-  RGOS_BOOT_LABEL     FAT label of the boot partition (default RGOS)
-  RGOS_ROOT_MIB       Size of the ext4 partition in MiB (default 1, the practical minimum). The exFAT ROMS partition is created
-                      on first boot and fills the rest of the card.
-  RGOS_MODULE_FILTER  Regex of kernel-module paths copied into the initramfs (default includes input, gpu, sound, fs)
-  RGOS_BUILD_ID       Build id stamped into the image / update (default: UTC timestamp)
-USAGE
+  device   rg34xxsp   Anbernic RG34XXSP (Allwinner H700, ROCKNIX-H700 base image)
+           rg-rotate  Anbernic RG Rotate (Unisoc T618, ROCKNIX-T618 base image)
+           all        build every device above
+  image    full SD card image (default)  -> out/<device>-rgos.img
+  update   offline update tar            -> out/rgos-update-<device>-<id>.tar
+
+A device is required: ./build.sh with no argument does nothing but print this text.
+Options (environment): RG34XXSP: H700_RAM=DDR4|DDR3 (default DDR4, must match the console's RAM),
+  RG34XXSP_DTB=sun50i-h700-anbernic-rg34xx-sp[-v2-panel], ROCKNIX_H700_VERSION=<release tag>; any device: ROCKNIX_URL=<image .img.gz>.
+EOF
 }
 
-# Buildroot no longer ships a python-pygame package, so use the official prebuilt pygame wheel for aarch64 (it bundles SDL2,
-# SDL_image/mixer/ttf, freetype, ...) and unpack it into an extra rootfs overlay. Needs the glibc toolchain (manylinux wheel).
-fetch_pygame() {
-  local mk="$BR_DIR/package/python3/python3.mk" pyver dest tmp pkg whl="" abi
-  pyver="$(sed -n 's/^PYTHON3_VERSION_MAJOR *= *\([0-9.]*\).*/\1/p' "$mk" 2>/dev/null | head -n 1)"
-  [[ -n "$pyver" ]] || { echo "ERROR: cannot read the Python version from $mk" >&2; exit 1; }
-  dest="$ROOT/buildroot-external/board/rgos/pygame-overlay/usr/lib/python$pyver/site-packages"
-  if [[ -d "$dest/pygame" ]]; then echo "pygame wheel already unpacked for Python $pyver."; return 0; fi
-  if [[ -n "${RGOS_SKIP_PYGAME:-}" ]]; then
-    echo "WARNING: RGOS_SKIP_PYGAME set - building WITHOUT pygame (the menu will not start). Fix the wheel, then re-run ./build.sh build (the rootfs step is quick)." >&2
-    return 0
-  fi
-  command -v unzip >/dev/null || { echo "ERROR: install unzip" >&2; exit 1; }
-  abi="cp${pyver/./}"
-  tmp="$(mktemp -d)"
-  # 1) A wheel you placed yourself: RGOS_PYGAME_WHEEL=/path/x.whl, or any *.whl in assets/wheels/ matching this Python.
-  if [[ -n "${RGOS_PYGAME_WHEEL:-}" ]]; then whl="$RGOS_PYGAME_WHEEL"
-  else
-    whl="$(ls "$ROOT"/assets/wheels/pygame*-"$abi"-*aarch64*.whl 2>/dev/null | tail -n 1 || true)"
-  fi
-  # 2) Otherwise download one. pygame-ce first: it publishes wheels for newer Pythons (3.13/3.14) that classic pygame lacks.
-  if [[ -z "$whl" ]]; then
-    python3 -m pip --version >/dev/null 2>&1 || { echo "ERROR: install pip: sudo apt install python3-pip" >&2; exit 1; }
-    for pkg in pygame-ce pygame; do
-      echo "Downloading $pkg wheel for aarch64 / CPython $pyver ..."
-      if python3 -m pip download --no-deps --only-binary=:all: --disable-pip-version-check \
-           --platform manylinux2014_aarch64 --platform manylinux_2_17_aarch64 --platform manylinux_2_28_aarch64 \
-           --python-version "$pyver" --implementation cp --abi "$abi" -d "$tmp" "$pkg" >/dev/null 2>"$tmp/err"; then
-        whl="$(ls "$tmp"/*.whl | head -n 1)"; break
-      fi
-      tail -n 3 "$tmp/err" >&2
-    done
-  fi
-  if [[ -z "$whl" || ! -f "$whl" ]]; then
-    echo "ERROR: no aarch64 pygame wheel for Python $pyver." >&2
-    echo "       Options: (a) download pygame_ce-*-$abi-*manylinux*aarch64.whl by hand from https://pypi.org/project/pygame-ce/#files" >&2
-    echo "                    and put it in $ROOT/assets/wheels/ (or RGOS_PYGAME_WHEEL=/path/to.whl);" >&2
-    echo "                (b) use a Buildroot release with Python 3.12/3.13;" >&2
-    echo "                (c) RGOS_SKIP_PYGAME=1 ./build.sh build   to compile everything else now (menu will lack pygame)." >&2
-    rm -rf "$tmp"; exit 1
-  fi
-  rm -rf "$ROOT/buildroot-external/board/rgos/pygame-overlay"; mkdir -p "$dest"
-  unzip -q -o "$whl" -d "$dest"
-  rm -rf "$tmp"
-  echo "Unpacked $(basename "$whl") into $dest"
-}
-
-# Tools rgos-session needs on the device to create + format the exFAT ROMS partition on first boot (and to log diagnostics).
-REQUIRED_TARGET_TOOLS="sfdisk partx mkfs.exfat blkid"
-
-# Print the REQUIRED_TARGET_TOOLS that are NOT inside the given rootfs.cpio.gz (empty output = all present).
-rootfs_missing_tools() {
-  local cpio_gz="$1" listing t missing=""
-  command -v cpio >/dev/null || { echo "ERROR: install cpio" >&2; exit 1; }
-  listing="$(gzip -dc "$cpio_gz" | cpio -t --quiet 2>/dev/null || true)"
-  for t in $REQUIRED_TARGET_TOOLS; do
-    grep -Eq "(^|/)(usr/)?s?bin/${t//./\\.}\$" <<<"$listing" || missing="$missing $t"
-  done
-  echo "${missing# }"
-}
-
-# Print the emulation files that are NOT inside the given rootfs.cpio.gz (empty output = RetroArch and the GBA core are there).
-# Buildroot silently drops defconfig lines it does not understand, so check the result instead of trusting the config.
-EMU_FILES="usr/bin/retroarch usr/lib/libretro/mgba_libretro.so"
-rootfs_missing_emu() {
-  local listing f missing=""
-  listing="$(gzip -dc "$1" | cpio -t --quiet 2>/dev/null || true)"
-  for f in $EMU_FILES; do
-    grep -Eq "(^|/)${f//./\\.}\$" <<<"$listing" || missing="$missing $f"
-  done
-  echo "${missing# }"
-}
-
-# Stage the files that live on the FAT boot partition (kernel, launcher initramfs + modules, DTB, extlinux.conf) in
-# $OUT_DIR/boot-stage and point BOOT_DIR at it. Used by both the full image and the update tar.
-stage_boot() {
-  # --- Stage the boot files: ROCKNIX kernel + RG OS initramfs (launcher) + RG OS device tree + our own extlinux.conf ---
-  local initrd stage="$OUT_DIR/boot-stage"
-  initrd="$OUT_DIR/rgos-initrd.gz"
-  [[ -f "$BR_DIR/output/images/rootfs.cpio.gz" ]] || { echo "ERROR: no initramfs ($BR_DIR/output/images/rootfs.cpio.gz). Run ./build.sh build." >&2; exit 1; }
-  local miss; miss="$(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")"
-  [[ -z "$miss" ]] || { echo "ERROR: the initramfs ($BR_DIR/output/images/rootfs.cpio.gz) lacks: $miss" >&2
-    echo "       Without them the exFAT ROMS partition cannot be created on first boot. Run ./build.sh build (not 'image' / RGOS_SKIP_BUILDROOT=1)," >&2
-    echo "       and check that the BR2_PACKAGE_UTIL_LINUX_* / BR2_PACKAGE_EXFATPROGS / BR2_PACKAGE_COREUTILS options survive 'make menuconfig'." >&2; exit 1; }
-  local emu; emu="$(rootfs_missing_emu "$BR_DIR/output/images/rootfs.cpio.gz")"
-  if [[ -n "$emu" ]]; then
-    echo "ERROR: the initramfs has no emulator: missing $emu" >&2
-    echo "       Buildroot dropped the RetroArch / mGBA options. Their state in $BR_DIR/.config:" >&2
-    grep -E 'BR2_PACKAGE_(RETROARCH|RGOS_LIBRETRO_MGBA|MESA3D|SDL2|LIBDRM)\b|BR2_PACKAGE_(RETROARCH|RGOS_LIBRETRO_MGBA)[ =]' "$BR_DIR/.config" >&2 || true
-    echo "       Re-run: make -C $BR_DIR BR2_EXTERNAL=$ROOT/buildroot-external rgos_rg34xxsp_defconfig 2>&1 | grep -iE 'warn|unknown|error'" >&2
-    echo "       and: make -C $BR_DIR BR2_EXTERNAL=$ROOT/buildroot-external menuconfig  (search RETROARCH to see which dependency is unmet)." >&2
-    exit 1
-  fi
-  cp -f "$BR_DIR/output/images/rootfs.cpio.gz" "$initrd"
-  # ROCKNIX kernel modules (input/ADC/PWM/uinput drivers) go in as a second, concatenated initramfs archive.
-  if [[ -d "$ASSET_DIR/modules" ]] && find "$ASSET_DIR/modules" -name '*.ko*' -print -quit | grep -q .; then
-    command -v cpio >/dev/null || { echo "ERROR: install cpio" >&2; exit 1; }
-    local mtmp="$OUT_DIR/modules-cpio"; rm -rf "$mtmp"; mkdir -p "$mtmp/lib/modules"
-    local filt="${RGOS_MODULE_FILTER:-kernel/(drivers/(input|iio|pwm|gpio|mfd|misc|hid|gpu|devfreq)|sound|lib|crypto|fs/(exfat|fat|nls))/}"
-    local ver
-    for ver in "$ASSET_DIR"/modules/*/; do
-      ver="$(basename "$ver")"; mkdir -p "$mtmp/lib/modules/$ver"
-      cp -a "$ASSET_DIR/modules/$ver"/modules.* "$mtmp/lib/modules/$ver/" 2>/dev/null || true
-      ( cd "$ASSET_DIR/modules/$ver" && find . -type f -name '*.ko*' | grep -E "$filt" | cpio -pdm --quiet "$mtmp/lib/modules/$ver" )
-    done
-    ( cd "$mtmp" && find . | cpio -o -H newc --quiet | gzip -9 ) > "$OUT_DIR/rgos-modules.cpio.gz"
-    cat "$OUT_DIR/rgos-modules.cpio.gz" >> "$initrd"
-    echo "Added $(find "$mtmp" -name '*.ko*' | wc -l) kernel modules to the initramfs."
-  else
-    echo "WARNING: no kernel modules in $ASSET_DIR/modules - run ./build.sh fetch-assets (needs squashfs-tools). Buttons will not work." >&2
-  fi
-  rm -rf "$stage"; mkdir -p "$stage/extlinux"
-  python3 - "$BOOT_DIR" "$stage" <<'PYEOF'
-import os, re, shutil, sys
-src, stage = sys.argv[1:3]
-kern = next((f for f in ("KERNEL", "Image") if os.path.isfile(os.path.join(src, f))), None)
-if not kern:
-    sys.exit("ERROR: no KERNEL/Image in the ROCKNIX boot files: " + src)
-shutil.copy2(os.path.join(src, kern), os.path.join(stage, kern))
-# keep ROCKNIX's extra kernel arguments for this hardware, minus its own root/boot handling (same as the RG OS image builder)
-extra = ""
-for r, _, fs in os.walk(src):
-    for f in fs:
-        if f.lower() == "extlinux.conf":
-            for l in open(os.path.join(r, f), errors="replace"):
-                m = re.match(r"\s*append\s+(.*)", l, re.I)
-                if m:
-                    keep = [t for t in m.group(1).split() if not re.match(r"(boot=|disk=|quiet$|root=|rootwait$|rw$|ro$|console=|fsck|rdinit=)", t)]
-                    extra = " ".join(keep)
-                    break
-open(os.path.join(stage, "extlinux", "extlinux.conf"), "w").write(
-    "default rgos\nlabel rgos\n  linux /%s\n  initrd /rgos-initrd.gz\n  fdt /rgos.dtb\n"
-    "  append rdinit=/init rw console=tty0 quiet loglevel=3 audit=0 vt.global_cursor_default=0 %s\n" % (kern, extra))
-print(open(os.path.join(stage, "extlinux", "extlinux.conf")).read())
-PYEOF
-  cp -f "$initrd" "$stage/rgos-initrd.gz"
-  # Device tree: RG OS DTB with the buttons moved to the standard gpio-keys driver (the ROCKNIX joypad driver does not bind)
-  local dtb="${RGOS_DTB:-$ROOT/dtb/sun50i-h700-anbernic-rg34xx-sp.dtb}"
-  [[ -f "$dtb" ]] || { echo "ERROR: missing DTB: $dtb" >&2; exit 1; }
-  if [[ "${RGOS_JOYPAD:-gpio}" == gpio ]]; then python3 "$ROOT/tools/dtb_gpiokeys.py" "$dtb" "$stage/rgos.dtb"; else cp -f "$dtb" "$stage/rgos.dtb"; fi
-  BOOT_DIR="$stage"
-  printf '%s\n' "$RGOS_BUILD_ID" > "$stage/rgos-update.id"
-}
-
-assemble_image() {
-  local bootfs boot_start boot_sectors root_start root_sectors total_sectors label bl_bytes bl_sectors
-  [[ -d "$BOOT_DIR" ]] || { echo "ERROR: ROCKNIX boot files not found: $BOOT_DIR (run ./build.sh fetch-assets)" >&2; exit 1; }
-  for t in sfdisk mkfs.vfat mcopy mkfs.ext4; do
-    command -v "$t" >/dev/null || { echo "ERROR: missing host tool: $t (apt install fdisk dosfstools mtools e2fsprogs)" >&2; exit 1; }
-  done
-
-  # --- Allwinner bootloader: MANDATORY. Without the eGON.BT0 SPL at byte 8192 the H700 BROM finds nothing to run and
-  # the device stays completely dead (no LEDs, no screen).
-  local blfile="$ASSET_DIR/bootloader.bin" upstart="$ASSET_DIR/first-partition-start"
-  if [[ -n "${ROCKNIX_IMAGE:-}" && -f "$ROCKNIX_IMAGE" ]]; then
-    local fs; fs="$(sfdisk -d "$ROCKNIX_IMAGE" | sed -n 's/.*start= *\([0-9]*\),.*/\1/p' | sort -n | head -n 1)"
-    blfile="$OUT_DIR/bootloader.bin"; mkdir -p "$OUT_DIR"
-    dd if="$ROCKNIX_IMAGE" of="$blfile" bs=512 skip=16 count=$((fs - 16)) status=none
-    upstart="$OUT_DIR/first-partition-start"; echo "$fs" > "$upstart"
-  fi
-  [[ -s "$blfile" ]] || { echo "ERROR: no Allwinner bootloader ($blfile). Run ./build.sh fetch-assets (or set ROCKNIX_IMAGE). An image without it will NOT power on." >&2; exit 1; }
-  [[ "$(dd if="$blfile" bs=1 skip=4 count=8 status=none)" == "eGON.BT0" ]] || { echo "ERROR: $blfile has no eGON.BT0 SPL header." >&2; exit 1; }
-  bl_bytes="$(stat -c %s "$blfile")"
-  bl_sectors=$(( (bl_bytes + 511) / 512 ))
-
-  # Boot partition starts where upstream's does (never below 2048, never inside the bootloader).
-  boot_start="$(cat "$upstart" 2>/dev/null || echo 2048)"
-  (( boot_start >= 2048 )) || boot_start=2048
-  (( boot_start >= 16 + bl_sectors )) || boot_start=$(( ((16 + bl_sectors + 2047) / 2048) * 2048 ))
-  stage_boot
-
-  # Size the FAT partition from what is really in it (ROCKNIX keeps its multi-hundred-MB SYSTEM image there).
-  local boot_bytes need_mib
-  boot_bytes="$(du -sb --apparent-size "$BOOT_DIR" | cut -f1)"
-  need_mib=$(( (boot_bytes * 105 / 100 + 1048575) / 1048576 + 64 ))
-  if (( need_mib > BOOT_SIZE_MIB )); then
-    echo "Boot files need $((boot_bytes / 1048576)) MiB; growing FAT partition from ${BOOT_SIZE_MIB} to ${need_mib} MiB."
-    BOOT_SIZE_MIB=$need_mib
-  fi
-  boot_sectors=$((BOOT_SIZE_MIB * 2048))
-  root_start=$(( ((boot_start + boot_sectors + 2047) / 2048) * 2048 ))
-  root_sectors=$(( ROOT_MIB * 2048 ))
-  total_sectors=$(( root_start + root_sectors ))
-
-  label="${RGOS_BOOT_LABEL:-RGOS}"        # FAT volume label of the boot partition (max 11 chars); no longer copied from ROCKNIX
-  mkdir -p "$OUT_DIR"
-  bootfs="$OUT_DIR/rgos-boot-partition.fat"
-  echo "Creating FAT boot partition (${BOOT_SIZE_MIB} MiB, label $label)..."
-  rm -f "$bootfs"; truncate -s "${BOOT_SIZE_MIB}M" "$bootfs"
-  mkfs.vfat -F 32 -n "$label" "$bootfs" >/dev/null
-  shopt -s dotglob nullglob
-  local files=("$BOOT_DIR"/*)
-  shopt -u dotglob nullglob
-  ((${#files[@]})) || { echo "ERROR: boot partition directory is empty: $BOOT_DIR" >&2; exit 1; }
-  mcopy -i "$bootfs" -s "${files[@]}" ::/
-
-  # Minimal ext4 (partition 2): no journal, no reserved blocks, 16 inodes. The system runs from the initramfs, so it holds nothing.
-  local rootimg="$OUT_DIR/rgos-root-partition.ext4"
-  echo "Creating minimal ext4 partition (${ROOT_MIB} MiB, label RGOS_ROOT)..."
-  rm -f "$rootimg"; truncate -s "${ROOT_MIB}M" "$rootimg"
-  mkfs.ext4 -q -b 1024 -O ^has_journal,^resize_inode,^huge_file,^metadata_csum -N 16 -m 0 -L RGOS_ROOT "$rootimg"
-
-  echo "Creating whole-disk image: $IMAGE"
-  rm -f "$IMAGE"
-  truncate -s $((total_sectors * 512)) "$IMAGE"
-  sfdisk "$IMAGE" <<PARTITIONS
-label: dos
-unit: sectors
-
-start=$boot_start, size=$boot_sectors, type=c, bootable
-start=$root_start, size=$root_sectors, type=83
-PARTITIONS
-  # Bootloader goes at byte 8192 (sector 16), AFTER the partition table is written and below the first partition.
-  dd if="$blfile" of="$IMAGE" bs=512 seek=16 conv=notrunc status=none
-  dd if="$bootfs" of="$IMAGE" bs=512 seek="$boot_start" conv=notrunc status=none
-  dd if="$rootimg" of="$IMAGE" bs=512 seek="$root_start" conv=notrunc status=none
-  sync
-
-  # Final sanity check on the finished image.
-  [[ "$(dd if="$IMAGE" bs=1 skip=8196 count=8 status=none)" == "eGON.BT0" ]] || { echo "ERROR: verification failed: no SPL at 8 KiB in $IMAGE" >&2; exit 1; }
-  [[ "$(dd if="$IMAGE" bs=1 skip=510 count=2 status=none | od -An -tx1 | tr -d ' \n')" == "55aa" ]] || { echo "ERROR: verification failed: bad MBR signature" >&2; exit 1; }
-  echo
-  echo "Whole-disk image created: $IMAGE"
-  ls -lh "$IMAGE"
-  echo "Layout: MBR; bootloader at 8 KiB (${bl_bytes} bytes); FAT '$label' at sector $boot_start; ext4 (${ROOT_MIB} MiB) at sector $root_start."
-  echo "       exFAT 'ROMS' is created on first boot (rest of the card, from sector $(( ((root_start + root_sectors + 2047) / 2048) * 2048 )) on)."
-  return 0
-}
-
-# Buildroot silently drops config lines whose dependencies are not met, which is how a build ends up with no RetroArch.
-# Stop right after the defconfig if RetroArch / mGBA did not survive, and say which dependency is missing.
-ensure_emu_config() {
-  local o bad=""
-  for o in BR2_PACKAGE_RGOS_RETROARCH BR2_PACKAGE_RGOS_LIBRETRO_MGBA BR2_PACKAGE_MESA3D_GBM BR2_PACKAGE_SDL2 BR2_PACKAGE_ALSA_LIB; do
-    grep -q "^$o=y" "$BR_DIR/.config" || bad="$bad $o"
-  done
-  [[ -z "$bad" ]] || { echo "ERROR: Buildroot dropped these options from $BR_DIR/.config:$bad" >&2
-    echo "       Check: make -C $BR_DIR BR2_EXTERNAL=$ROOT/buildroot-external menuconfig  (External options > rgos-retroarch shows what it needs)." >&2; exit 1; }
-}
-
-# Parallel jobs: LLVM (built for Mesa/Panfrost) needs ~4 GiB RAM per compiler process (the biggest LLVM files peak even higher), and the Linux OOM killer ends
-# the build ("g++: Killed signal terminated program cc1plus") when too many run at once. Default: min(cpus, RAM/4GiB).
-# Override with RGOS_JOBS=N.
-build_jobs() {
-  local cpus mem_kb jobs
-  [[ -n "${RGOS_JOBS:-}" ]] && { echo "$RGOS_JOBS"; return; }
-  cpus="$(nproc)"; mem_kb="$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-  jobs=$(( mem_kb / 4194304 )); (( jobs >= 1 )) || jobs=1; (( jobs <= cpus )) || jobs=$cpus
-  echo "$jobs"
-}
-
-buildroot_make() {
-    # WSL appends Windows directories ("/mnt/c/Program Files/...") to PATH; Buildroot refuses any PATH with whitespace.
-    CLEAN_PATH=""
-    IFS=: read -ra _P <<< "$PATH"
-    for _d in "${_P[@]}"; do
-      case "$_d" in *[[:space:]]*|/mnt/[a-z]/*|"") continue ;; esac
-      CLEAN_PATH="${CLEAN_PATH:+$CLEAN_PATH:}$_d"
-    done
-    export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${CLEAN_PATH:+:$CLEAN_PATH}"
-    fetch_pygame
-    free -h | sed -n 1,3p; echo "Using $(build_jobs) parallel jobs (RGOS_JOBS=N to change; low RAM / WSL: see docs/GBA.md)."
-    make -C "$BR_DIR" BR2_EXTERNAL="$ROOT/buildroot-external" rgos_rg34xxsp_defconfig
-    ensure_emu_config
-    # Download the RetroArch and mGBA sources from GitHub now, so a network problem fails here and not an hour into the build.
-    echo "Downloading RetroArch and the mGBA core ..."
-    make -C "$BR_DIR" rgos-retroarch-source rgos-libretro-mgba-source
-    make -C "$BR_DIR" BR2_JLEVEL="$(build_jobs)" -j"$(build_jobs)"
-    # A package built before it was in the config (or with other options) is not rebuilt by Buildroot: force it.
-    if [[ -n "$(rootfs_missing_emu "$BR_DIR/output/images/rootfs.cpio.gz")" ]]; then
-      echo "Initramfs has no RetroArch / mGBA ($(rootfs_missing_emu "$BR_DIR/output/images/rootfs.cpio.gz")); rebuilding rgos-retroarch and rgos-libretro-mgba ..."
-      make -C "$BR_DIR" rgos-libretro-mgba-dirclean rgos-retroarch-dirclean
-      make -C "$BR_DIR" BR2_JLEVEL="$(build_jobs)" -j"$(build_jobs)"
-    fi
-    # Buildroot does not notice changed per-package options (or a package that was built before the defconfig gained it):
-    # if the first-boot tools are not in the image, wipe those packages' build dirs and build again.
-    if [[ -n "$(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")" ]]; then
-      echo "Initramfs is missing first-boot tools ($(rootfs_missing_tools "$BR_DIR/output/images/rootfs.cpio.gz")); rebuilding util-linux, exfatprogs, coreutils, busybox ..."
-      make -C "$BR_DIR" util-linux-dirclean exfatprogs-dirclean coreutils-dirclean busybox-dirclean
-      make -C "$BR_DIR" BR2_JLEVEL="$(build_jobs)" -j"$(build_jobs)"
-    fi
-}
-
-# Unzipping on Windows (or working under /mnt/c) drops the executable bits; restore them for everything that has to run
-# on the device (copied by the Buildroot overlay) or in the build.
-fix_modes() {
-  local o="$ROOT/buildroot-external/board/rgos/overlay"
-  chmod +x "$o/usr/bin/systemctl" "$o/opt/rgos/rgos-session" "$o/opt/rgos/rgos-sticks" "$o/opt/rgos/rgos-update" "$o/opt/rgos/rgos-launch" \
-           "$o/opt/rgos/menu.py" "$ROOT"/build.sh "$ROOT"/scripts/*.sh "$ROOT"/tools/*.py 2>/dev/null || true
-}
-fix_modes
-
-case "${1:-help}" in
-  fetch-assets)
-    bash "$ROOT/scripts/fetch-rocknix-assets.sh"
-    ;;
-  prepare)
-    if [[ ! -d "$BR_DIR" ]]; then
-      git clone https://github.com/buildroot/buildroot.git "$BR_DIR"
-    else
-      echo "Using existing Buildroot: $BR_DIR"
-    fi
-    echo "Buildroot source prepared. RetroArch and mGBA are built from source by './build.sh build' (downloaded from GitHub then)."
-    ;;
-  build)
-    [[ -d "$BR_DIR" ]] || { echo "Buildroot not found. Run ./build.sh prepare or set BUILDROOT_DIR." >&2; exit 1; }
-    buildroot_make
-    [[ -s "$ASSET_DIR/bootloader.bin" && -d "$BOOT_DIR" && -d "$ASSET_DIR/modules" ]] || bash "$ROOT/scripts/fetch-rocknix-assets.sh"
-    assemble_image
-    ;;
-  image)
-    [[ ( -s "$ASSET_DIR/bootloader.bin" && -d "$ASSET_DIR/modules" ) || -n "${ROCKNIX_IMAGE:-}" ]] || bash "$ROOT/scripts/fetch-rocknix-assets.sh"
-    assemble_image
-    ;;
-  update)
-    [[ -d "$BR_DIR" ]] || { echo "Buildroot not found. Run ./build.sh prepare or set BUILDROOT_DIR." >&2; exit 1; }
-    [[ -n "${RGOS_SKIP_BUILDROOT:-}" ]] || buildroot_make
-    [[ -d "$BOOT_DIR" && -d "$ASSET_DIR/modules" ]] || bash "$ROOT/scripts/fetch-rocknix-assets.sh"
-    stage_boot
-    python3 "$ROOT/tools/mkupdate.py" "$BOOT_DIR" "$UPDATE_TAR" --id "$RGOS_BUILD_ID" \
-      --device "$(tr -d '[:space:]' < "$ROOT/buildroot-external/board/rgos/overlay/etc/rgos-device")" ${RGOS_UPDATE_SLIM:+--no-kernel}
-    echo
-    echo "Copy $UPDATE_TAR into the update/ folder on the ROMS (exFAT) partition of the SD card and boot the device."
-    ;;
-  help|-h|--help) usage ;;
-  *) usage >&2; exit 2 ;;
+# ---- what to build: parsed (and, if it is wrong, rejected) BEFORE anything else happens: no sudo, no download, no file is touched
+DEVICE_ARG="$(printf '%s' "${1:-}" | tr 'A-Z_' 'a-z-')"
+MODE="${2:-image}"; [[ "$MODE" == "build" ]] && MODE=image      # "build" is accepted as an alias for "image"
+case "$DEVICE_ARG" in
+  rg34xxsp|rg34xx-sp)  DEVICE_ARG=rg34xxsp ;;
+  rg-rotate|rgrotate)  DEVICE_ARG=rg-rotate ;;
+  all)                 ;;
+  "")                  usage; exit 1 ;;
+  *)                   echo "unknown device '${1}'" >&2; echo >&2; usage >&2; exit 1 ;;
 esac
+[[ "$MODE" == "image" || "$MODE" == "update" ]] || { echo "unknown mode '${2}' (use image or update)" >&2; echo >&2; usage >&2; exit 1; }
+
+if [[ $EUID -ne 0 ]]; then
+  command -v sudo >/dev/null || { echo "ERROR: this build needs root; run it as root or install sudo" >&2; exit 1; }
+  exec sudo -E bash "${BASH_SOURCE[0]}" "$DEVICE_ARG" "$MODE"
+fi
+
+# ---- all: run this script once per device (separate work directories, same update id), then report
+if [[ "$DEVICE_ARG" == "all" ]]; then
+  export UPDATE_ID="${UPDATE_ID:-$(date +%Y%m%d-%H%M%S)}"
+  failed=()
+  for d in "${ALL_DEVICES[@]}"; do
+    echo; echo "################ building $d ($MODE) ################"
+    bash "${BASH_SOURCE[0]}" "$d" "$MODE" || failed+=("$d")
+  done
+  echo
+  if (( ${#failed[@]} )); then echo "!! build FAILED for: ${failed[*]}" >&2; exit 1; fi
+  echo "All devices built: ${ALL_DEVICES[*]} (output in $HERE/out)"
+  exit 0
+fi
+DEVICE="$DEVICE_ARG"
+
+# ---- device profile -------------------------------------------------------------------------------------------------------------
+#   PTABLE       partition table of the stock image: gpt | dos
+#   BASE_URL     default stock ROCKNIX image (override: ROCKNIX_URL)
+case "$DEVICE" in
+  rg-rotate)
+    DEVICE_DESC="Anbernic RG Rotate (Unisoc T618)"
+    PTABLE=gpt
+    BASE_URL="https://github.com/beebono/distribution/releases/download/beta-20260818/ROCKNIX-T618.aarch64-20260818.img.gz"
+    ;;
+  rg34xxsp)
+    DEVICE_DESC="Anbernic RG34XXSP (Allwinner H700)"
+    PTABLE=dos
+    # The H700 ROCKNIX release ships one image per RAM type (the U-Boot/SPL in front of partition 1 differs); both contain the device
+    # trees of every H700 console. The RG34XXSP is a DDR4 (LPDDR4) console; use H700_RAM=DDR3 only if your unit really has DDR3.
+    H700_RAM="${H700_RAM:-DDR4}"
+    [[ "$H700_RAM" == "DDR4" || "$H700_RAM" == "DDR3" ]] || { echo "H700_RAM must be DDR4 or DDR3" >&2; exit 1; }
+    ROCKNIX_H700_VERSION="${ROCKNIX_H700_VERSION:-20261001}"
+    BASE_URL="https://github.com/ROCKNIX/distribution/releases/download/${ROCKNIX_H700_VERSION}/ROCKNIX-H700.aarch64-${ROCKNIX_H700_VERSION}-${H700_RAM}.img.gz"
+    # ROCKNIX boots the device tree named dtb.img in the root of the boot partition (extlinux.conf: FDT /dtb.img). The install guide has you
+    # copy device_trees/<your console>.dtb to dtb.img by hand; the build does exactly that. v2 panel units: RG34XXSP_DTB=sun50i-h700-anbernic-rg34xx-sp-v2-panel
+    RG34XXSP_DTB="${RG34XXSP_DTB:-sun50i-h700-anbernic-rg34xx-sp}"
+    [[ "$RG34XXSP_DTB" =~ ^sun50i-h700-anbernic-rg34xx-sp(-v2-panel)?$ ]] || { echo "RG34XXSP_DTB must be sun50i-h700-anbernic-rg34xx-sp or sun50i-h700-anbernic-rg34xx-sp-v2-panel" >&2; exit 1; }
+    ;;
+esac
+echo "==> Device: $DEVICE_DESC  (mode: $MODE)"
+
+ROCKNIX_URL="${ROCKNIX_URL:-$BASE_URL}"
+DEBIAN_SUITE="${DEBIAN_SUITE:-trixie}"
+DEBIAN_MIRROR="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
+PSX_REPO="${PSX_REPO:-https://github.com/libretro/pcsx_rearmed.git}"   # PlayStation core (pcsx_rearmed, built from source); PSX_REPO=none skips it
+GENESIS_REPO="${GENESIS_REPO:-https://github.com/libretro/Genesis-Plus-GX.git}"   # Genesis Plus GX (Mega Drive / Master System / Game Gear / SG-1000 / Sega CD), built from source only if Debian has no package; GENESIS_REPO=none skips that fallback
+NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
+# Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),
+# with Mesa (Panfrost) for KMS output and SDL2 for input.
+# Also: Nestopia (NES / Famicom, Debian package libretro-nestopia), Snes9x (SNES; Debian non-free, hence --components below) and Beetle WonderSwan (WS / WSC). libretro-beetle-psx is NOT in EMU_PKGS:
+# a package missing from the suite aborts debootstrap, so it is installed best-effort later (PlayStation uses pcsx_rearmed, built from source). The Neo Geo Pocket core has no Debian
+# package: it is compiled from source in the rootfs below (NGP_SRC), or drop a prebuilt aarch64 *_libretro.so into cores/ next to build.sh.
+# Genesis Plus GX is installed best-effort after debootstrap (Debian package libretro-genesisplusgx, else built from GENESIS_REPO), because a package missing from the suite would abort debootstrap.
+# More libretro cores: EXTRA_PKGS="libretro-xyz" sudo -E ./build.sh  (Debian package names)
+EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-nestopia,libretro-beetle-wswan,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
+EXTRA_PKGS="${EXTRA_PKGS:-}"
+# The exFAT ROMS partition (partition 4) is NOT in the image: rgos/rgos-roms creates it on the device's first boot, using all the
+# free space on the card, and formats it exFAT.
+
+WORK="$HERE/work/$DEVICE"; OUT="$HERE/out"; IMG="$OUT/$DEVICE-rgos.img"
+[[ "$MODE" == "update" ]] && IMG="$WORK/update-scratch.img"   # an update build never overwrites a finished SD card image
+ROOTFS="$WORK/rootfs"
+
+need=(debootstrap losetup mksquashfs unsquashfs wget gunzip md5sum python3 readelf sfdisk truncate fatlabel)
+[[ "$MODE" == "image" && "$PTABLE" == gpt ]] && need+=(sgdisk)
+[[ "$(uname -m)" == "aarch64" ]] || need+=(qemu-aarch64-static)
+for t in "${need[@]}"; do
+  command -v "$t" >/dev/null || { echo "Missing tool: $t"
+    echo "apt install debootstrap qemu-user-static binfmt-support squashfs-tools wget gdisk dosfstools"; exit 1; }
+done
+
+mkdir -p "$WORK" "$OUT" "$WORK/mnt"
+RX_GZ="$WORK/$(basename "$ROCKNIX_URL")"; RX_IMG="${RX_GZ%.gz}"
+LOOP=""
+cleanup() { set +e; mountpoint -q "$WORK/mnt" && umount "$WORK/mnt"; [[ -n "$LOOP" ]] && losetup -d "$LOOP"; }
+trap cleanup EXIT
+
+# 1. ROCKNIX image ------------------------------------------------------------
+if [[ ! -f "$RX_IMG" ]]; then
+  [[ -f "$RX_GZ" ]] || { echo "==> Downloading the stock ROCKNIX image for $DEVICE"; echo "    $ROCKNIX_URL"
+    wget -O "$RX_GZ" "$ROCKNIX_URL" || { rm -f "$RX_GZ"; echo "!! download failed. Set ROCKNIX_URL=<url of the stock image .img.gz> (RG34XXSP: or ROCKNIX_H700_VERSION=<release tag>, H700_RAM=DDR4|DDR3), or put the .img.gz into $WORK/ and re-run." >&2; exit 1; }; }
+  gunzip -k -f "$RX_GZ"
+fi
+echo "==> Copying stock image to $IMG"
+cp --sparse=always "$RX_IMG" "$IMG"
+LOOP="$(losetup -Pf --show "$IMG")"
+# The FAT boot partition (partition 1) is labelled ROCKNIX in the stock image; RG OS calls it RGOS.
+echo "==> Renaming the boot partition label ROCKNIX -> RGOS"
+fatlabel "${LOOP}p1" RGOS
+mount "${LOOP}p1" "$WORK/mnt"
+echo "==> Stock boot partition:"; ls -la "$WORK/mnt"
+echo "==> Stock extlinux config (left untouched):"
+cat "$WORK/mnt"/extlinux/extlinux.conf 2>/dev/null || cat "$WORK/mnt"/extlinux.conf 2>/dev/null || echo "(none found)"
+
+# H700: boot the right device tree. dtb.img is what extlinux.conf (FDT /dtb.img) loads; device_trees/ holds one dtb per console.
+if [[ "$DEVICE" == "rg34xxsp" ]]; then
+  DTB_SRC="$WORK/mnt/device_trees/$RG34XXSP_DTB.dtb"
+  [[ -f "$DTB_SRC" ]] || { echo "!! $RG34XXSP_DTB.dtb is not in the stock image's device_trees/ ($(ls "$WORK/mnt/device_trees" 2>/dev/null | tr '\n' ' '))"; exit 1; }
+  echo "==> dtb.img <- device_trees/$RG34XXSP_DTB.dtb"
+  cp -f "$DTB_SRC" "$WORK/mnt/dtb.img"
+  grep -qi '^[[:space:]]*fdt[[:space:]]\+/dtb.img' "$WORK/mnt/extlinux/extlinux.conf" 2>/dev/null \
+    || echo "!! stock extlinux.conf does not load /dtb.img (FDT line differs); check the config printed above"
+fi
+
+OLD_SYS="$WORK/mnt/SYSTEM"
+[[ -f "$OLD_SYS" ]] || { echo "!! No SYSTEM file on the boot partition. Paste 'ls -la' above to me."; exit 1; }
+COMP="$(unsquashfs -s "$OLD_SYS" | awk '/^Compression/ {print $2; exit}')"; COMP="${COMP:-gzip}"
+BSIZE="$(unsquashfs -s "$OLD_SYS" | awk '/^Block size/ {print $3; exit}')"; BSIZE="${BSIZE:-131072}"
+echo "==> Stock SYSTEM uses squashfs compression: $COMP, block size $BSIZE (matching it)"
+
+# 2. harvest kernel modules + firmware from stock SYSTEM -----------------------
+rm -rf "$WORK/system"
+echo "==> Unpacking stock SYSTEM (for modules/firmware)"
+unsquashfs -q -d "$WORK/system" "$OLD_SYS" || echo "   (some unsquashfs errors; continuing)"
+
+# 3. Debian rootfs -------------------------------------------------------------
+rm -rf "$ROOTFS"
+echo "==> debootstrap $DEBIAN_SUITE arm64 minbase"
+debootstrap --arch=arm64 --variant=minbase --foreign --components=main,non-free --include=busybox-static,kmod,python3,python3-pygame,fonts-dejavu-core,e2fsprogs,exfatprogs,fdisk,gdisk,iproute2,iw,wpasupplicant,rfkill,alsa-utils,bluez,dbus,dropbear-bin,openssh-sftp-server,"$EMU_PKGS${EXTRA_PKGS:+,${EXTRA_PKGS// /,}}" \
+  "$DEBIAN_SUITE" "$ROOTFS" "$DEBIAN_MIRROR"
+[[ "$(uname -m)" == "aarch64" ]] || cp "$(command -v qemu-aarch64-static)" "$ROOTFS/usr/bin/"
+# no package may start a daemon (dbus, bluez, dropbear) inside the build chroot
+mkdir -p "$ROOTFS/usr/sbin"; printf '#!/bin/sh\nexit 101\n' > "$ROOTFS/usr/sbin/policy-rc.d"; chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
+chroot "$ROOTFS" /debootstrap/debootstrap --second-stage
+rm -f "$ROOTFS/usr/sbin/policy-rc.d"
+echo "$DEVICE-rgos" > "$ROOTFS/etc/hostname"
+
+# SSH / SFTP (Dropbear): root login with the default password "rgos" (override: ssh-password.txt on the boot partition).
+# Host keys are generated per device on first start (rgos/sshctl.py), never shipped in the image.
+echo "root:rgos" | chroot "$ROOTFS" chpasswd || echo "!! could not set the default root password"
+rm -f "$ROOTFS"/etc/dropbear/dropbear_*_host_key "$ROOTFS"/etc/dropbear/dropbear_*_host_key.pub 2>/dev/null
+# Bluetooth: let controllers that reconnect without a fresh bond (some pads after a power cycle) connect
+mkdir -p "$ROOTFS/etc/bluetooth"
+printf '[General]\nClassicBondedOnly=false\n' > "$ROOTFS/etc/bluetooth/input.conf"
+
+MODDIR="$(find "$WORK/system" -maxdepth 7 -type d -path '*/lib/modules/*' -name '[0-9]*' -prune 2>/dev/null | head -1 || true)"
+if [[ -n "$MODDIR" ]]; then
+  KVER="$(basename "$MODDIR")"; echo "==> Installing modules for $KVER"
+  mkdir -p "$ROOTFS/lib/modules"; cp -a "$MODDIR" "$ROOTFS/lib/modules/$KVER"
+  chroot "$ROOTFS" depmod -a "$KVER" || true
+fi
+# ROCKNIX keeps modules and firmware under usr/lib/kernel-overlays/base/lib/ (6-7 levels deep), so search deep, and also look next to the
+# modules directory; take the candidate with the most files. Without these the Wi-Fi/Bluetooth/audio DSP firmware requests all fail.
+FWDIR=""; FWBEST=0
+for c in $(find "$WORK/system" -maxdepth 9 -type d -path '*lib/firmware' 2>/dev/null) ${MODDIR:+"$(dirname "$(dirname "$MODDIR")")/firmware"}; do
+  [[ -d "$c" ]] || continue
+  n=$(find "$c" -type f 2>/dev/null | wc -l); (( n > FWBEST )) && { FWBEST=$n; FWDIR="$c"; }
+done
+echo "==> Firmware directory: ${FWDIR:-NONE FOUND} ($FWBEST files)"
+[[ -n "$FWDIR" ]] && { mkdir -p "$ROOTFS/lib/firmware"; cp -a "$FWDIR"/. "$ROOTFS/lib/firmware/"; }
+# the Unisoc BSP drivers look in /system/etc/firmware (WCN modem, audio DSP): point it at the same files
+mkdir -p "$ROOTFS/system/etc"; ln -sfn /lib/firmware "$ROOTFS/system/etc/firmware"
+# Audio: the T618 codec's speaker routes are vendor mixer controls that stay off after boot. Take the mixer state ROCKNIX saves
+# (asound.state) and any asound.conf from the stock SYSTEM; rgos-audio-prep restores it at boot. init.txt (audio/) adds commands.
+mkdir -p "$ROOTFS/etc/rgos/audio"
+AST="$(find "$WORK/system" -name asound.state -type f 2>/dev/null | head -1)"
+if [[ -n "$AST" ]]; then cp "$AST" "$ROOTFS/etc/rgos/audio/asound.state"; echo "==> Stock mixer state: $AST"
+else echo "!! no asound.state in the stock SYSTEM: the speaker relies on audio/init.txt and the driver defaults"; fi
+ACF="$(find "$WORK/system" -name asound.conf -type f 2>/dev/null | head -1)"; [[ -n "$ACF" ]] && cp "$ACF" "$ROOTFS/etc/asound.conf" && echo "==> Stock asound.conf: $ACF"
+echo "==> Stock audio scripts (for reference): $(find "$WORK/system" -type f \( -iname '*audio*' -o -iname '*amixer*' -o -iname '*alsa*.sh' \) -path '*bin*' 2>/dev/null | sed "s#$WORK/system/##" | head -10 | tr '\n' ' ')"
+[[ -d "$HERE/audio" ]] && cp "$HERE"/audio/init.txt "$ROOTFS/etc/rgos/audio/init.txt"
+# What the stock kernel offers for Wi-Fi / Bluetooth: printed here and shipped as /etc/rgos/wireless-modules.txt, so
+# rgos-logs.txt on the card can say which driver should have loaded when "No Wi-Fi adapter found" shows.
+mkdir -p "$ROOTFS/etc/rgos"
+if [[ -n "${MODDIR:-}" ]]; then
+  find "$MODDIR" -type f -name '*.ko*' 2>/dev/null | grep -i -E '/(wireless|bluetooth)/|sprd|uwe|wcn|sdiohal|rtw|rtl8|brcm|aic8|cfg80211|mac80211|btusb|hci_uart' \
+    | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u > "$ROOTFS/etc/rgos/wireless-modules.txt" || true
+fi
+echo "==> Wi-Fi/Bluetooth modules in the stock kernel: $(tr '\n' ' ' < "$ROOTFS/etc/rgos/wireless-modules.txt" 2>/dev/null)"
+[[ -s "$ROOTFS/etc/rgos/wireless-modules.txt" ]] || echo "!! no wireless modules found in the stock SYSTEM: the driver is built into the kernel (needs firmware only) or MODDIR is wrong"
+echo "==> Wi-Fi-looking firmware: $(ls "$ROOTFS/lib/firmware" 2>/dev/null | grep -i -E 'wcn|sprd|rtl|rtw|brcm|aic|mt7|ath|wifi|wlan|uwe|sc2' | tr '\n' ' ')"
+
+# RG OS: launcher files, device id, and the init that starts it ----------------------------
+echo "==> Installing RG OS into /opt/rgos"
+HERE_RGOS="$HERE/rgos"
+[[ -f "$HERE_RGOS/menu.py" ]] || { echo "!! $HERE_RGOS/menu.py missing"; exit 1; }
+mkdir -p "$ROOTFS/opt/rgos" "$ROOTFS/etc/rgos" "$ROOTFS/var/lib/rgos" "$ROOTFS/var/log" "$ROOTFS/media/roms" "$ROOTFS/boot"
+# ROCKNIX's initramfs moves its /flash and /storage mounts into the new root; give it somewhere to put them
+mkdir -p "$ROOTFS/flash" "$ROOTFS/storage" "$ROOTFS/run" "$ROOTFS/tmp" "$ROOTFS/root"
+find "$HERE_RGOS" -maxdepth 1 -type f -exec cp {} "$ROOTFS/opt/rgos/" \;   # files only (ignores __pycache__ etc.)
+chmod 755 "$ROOTFS"/opt/rgos/rgos-* "$ROOTFS/opt/rgos/menu.py" "$ROOTFS/opt/rgos/wifictl.py" "$ROOTFS/opt/rgos/btctl.py" "$ROOTFS/opt/rgos/sshctl.py"
+# the services the session starts must really be in the image
+for f in usr/sbin/dropbear usr/bin/dropbearkey usr/lib/openssh/sftp-server usr/bin/bluetoothctl usr/bin/dbus-daemon sbin/mkfs.ext4 sbin/mkfs.exfat usr/sbin/sgdisk sbin/sfdisk usr/sbin/partx sbin/wpa_supplicant; do
+  [[ -e "$ROOTFS/$f" || -e "$ROOTFS/usr/$f" ]] || echo "!! $f is missing from the image"
+done
+ls "$ROOTFS"/usr/libexec/bluetooth/bluetoothd "$ROOTFS"/usr/lib/bluetooth/bluetoothd >/dev/null 2>&1 || echo "!! bluetoothd is missing from the image"
+echo "$DEVICE" > "$ROOTFS/etc/rgos-device"
+# Startup splash (video + sound, sized for the device's canvas: splash-<device>.mjpg) and bundled launcher music. menu.py looks in /etc/rgos/splash and /opt/rgos/music;
+# music / splash added to the ROMS partition (music/, splash/splash.mjpg) is picked up as well.
+if [[ -d "$HERE/splash" ]]; then
+  mkdir -p "$ROOTFS/etc/rgos/splash"
+  for f in "$HERE"/splash/*; do
+    case "$(basename "$f")" in splash-*) [[ "$(basename "$f")" == splash-"$DEVICE".* ]] || continue ;; esac   # only this device's video
+    cp "$f" "$ROOTFS/etc/rgos/splash/"
+  done
+else
+  echo "!! $HERE/splash missing: no startup splash in the image"
+fi
+if [[ -d "$HERE/music" ]]; then
+  mkdir -p "$ROOTFS/opt/rgos/music" && cp "$HERE"/music/* "$ROOTFS/opt/rgos/music/"
+else
+  echo "!! $HERE/music missing: no bundled launcher music in the image"
+fi
+printf 'BUILD_ID=%s\n' "$(date +%Y%m%d-%H%M)" > "$ROOTFS/etc/rgos-release"
+echo '{"enabled": false, "mountpoint": "/media/roms2"}' > "$ROOTFS/etc/rgos/sdcard.json"
+# RetroArch config + the autoconfig profile for the input hub's pad
+[[ -f "$HERE/config/retroarch.cfg" ]] || { echo "!! $HERE/config/retroarch.cfg missing"; exit 1; }
+cp "$HERE/config/retroarch.cfg" "$ROOTFS/etc/rgos/retroarch.cfg"
+mkdir -p "$ROOTFS/etc/rgos/autoconfig" && cp "$HERE"/config/autoconfig/*.cfg "$ROOTFS/etc/rgos/autoconfig/"
+# Cores that have no Debian package: Neo Geo Pocket (mednafen_ngp, from NGP_SRC) and PlayStation (pcsx_rearmed, git clone with submodules
+# from PSX_REPO). Prebuilt aarch64 *_libretro.so files in cores/ are copied as they are and those cores are then not built. Anything else is
+# compiled inside the rootfs (native aarch64 under qemu, several minutes) and the compiler is removed again. A failed core build only costs
+# that core (the build goes on and prints a "!!" line; PlayStation then has no core unless Debian offers libretro-beetle-psx).
+LRDIR="$ROOTFS/usr/local/lib/libretro"; mkdir -p "$LRDIR"
+# Beetle PSX (mednafen_psx) as a PlayStation fallback: not available in every Debian suite/component, so a miss is only a warning
+cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
+if chroot "$ROOTFS" apt-get update >/dev/null 2>&1 \
+   && chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libretro-beetle-psx >/dev/null 2>&1; then
+  echo "==> Installed libretro-beetle-psx (PlayStation fallback core)"
+else
+  echo "   (libretro-beetle-psx is not available in $DEBIAN_SUITE; PlayStation uses pcsx_rearmed only)"
+fi
+# Genesis Plus GX (Mega Drive / Genesis, Master System, Game Gear, SG-1000, Sega CD): Debian package if the suite has it, else built below
+if chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libretro-genesisplusgx >/dev/null 2>&1; then
+  echo "==> Installed libretro-genesisplusgx (Genesis Plus GX)"
+else
+  echo "   (libretro-genesisplusgx is not available in $DEBIAN_SUITE; it will be built from $GENESIS_REPO)"
+fi
+if ls "$HERE"/cores/*_libretro.so >/dev/null 2>&1; then
+  echo "==> Copying prebuilt cores from cores/"; cp "$HERE"/cores/*_libretro.so "$LRDIR/"
+fi
+WANT_NGP=0; WANT_PSX=0; WANT_GEN=0
+[[ "$NGP_SRC" != none && ! -e "$LRDIR/mednafen_ngp_libretro.so" ]] && WANT_NGP=1
+[[ "$PSX_REPO" != none && ! -e "$LRDIR/pcsx_rearmed_libretro.so" ]] && WANT_PSX=1
+# (core_present is defined further down; this is the same test, needed before the compiler step)
+have_core() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
+[[ "$GENESIS_REPO" != none ]] && ! have_core genesis_plus_gx && WANT_GEN=1
+if (( WANT_NGP || WANT_PSX || WANT_GEN )); then
+  echo "==> Installing a compiler in the rootfs to build libretro cores"
+  rm -rf "$ROOTFS/tmp/core-src"; mkdir -p "$ROOTFS/tmp/core-src"
+  cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
+  if chroot "$ROOTFS" apt-get update && chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc g++ make; then
+    if (( WANT_NGP )); then
+      echo "==> Building the Neo Geo Pocket core (mednafen_ngp)"
+      if (
+        set -e
+        wget -q -O "$WORK/ngp-src.tar.gz" "$NGP_SRC"
+        mkdir -p "$ROOTFS/tmp/core-src/ngp"; tar -xzf "$WORK/ngp-src.tar.gz" -C "$ROOTFS/tmp/core-src/ngp" --strip-components=1
+        chroot "$ROOTFS" sh -c 'cd /tmp/core-src/ngp && make -j"$(nproc)"'
+        install -m 755 "$ROOTFS"/tmp/core-src/ngp/mednafen_ngp_libretro.so "$LRDIR/mednafen_ngp_libretro.so"
+      ); then echo "   mednafen_ngp_libretro.so built"
+      else echo "!! could not build the Neo Geo Pocket core: NGP/NGPC will have no core (put a prebuilt mednafen_ngp_libretro.so in cores/ and rebuild)"; fi
+    fi
+    if (( WANT_GEN )); then
+      echo "==> Building the Genesis Plus GX core (genesis_plus_gx)"
+      if (
+        set -e
+        command -v git >/dev/null || { echo "git is not installed on this PC (apt install git)"; exit 1; }
+        rm -rf "$WORK/genesis-plus-gx"
+        git clone -q --depth 1 "$GENESIS_REPO" "$WORK/genesis-plus-gx"
+        cp -r "$WORK/genesis-plus-gx" "$ROOTFS/tmp/core-src/gen"
+        chroot "$ROOTFS" sh -c 'cd /tmp/core-src/gen && make -f Makefile.libretro platform=unix -j"$(nproc)"'
+        install -m 755 "$ROOTFS"/tmp/core-src/gen/genesis_plus_gx_libretro.so "$LRDIR/genesis_plus_gx_libretro.so"
+      ); then echo "   genesis_plus_gx_libretro.so built"
+      else echo "!! could not build Genesis Plus GX: Mega Drive / Master System / Game Gear / Sega CD will have no core (put a prebuilt genesis_plus_gx_libretro.so in cores/ and rebuild)"; fi
+    fi
+    if (( WANT_PSX )); then
+      echo "==> Building the PlayStation core (pcsx_rearmed, aarch64 dynarec)"
+      if (
+        set -e
+        command -v git >/dev/null || { echo "git is not installed on this PC (apt install git)"; exit 1; }
+        rm -rf "$WORK/pcsx_rearmed"
+        git clone -q --depth 1 --recurse-submodules --shallow-submodules "$PSX_REPO" "$WORK/pcsx_rearmed"
+        cp -r "$WORK/pcsx_rearmed" "$ROOTFS/tmp/core-src/psx"
+        chroot "$ROOTFS" sh -c 'cd /tmp/core-src/psx && make -f Makefile.libretro -j"$(nproc)"'
+        install -m 755 "$ROOTFS"/tmp/core-src/psx/pcsx_rearmed_libretro.so "$LRDIR/pcsx_rearmed_libretro.so"
+      ); then echo "   pcsx_rearmed_libretro.so built"
+      else echo "!! could not build pcsx_rearmed: PlayStation falls back to mednafen_psx (Beetle PSX, slower; software renderer)"; fi
+    fi
+  else
+    echo "!! could not install a compiler in the rootfs: skipped building the Genesis Plus GX / Neo Geo Pocket / PlayStation cores"
+  fi
+  chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove gcc g++ make >/dev/null 2>&1 || true
+  rm -rf "$ROOTFS/tmp/core-src" "$ROOTFS/etc/resolv.conf"
+fi
+CORES="$(ls "$ROOTFS"/usr/local/lib/libretro/*_libretro.so "$ROOTFS"/usr/lib/*/libretro/*_libretro.so "$ROOTFS"/usr/lib/libretro/*_libretro.so 2>/dev/null | xargs -rn1 basename | tr '\n' ' ' || true)"
+echo "==> libretro cores in the image: ${CORES:-NONE}"
+# a core counts as present if ANY of the library directories has it ("ls A B C" fails when just one of the globs is empty, which
+# wrongly reported every core as missing)
+core_present() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
+for c in gambatte mgba nestopia genesis_plus_gx snes9x mednafen_wswan mednafen_ngp pcsx_rearmed; do
+  core_present "$c" || echo "!! ${c}_libretro.so is missing from the image (a Debian libretro package missing, or the source build of that core failed)"
+done
+# Beetle PSX is only an optional fallback for pcsx_rearmed
+core_present mednafen_psx || core_present pcsx_rearmed || echo "!! no PlayStation core (neither pcsx_rearmed nor mednafen_psx) is in the image"
+[[ -x "$ROOTFS/usr/bin/retroarch" ]] || echo "!! retroarch is not in the image (package missing from $DEBIAN_SUITE?)"
+# applets the session calls that Debian minbase does not ship as commands
+for a in reboot poweroff halt; do ln -sf /bin/busybox "$ROOTFS/sbin/$a"; done
+ln -sf /usr/share/fonts/truetype/dejavu "$ROOTFS/usr/share/fonts/dejavu" 2>/dev/null || true
+
+# PID 1. ROCKNIX's initramfs switch_roots into this SYSTEM and execs one of the paths below.
+# It starts RG OS; if the session ever dies it falls back to a white screen so the device never panics.
+cat > "$ROOTFS/usr/sbin/rgos-init" <<'INIT'
+#!/bin/sh
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+mount -t proc proc /proc 2>/dev/null; mount -t sysfs sys /sys 2>/dev/null; mount -t devtmpfs dev /dev 2>/dev/null
+[ -x /bin/busybox ] && /bin/busybox --install -s /usr/bin 2>/dev/null   # fills in only the commands that are missing
+
+# --- the root filesystem is a read-only squashfs: give the session somewhere to write ------------------------------
+mountpoint -q /run || mount -t tmpfs tmpfs /run
+mountpoint -q /tmp || mount -t tmpfs tmpfs /tmp
+mount -t tmpfs -o mode=755 tmpfs /var 2>/dev/null
+mkdir -p /var/log /var/lib/rgos /var/tmp /var/cache /boot /media/roms
+# The FAT partition (mmcblk*p1) was mounted READ-ONLY by ROCKNIX's init. Remount it read-write and expose it at /boot.
+bootdev=""; for d in /dev/mmcblk*p1; do [ -b "$d" ] && { bootdev=$d; break; }; done
+if [ -n "$bootdev" ] && ! mountpoint -q /boot; then
+  mp=$(awk -v d="$bootdev" '$1==d {print $2; exit}' /proc/mounts)
+  if [ -n "$mp" ]; then
+    mount -o remount,rw "$mp" 2>/dev/null || mount -o remount,rw "$bootdev" 2>/dev/null
+    mount --bind "$mp" /boot 2>/dev/null
+  fi
+  mountpoint -q /boot || mount -t vfat -o rw,noatime "$bootdev" /boot 2>/dev/null
+fi
+# settings (button map, wifi) persist on the FAT partition; otherwise they live in RAM
+if mountpoint -q /boot && mkdir -p /boot/rgos-data 2>/dev/null && touch /boot/rgos-data/.w 2>/dev/null; then
+  rm -f /boot/rgos-data/.w; mount --bind /boot/rgos-data /var/lib/rgos 2>/dev/null
+fi
+for i in 1 2 3 4 5 6 7 8 9 10; do [ -e /dev/fb0 ] && break; sleep 1; done
+# display driver may be a module
+[ -e /dev/fb0 ] || for pass in 1 2 3; do
+  find /lib/modules -name '*.ko*' 2>/dev/null | while read -r m; do insmod "$m" 2>/dev/null; done
+  [ -e /dev/fb0 ] && break
+done
+# boot facts for debugging, written to the FAT partition as rgos-bootinfo.txt
+( sleep 6
+  mkdir -p /run/bi
+  for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /run/bi 2>/dev/null && break; done
+  mountpoint -q /run/bi || exit 0
+  { echo "== uptime when written"; cat /proc/uptime; echo "== cmdline"; cat /proc/cmdline
+    echo "== partitions"; cat /proc/partitions; echo "== blkid"; blkid; echo "== mounts"; cat /proc/mounts
+    echo "== boot partition"; ls -la /run/bi; echo "== extlinux.conf"; cat /run/bi/extlinux/extlinux.conf
+  } > /run/bi/rgos-bootinfo.txt 2>&1
+  sync; umount /run/bi ) >/dev/null 2>&1 &
+/opt/rgos/rgos-session
+# only reached if the session script itself exited: show white and stay alive
+for b in /sys/class/backlight/*; do [ -e "$b/max_brightness" ] && cat "$b/max_brightness" > "$b/brightness"; done
+[ -e /dev/fb0 ] && tr '\0' '\377' < /dev/zero > /dev/fb0 2>/dev/null
+while :; do sleep 3600; done
+INIT
+chmod +x "$ROOTFS/usr/sbin/rgos-init"
+mkdir -p "$ROOTFS/usr/lib/systemd" "$ROOTFS/usr/lib/libreelec" "$ROOTFS/usr/lib/rocknix"
+ln -sf ../../sbin/rgos-init "$ROOTFS/usr/lib/systemd/systemd"
+ln -sf rgos-init            "$ROOTFS/usr/sbin/init"
+ln -sf usr/sbin/rgos-init   "$ROOTFS/init"
+rm -f "$ROOTFS/usr/bin/qemu-aarch64-static"
+chroot "$ROOTFS" python3 -c 'import pygame' 2>&1 | tail -2 || true
+rm -rf "$ROOTFS/var/cache/apt" "$ROOTFS/var/lib/apt/lists" "$ROOTFS/usr/share/doc" "$ROOTFS/usr/share/man"
+
+# 4. new SYSTEM ------------------------------------------------------------------
+echo "==> Building SYSTEM squashfs"
+rm -f "$WORK/SYSTEM"
+mksquashfs "$ROOTFS" "$WORK/SYSTEM" -comp "$COMP" -b "$BSIZE" -noappend -quiet
+ls -la "$WORK/SYSTEM"
+
+echo "==> Installing it on the boot partition"
+FREE_KB="$(df -k --output=avail "$WORK/mnt" | tail -1)"
+NEED_KB=$(( ( $(stat -c %s "$WORK/SYSTEM") - $(stat -c %s "$OLD_SYS") ) / 1024 + 1 + 4096 ))   # +4 MiB: rgos-initrd.cpio and extlinux.conf.stock
+[[ $NEED_KB -lt $FREE_KB ]] || { echo "!! New SYSTEM doesn't fit on the boot partition"; exit 1; }
+cp "$WORK/SYSTEM" "$WORK/mnt/SYSTEM"
+if [[ -f "$WORK/mnt/SYSTEM.md5" ]]; then
+  (cd "$WORK/mnt" && md5sum SYSTEM > SYSTEM.md5)
+fi
+
+# 5. replacement initramfs ---------------------------------------------------------
+# ROCKNIX's own init (built into its kernel) is what shows "NEVER TOUCH boot=..." and waits 60 s when it is not happy with the
+# card. Instead of fixing around it, the kernel is told to run ours: extlinux gets an INITRD line (our cpio) and rdinit=/rgos-init,
+# so ROCKNIX's /init never runs. The kernel, DTB, bootloader area and partition table stay byte-for-byte as shipped.
+echo "==> Building the RG OS initramfs (replaces ROCKNIX's init: no 60 s wait, no error screen)"
+BB="$ROOTFS/bin/busybox"
+[[ -x "$BB" ]] || { echo "!! $BB missing (busybox-static not installed in the rootfs?)"; exit 1; }
+if readelf -lW "$BB" 2>/dev/null | grep -q INTERP; then echo "!! $BB is dynamically linked; the initramfs needs a static busybox"; exit 1; fi
+INITRD_NAME="rgos-initrd.cpio"
+python3 "$HERE/initramfs/mkinitramfs.py" "$BB" "$HERE/initramfs/init" "$WORK/mnt/$INITRD_NAME"
+EXT="$WORK/mnt/extlinux/extlinux.conf"; [[ -f "$EXT" ]] || EXT="$WORK/mnt/extlinux.conf"
+[[ -f "$EXT" ]] || { echo "!! no extlinux.conf on the boot partition"; exit 1; }
+rm -f "$WORK/mnt/white.cpio.gz"                 # leftover from very old builds
+sed -i 's/LABEL=ROCKNIX/LABEL=RGOS/g' "$EXT"       # the kernel command line names the boot partition by label
+cp "$EXT" "$(dirname "$EXT")/extlinux.conf.stock"   # recovery: copy this over extlinux.conf from a PC to boot ROCKNIX's own init again
+echo "==> Patched extlinux config:"
+python3 "$HERE/initramfs/patch-extlinux.py" "$EXT" "/$INITRD_NAME"
+grep -qi "^[[:space:]]*initrd[[:space:]]\+/$INITRD_NAME" "$EXT" && grep -q 'rdinit=/rgos-init' "$EXT" \
+  || { echo "!! extlinux.conf was not patched correctly"; exit 1; }
+
+# update mode: keep the files an offline update replaces (see rgos/rgos-update); the image itself is not needed
+if [[ "$MODE" == "update" ]]; then
+  rm -rf "$WORK/upd"; mkdir -p "$WORK/upd"
+  cp "$WORK/mnt/SYSTEM" "$WORK/mnt/$INITRD_NAME" "$WORK/upd/"
+  [[ -f "$WORK/mnt/SYSTEM.md5" ]] && cp "$WORK/mnt/SYSTEM.md5" "$WORK/upd/"
+  # extlinux.conf is only included on request: a wrong one stops the card from booting, and the one on the card already
+  # points at /rgos-initrd.cpio. UPDATE_EXTLINUX=1 sudo -E ./build.sh update
+  [[ "${UPDATE_EXTLINUX:-0}" == "1" ]] && cp "$EXT" "$WORK/upd/extlinux.conf"
+  # RG34XXSP: dtb.img is only included on request (UPDATE_DTB=1): the card may carry a hand-picked one (v2 panel) that must survive updates
+  [[ "$DEVICE" == "rg34xxsp" && "${UPDATE_DTB:-0}" == "1" ]] && cp "$WORK/mnt/dtb.img" "$WORK/upd/dtb.img"
+fi
+
+sync
+umount "$WORK/mnt"; losetup -d "$LOOP"; LOOP=""
+
+if [[ "$MODE" == "update" ]]; then
+  UPD_ID="${UPDATE_ID:-$(date +%Y%m%d-%H%M%S)}"
+  UPD_TAR="$OUT/rgos-update-$DEVICE-$UPD_ID.tar"
+  ARGS=("SYSTEM=$WORK/upd/SYSTEM" "rgos-initrd.cpio=$WORK/upd/$INITRD_NAME")
+  [[ -f "$WORK/upd/SYSTEM.md5" ]] && ARGS+=("SYSTEM.md5=$WORK/upd/SYSTEM.md5")
+  [[ -f "$WORK/upd/extlinux.conf" ]] && ARGS+=("extlinux/extlinux.conf=$WORK/upd/extlinux.conf")
+  [[ -f "$WORK/upd/dtb.img" ]] && ARGS+=("dtb.img=$WORK/upd/dtb.img")
+  rm -f "$OUT"/rgos-update-"$DEVICE"-*.tar
+  python3 "$HERE/tools/mkupdate.py" "$UPD_TAR" "$UPD_ID" "$(cat "$ROOTFS/etc/rgos-device")" "${ARGS[@]}"
+  rm -rf "$WORK/upd"
+  echo
+  echo "Done: $UPD_TAR"
+  echo "Copy it to the update/ folder of the ROMS partition (or the boot partition) and reboot the device; it installs it and restarts."
+  exit 0
+fi
+
+# 6. partition table ---------------------------------------------------------------------------------------
+# Partitions stay exactly as ROCKNIX shipped them; the ROMS partition is created by rgos/rgos-roms on the first boot, over all the free
+# space of the card, and formatted exFAT.
+if [[ "$PTABLE" == gpt ]]; then
+  # GPT (RG Rotate): partition 3 is the 2 MiB "uboot" partition: the SPL finds U-Boot on the card by that GPT name, and without it the
+  # device skips the card and boots Android. NEVER delete or rename it. ROMS becomes partition 4.
+  echo "==> Partitions in the image (partition 3 must be 'uboot'; ROMS is created on first boot as partition 4):"
+  sfdisk -l "$IMG" 2>/dev/null | grep -E '^(/|Device)' || true
+  sgdisk -c 1:RGOS "$IMG" >/dev/null 2>&1 || true   # GPT name of partition 1 (cosmetic)
+  sgdisk -i 3 "$IMG" 2>/dev/null | grep -q "^Partition name: 'uboot'" || { echo "!! partition 3 of the image is not 'uboot': the device would boot Android"; exit 1; }
+else
+  # MBR (RG34XXSP): partitions 1 (FAT) and 2 (STORAGE). U-Boot (SPL at 8 KiB) sits in the gap before partition 1, which was not touched
+  # (the image is a byte copy of the stock one). ROMS is added as partition 3 on first boot.
+  echo "==> Partitions in the image (MBR; ROMS is created on first boot as partition 3):"
+  sfdisk -l "$IMG" 2>/dev/null | grep -E '^(/|Device|Disklabel)' || true
+  sfdisk -d "$IMG" 2>/dev/null | grep -q '^label: dos' || { echo "!! the stock H700 image is not an MBR (dos) image: rgos-roms would not know how to add ROMS"; exit 1; }
+  [[ "$(sfdisk -d "$IMG" 2>/dev/null | grep -c "^$IMG[0-9]* :")" -le 3 ]] || { echo "!! the image already has 4 partitions: no slot left for ROMS"; exit 1; }
+fi
+
+echo
+echo "Done: $IMG"
+echo "To go back to ROCKNIX's own init: copy extlinux/extlinux.conf.stock over extlinux/extlinux.conf on the card's FAT partition."
+echo "RG OS logs are copied to rgos-logs.txt on the card's FAT partition at 8, 28 and 58 s after boot."
+if [[ "$DEVICE" == "rg-rotate" ]]; then
+  echo "Flash the SPL once (cd spl-flasher && ./flash-spl.sh), then write the image to the SD card."
+else
+  echo "Write the image to the SD card (the H700 boots straight from it; no SPL flashing). dtb.img = $RG34XXSP_DTB.dtb; to change it, copy another file from device_trees/ over dtb.img."
+fi

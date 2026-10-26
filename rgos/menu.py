@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""RG OS menu - original frontend for the Anbernic RG34XX-SP.
+"""RG OS menu - original frontend for the Anbernic RG Rotate and RG34XXSP.
 
 Lists the native Linux ports in <ROMS>/roms/ports/ (the .sh launchers) and on selection writes the script path to
 /run/rgos/launch and exits with code 10 so the session loop can run it.
 Exit code 20 = power off.
 """
 import glob
-import io, json, math, os, re, subprocess, sys, threading, time
+import io, json, math, os, re, signal, subprocess, sys, threading, time
 import pygame
 from evpad import EvPads, CODES as EV_CODES, EV_KEY, EV_ABS
 import fbout
 import splash
 import wifictl
+import btctl
+import sshctl
 import filemanager
 try:
     import sdcard                      # second SD card (optional: the menu works without it)
@@ -40,9 +42,16 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            ("atari5200", "A52", "retroarch", (".a52", ".bin", ".car"), "Atari 5200"),
            ("atari7800", "A78", "retroarch", (".a78", ".bin"), "Atari 7800"),
            # Neo Geo Pocket and Pocket Color (Beetle NeoPop; RACE is the lighter alternative). No BIOS needed.
-           ("ngp", "NGP", "retroarch", (".ngp", ".ngc", ".ngpc"), "Neo Geo Pocket / Color"),
+           # Neo Geo Pocket: monochrome games in roms/ngp, Color games in roms/ngpc (same core; extensions accepted in both folders).
+           ("ngp", "NGP", "retroarch", (".ngp", ".ngc", ".ngpc"), "Neo Geo Pocket"),
+           ("ngpc", "NGPC", "retroarch", (".ngc", ".ngpc", ".ngp"), "Neo Geo Pocket Color"),
            # WonderSwan and WonderSwan Color (Beetle Cygne). No BIOS needed.
-           ("wonderswan", "WS", "retroarch", (".ws", ".wsc", ".pc2"), "WonderSwan / Color"),
+           # roms/ws for the original WonderSwan, roms/wsc for WonderSwan Color (same core; extensions accepted in both folders).
+           ("ws", "WS", "retroarch", (".ws", ".wsc", ".pc2"), "WonderSwan"),
+           ("wsc", "WSC", "retroarch", (".wsc", ".ws", ".pc2"), "WonderSwan Color"),
+           # PlayStation: pcsx_rearmed (built from source, fast on ARM) or Beetle PSX from Debian. Disc images only (.cue/.chd/.pbp/.m3u/.iso);
+           # .bin is not listed because a .cue already points at it. A BIOS (scph1001.bin, scph5501.bin, ...) in ROMS/bios/ is recommended.
+           ("psx", "PSX", "retroarch", (".cue", ".chd", ".pbp", ".m3u", ".iso", ".img", ".ccd"), "Sony PlayStation"),
            # FBNeo runs arcade boards (CPS1/2/3, Konami, Irem, ...) and Neo Geo; ROMs stay zipped, named as MAME/FBNeo expect.
            ("arcade", "ARC", "retroarch", (".zip", ".7z"), "Arcade (FinalBurn Neo)"),
            ("neogeo", "NEO", "retroarch", (".zip", ".7z"), "Neo Geo"),
@@ -62,12 +71,17 @@ def _device():
         return ""
 
 
-# Keep the established 720x480 logical canvas; fbout scales it to the device framebuffer.
-# The RG35XX-SP has no analog sticks, so it skips stick calibration and stick-specific settings.
-DEVICE_ID = os.environ.get("RGOS_DEVICE") or _device() or "rg34xx-sp"
-W, H = 720, 480
-DX = 0                                         # horizontal layout offset (kept so every screen's coordinates stay as they were)
-HAS_STICKS = DEVICE_ID != "rg35xx-sp"
+# The logical canvas depends on the device and fbout scales it uniformly to the framebuffer (a panel with the same aspect is
+# filled exactly, no bars, no stretching):
+#   rg-rotate  square (1:1) screen, 720x720
+#   rg34xxsp   3:2 screen, 720x480 (the layout every screen below was first written for)
+# DY is the height gained over the 720x480 layout (0 on the RG34XXSP); every screen below spends it on more rows / taller
+# panels instead of leaving blank space.
+DEVICE_ID = os.environ.get("RGOS_DEVICE") or _device() or "rg-rotate"
+CANVAS = {"rg-rotate": (720, 720), "rg34xxsp": (720, 480)}
+W, H = CANVAS.get(DEVICE_ID, CANVAS["rg-rotate"])
+DY = H - 480
+DX = 0                                         # horizontal layout offset (unused: the width is unchanged)
 
 # Colour themes (Settings > Theme). Every screen draws with the module-level BG / PANEL / SEL_BG / ACCENT / TEXT / DIM below;
 # apply_theme() swaps them, so the whole menu changes at once. BG = screen, PANEL = header and cards, SEL_BG = selected row,
@@ -105,8 +119,7 @@ def apply_theme(tid):
 
 apply_theme(DEFAULT_THEME)
 
-DEFAULT_INPUT = {"buttons": {"a": 0, "b": 1, "l": 4, "r": 5, "select": 6, "start": 7},
-                 "debug": False}
+DEFAULT_INPUT = {"debug": False}
 KEYMAP = {pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left",
           pygame.K_RIGHT: "right", pygame.K_RETURN: "a", pygame.K_z: "a",
           pygame.K_ESCAPE: "b", pygame.K_x: "b", pygame.K_q: "l", pygame.K_w: "r",
@@ -129,14 +142,8 @@ def load_json(path, default):
 class Input:
     def __init__(self):
         self.conf = load_json(INPUT_CONF, DEFAULT_INPUT)
-        self.rev = {v: k for k, v in self.conf["buttons"].items()}
-        self.held, self.repeat, self.last_raw, self.stick = set(), {}, "", {}
+        self.held, self.repeat, self.last_raw = set(), {}, ""
         self.ev, self.ev_seen = EvPads(), False
-        self.joys = []
-        for i in range(pygame.joystick.get_count()):
-            j = pygame.joystick.Joystick(i)
-            j.init()
-            self.joys.append(j)
 
     def _down(self, a, out):
         if a in self.held:
@@ -164,7 +171,7 @@ class Input:
             self.held.clear()
             self.repeat.clear()
             evs = []
-            for e in pygame.event.get():           # keyboard / joystick events must not act in the dark either
+            for e in pygame.event.get():           # keyboard events must not act in the dark either
                 if e.type == pygame.QUIT:
                     out.append("quit")
             return out
@@ -176,47 +183,17 @@ class Input:
                     self._down(EV_CODES[c], out)
                 elif v == 0:
                     self._up(EV_CODES[c])
-            elif t == EV_ABS and c in (0x00, 0x01):      # left stick from the rgos-sticks hub (-32767..32767)
-                d = 0 if abs(v) < 20000 else (1 if v > 0 else -1)
-                if d != self.stick.get(c, 0):
-                    self.stick[c] = d
-                    if c == 0x00:
-                        self._dir("left", "right", d, out)
-                    else:
-                        self._dir("up", "down", d, out)
-            elif t == EV_ABS and c == 0x10:
+            elif t == EV_ABS and c == 0x10:                # D-pad reported as a hat
                 self._dir("left", "right", v, out)
             elif t == EV_ABS and c == 0x11:
                 self._dir("up", "down", v, out)
-        joy_ev = (pygame.JOYBUTTONDOWN, pygame.JOYBUTTONUP, pygame.JOYHATMOTION, pygame.JOYAXISMOTION)
         for e in pygame.event.get():
-            if self.ev_seen and e.type in joy_ev:
-                continue
             if e.type == pygame.QUIT:
                 out.append("quit")
             elif e.type == pygame.KEYDOWN and e.key in KEYMAP:
                 self._down(KEYMAP[e.key], out)
             elif e.type == pygame.KEYUP and e.key in KEYMAP:
                 self._up(KEYMAP[e.key])
-            elif e.type == pygame.JOYBUTTONDOWN:
-                self.last_raw = "button %d" % e.button
-                a = self.rev.get(e.button)
-                if a:
-                    self._down(a, out)
-            elif e.type == pygame.JOYBUTTONUP:
-                a = self.rev.get(e.button)
-                if a:
-                    self._up(a)
-            elif e.type == pygame.JOYHATMOTION:
-                self.last_raw = "hat %s" % (e.value,)
-                self._dir("left", "right", e.value[0], out)
-                self._dir("down", "up", e.value[1], out)
-            elif e.type == pygame.JOYAXISMOTION and e.axis in (0, 1):
-                v = 0 if abs(e.value) < 0.6 else e.value
-                if e.axis == 0:
-                    self._dir("left", "right", v, out)
-                else:
-                    self._dir("up", "down", v, out)
         now = time.time()
         for a, t in list(self.repeat.items()):
             if now >= t:
@@ -329,13 +306,13 @@ def installed_cores():
 
 
 def default_core(sid):
-    return {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "fceumm", "snes": "snes9x", "genesis": "genesis_plus_gx",
+    return {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "nestopia", "snes": "snes9x", "genesis": "genesis_plus_gx",
             "mastersystem": "genesis_plus_gx", "gamegear": "genesis_plus_gx",
             "sg1000": "genesis_plus_gx", "segacd": "genesis_plus_gx",
             "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx",
             "arcade": "fbneo", "neogeo": "fbneo",
             "atari2600": "stella2014", "atari5200": "atari800", "atari7800": "prosystem",
-            "ngp": "mednafen_ngp", "wonderswan": "mednafen_wswan"}.get(sid, "")
+            "ngp": "mednafen_ngp", "ngpc": "mednafen_ngp", "psx": "pcsx_rearmed", "ws": "mednafen_wswan", "wsc": "mednafen_wswan"}.get(sid, "")
 
 
 # Only offer cores known to support the selected system. The list is intersected
@@ -344,7 +321,7 @@ SYSTEM_CORE_COMPATIBILITY = {
     "gba": ("mgba", "gpsp", "vbam", "mednafen_gba"),
     "gb": ("gambatte", "sameboy", "gearboy", "mgba", "vbam", "mednafen_gb"),
     "gbc": ("gambatte", "sameboy", "gearboy", "mgba", "vbam", "mednafen_gb"),
-    "nes": ("fceumm", "nestopia", "quicknes", "mesen", "mesen_s"),
+    "nes": ("nestopia", "fceumm", "quicknes", "mesen", "mesen_s"),
     "snes": ("snes9x", "snes9x2010", "bsnes", "bsnes_hd_beta", "bsnes2014_accuracy", "bsnes2014_balanced", "bsnes2014_performance", "bsnes_mercury_accuracy", "bsnes_mercury_balanced", "bsnes_mercury_performance"),
     "genesis": ("genesis_plus_gx", "picodrive"),
     "mastersystem": ("genesis_plus_gx", "picodrive"),
@@ -357,7 +334,10 @@ SYSTEM_CORE_COMPATIBILITY = {
     "atari5200": ("atari800",),
     "atari7800": ("prosystem",),
     "ngp": ("mednafen_ngp", "race"),
-    "wonderswan": ("mednafen_wswan",),
+    "ngpc": ("mednafen_ngp", "race"),
+    "psx": ("pcsx_rearmed", "mednafen_psx", "mednafen_psx_hw", "swanstation"),
+    "ws": ("mednafen_wswan",),
+    "wsc": ("mednafen_wswan",),
     "arcade": ("fbneo",),
     "neogeo": ("fbneo",),
 }
@@ -367,6 +347,30 @@ def compatible_cores(sid, cores=None):
     """Return installed cores known to support this system, in preferred order."""
     installed = set(installed_cores() if cores is None else cores)
     return [core for core in SYSTEM_CORE_COMPATIBILITY.get(sid, ()) if core in installed]
+
+
+# Only systems that can actually run are kept: native ports always, RetroArch systems only when at least one compatible core is
+# installed. Systems without a core never show up in the menu and get no ROM folder. RGOS_ALL_SYSTEMS=1 keeps the full list (PC testing).
+if os.environ.get("RGOS_ALL_SYSTEMS") != "1":
+    _have_cores = installed_cores()
+    SYSTEMS = [sy for sy in SYSTEMS if sy[2] != "retroarch" or compatible_cores(sy[0], _have_cores)]
+
+
+def ensure_folders():
+    """Create every folder RG OS uses on the ROMS partition (safe to run on every boot; the first boot creates them all, and a
+    folder you delete comes back). Per-system folders are made for the supported systems only (see SYSTEMS above)."""
+    shared = ("bios", "config", "firmware", "music", "saves", "screenshots", "splash", "states", "update")
+    paths = [os.path.join(ROMS_ROOT, d) for d in shared] + [ROMS_DIR]
+    for sy in SYSTEMS:
+        sid = sy[0]
+        paths += [os.path.join(ROMS_DIR, sid)]
+        if sy[2] == "retroarch":                      # ports are native scripts: no saves/states of their own
+            paths += [os.path.join(ROMS_ROOT, "saves", sid), os.path.join(ROMS_ROOT, "states", sid)]
+    for d in paths:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError as e:
+            log("could not create %s: %s" % (d, e))
 
 
 def fit(font, text, width):
@@ -512,24 +516,41 @@ def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
     return hl, lift
 
 
+HOME_COLS = 2                                  # home grid: 2 columns x 3 rows (fits the square screen)
 HOME_ITEMS = [("games", "Games"), ("recents", "Recents"), ("favorites", "Favorites"), ("tools", "Tools"), ("settings", "Settings"), ("power", "Power Off")]
 # Tools screen: (id, name, description, launch target written to /run/rgos/launch; rgos-session maps the "@tool:" targets)
 TOOLS = [("files", "File Manager", "Browse, copy, move, rename and delete files on the SD cards", "@view:files"),
          ("portmaster", "PortMaster", "Browse, install and update native Linux game ports", "@tool:portmaster"),
          ("retroarch", "RetroArch", "Open the RetroArch menu (cores, content, settings)", "@tool:retroarch")]
+BOOT_ROOT = "/boot"                            # the RGOS FAT partition (partition 1), mounted read-write by rgos-init
+# top-level items on the RGOS partition that the device needs to start; the file manager won't delete, rename or move them
+BOOT_PROTECTED = ("SYSTEM", "SYSTEM.md5", "KERNEL", "KERNEL.md5", "extlinux", "dtbs", "device_trees", "boot.ini",
+                  "rgos-data", "boot.scr", "Image", "uInitrd", "initrd", "initrd.img", "u-boot.bin", "idbloader.img",
+                  "trust.img", "uboot.img", "rgos-initrd.cpio")
+
+
 def fm_roots():
-    """Storage the file manager may touch: the ROMS card, plus the second SD card when it is mounted."""
-    roots = [ROMS_ROOT]
+    """Storage the file manager may touch, in the order shown: RGOS (boot partition), the second SD card when it is
+    mounted, and ROMS last."""
+    roots = []
+    if os.path.ismount(BOOT_ROOT):
+        roots.append(BOOT_ROOT)
     sd = load_json("/etc/rgos/sdcard.json", {"enabled": True, "mountpoint": "/media/roms2"})
     mp = sd.get("mountpoint", "/media/roms2")
     if sd.get("enabled", True) and mp and os.path.ismount(mp):
         roots.append(mp)
+    roots.append(ROMS_ROOT)
     return roots
 
 
-FM_ROWS = 7                                    # visible rows in the file manager list
+def make_file_manager():
+    return filemanager.FileManager(fm_roots(), labels={BOOT_ROOT: "RGOS", ROMS_ROOT: "ROMS"},
+                                   protected={BOOT_ROOT: BOOT_PROTECTED, ROMS_ROOT: ("rgos-data",)})
+
+
+FM_ROWS = 7 + DY // 44                          # visible rows in the file manager list
 # rows of Settings, in order (ids)
-SETTINGS_ROWS = ["theme", "splash", "emulators", "calib", "bmap", "wifi", "info"]
+SETTINGS_ROWS = ["theme", "splash", "emulators", "bmap", "swapab", "wifi", "bluetooth", "ssh", "info"]
 RECENT_MAX = 20
 
 
@@ -621,162 +642,79 @@ def settings_info():
             ("ROMS partition", space), ("SD card 2", card2_info()), ("Volume", "%d%%" % vol[0] if vol else "n/a"),
             ("Battery", ("%d%% %s" % (max(0, min(100, bat[0])), bat[1].lower())) if bat else "n/a"),
             ("Brightness", "%d%%" % bri[0] if bri else "n/a"),
-            ] + ([("Sticks", "calibrated" if os.path.exists(STICK_MAP) else "default wiring")] if HAS_STICKS else []) + [
             ("Buttons", "mapped" if os.path.exists(BTN_MAP) else "default codes")]
 
 
-STICK_MAP = os.environ.get("RGOS_STICKMAP", "/var/lib/rgos/stick-map.json")
-STICK_CAL = os.environ.get("RGOS_STICKCAL", "/var/lib/rgos/sticks.json")
-
-
-class StickCal:
-    """Guided stick calibration. The hub (rgos-sticks) publishes the raw ADC value of each of the 4 mux positions while
-    the probe flag exists. We ask for one stick direction at a time (left stick left/up, right stick left/up), see which
-    mux position moved and which way, and so learn which position is which axis and its polarity. The result goes to
-    stick-map.json and the hub is restarted, so it works whatever the real mux wiring is."""
-    PROMPTS = [("LEFT stick", "LEFT", 0), ("LEFT stick", "UP", 1), ("RIGHT stick", "LEFT", 2), ("RIGHT stick", "UP", 3)]
-    MOVE, REST, HOLD, TIMEOUT = 350, 200, 0.4, 25.0
-
-    def __init__(self):
-        self.flag, self.rawf = os.path.join(RUN_DIR, "sticks.probe"), os.path.join(RUN_DIR, "sticks.raw")
-        try:
-            os.makedirs(RUN_DIR, exist_ok=True)
-            os.unlink(self.rawf)
-        except OSError:
-            pass
-        try:
-            open(self.flag, "w").close()
-        except OSError:
-            pass
-        self.state, self.step, self.msg = "base", 0, ""
-        self.t0 = self.tstate = time.time()
-        self.stamp, self.hist, self.base, self.cand, self.cand_t, self.tb = None, [], None, None, 0.0, 0.0
-        self.found = {}                                   # axis -> (mux position, inverted)
-
-    def stop(self):
-        for f in (self.flag, self.rawf):
-            try:
-                os.unlink(f)
-            except OSError:
-                pass
-
-    def _read(self):
-        try:
-            with open(self.rawf) as f:
-                n, *v = f.read().split()
-            v = [int(x) for x in v]
-            return (n, v) if len(v) == 4 else None
-        except (OSError, ValueError):
-            return None
-
-    def _fail(self, msg):
-        self.state, self.msg = "fail", msg
-        self.stop()
-
-    def update(self):
-        now = time.time()
-        if self.state in ("done", "fail"):
-            return
-        if self.state == "apply":                         # one frame after "Applying..." was drawn
-            inv = [False] * 4
-            mp = [0] * 4
-            for axis, (pos, flip) in self.found.items():
-                mp[pos], inv[axis] = axis, flip
-            try:
-                os.makedirs(os.path.dirname(STICK_MAP), exist_ok=True)
-                with open(STICK_MAP, "w") as f:
-                    json.dump({"map": mp, "invert": inv}, f)
-                for p in (STICK_CAL,):                    # learned ranges belonged to the old axis order
-                    try:
-                        os.unlink(p)
-                    except OSError:
-                        pass
-                if os.environ.get("RGOS_WINDOWED") != "1":
-                    subprocess.run(["/bin/sh", "/usr/bin/systemctl", "restart", "rgos-sticks"], timeout=30)
-            except Exception as e:
-                return self._fail("Could not save: %s" % e)
-            self.stop()
-            self.state, self.msg = "done", "Saved. Move the sticks in the menu to test them."
-            return
-        r = self._read()
-        if r is None:
-            if now - self.t0 > 5:
-                self._fail("The stick hub is not running (no raw values).")
-            return
-        if r[0] == self.stamp:
-            if now - self.tstate > 3 and self.state != "base":
-                pass
-            return
-        self.stamp = r[0]
-        self.hist = (self.hist + [r[1]])[-3:]
-        cur = [sorted(h[i] for h in self.hist)[len(self.hist) // 2] for i in range(4)]     # median of 3
-        if self.state == "base":
-            if self.base is None or max(abs(cur[i] - self.base[i]) for i in range(4)) > self.REST:
-                self.base, self.tb = cur, now              # (re)start: a stick is being touched or this is the first reading
-                return
-            if now - self.tb < 1.2:                        # sticks at rest for a moment: remember where each position sits
-                return
-            self.state, self.tstate = "prompt", now
-            return
-        dev = [cur[i] - self.base[i] for i in range(4)]
-        used = {pos for pos, _ in self.found.values()}
-        if self.state == "prompt":
-            if now - self.tstate > self.TIMEOUT:
-                return self._fail("No stick movement detected.")
-            free = [i for i in range(4) if i not in used]
-            best = max(free, key=lambda i: abs(dev[i]))
-            others = [abs(dev[i]) for i in free if i != best]
-            if abs(dev[best]) >= self.MOVE and (not others or max(others) < 0.6 * abs(dev[best])):
-                if self.cand != best:
-                    self.cand, self.cand_t = best, now
-                elif now - self.cand_t >= self.HOLD:
-                    self.found[self.PROMPTS[self.step][2]] = (best, dev[best] > 0)
-                    self.state, self.tstate, self.cand = "release", now, None
-            else:
-                self.cand = None
-        elif self.state == "release":
-            if max(abs(d) for d in dev) < self.REST:
-                if self.cand is None:
-                    self.cand, self.cand_t = True, now
-                elif now - self.cand_t >= self.HOLD:
-                    self.cand = None
-                    self.step += 1
-                    self.state, self.tstate = ("prompt", now) if self.step < len(self.PROMPTS) else ("apply", now)
-            else:
-                self.cand = None
-            if now - self.tstate > self.TIMEOUT:
-                return self._fail("Please let go of the sticks and try again.")
-
-    def lines(self):
-        if self.state == "base":
-            return ["Let go of both sticks", "Reading the resting position..."]
-        if self.state == "prompt":
-            who, way, _ = self.PROMPTS[self.step]
-            return ["Push the %s fully %s" % (who, way), "and hold it there"]
-        if self.state == "release":
-            return ["Got it. Let go of the stick", "(back to the centre)"]
-        if self.state == "apply":
-            return ["Applying...", "keep both sticks released"]
-        return [self.msg]
-
-
 BTN_MAP = os.environ.get("RGOS_BTNMAP", "/var/lib/rgos/button-map.json")
+SWAP_AB = os.environ.get("RGOS_SWAPAB", "/var/lib/rgos/swap-ab")     # flag file read by rgos-input
+
+
+def restart_hub():
+    """Restart the input hub (rgos-input) so a new button map / A-B swap takes effect now. There is no systemd in this
+    image: stop the running hub with SIGTERM (it removes its virtual pad) and start a fresh one."""
+    if os.environ.get("RGOS_WINDOWED") == "1":
+        return
+
+    def hubs():
+        found = []
+        for d in os.listdir("/proc"):
+            if d.isdigit() and int(d) != os.getpid():
+                try:
+                    with open("/proc/%s/cmdline" % d, "rb") as f:
+                        cmd = f.read().split(b"\0")
+                except OSError:
+                    continue
+                if any(c.endswith(b"rgos-input") for c in cmd[:3]) and b"reset-buttons" not in cmd:
+                    found.append(int(d))
+        return found
+    for pid in hubs():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    t0 = time.time()
+    while hubs() and time.time() - t0 < 4:
+        time.sleep(0.1)
+    for pid in hubs():                                   # did not exit in time
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        lg = open("/var/log/rgos-input.log", "a")
+    except OSError:
+        lg = subprocess.DEVNULL
+    subprocess.Popen(["python3", "/opt/rgos/rgos-input"], stdin=subprocess.DEVNULL, stdout=lg, stderr=lg,
+                     start_new_session=True)
+
+
+def swap_ab_on():
+    return os.path.exists(SWAP_AB)
+
+
+def set_swap_ab(on):
+    try:
+        if on:
+            os.makedirs(os.path.dirname(SWAP_AB), exist_ok=True)
+            open(SWAP_AB, "w").close()
+        elif os.path.exists(SWAP_AB):
+            os.unlink(SWAP_AB)
+    except OSError:
+        return False
+    return True
 
 
 class ButtonMap:
-    """Guided button mapping. While the probe flag exists the hub (rgos-sticks) publishes the last raw key / hat / trigger
+    """Guided button mapping. While the probe flag exists the hub (rgos-input) publishes the last raw key / hat / trigger
     press of every source device as "<n>\\t<device>\\t<type>\\t<code>\\t<sign>". We ask for one button at a time and
     store raw press -> canonical code in button-map.json, then restart the hub. Optional buttons are skipped when
-    nothing is pressed for a few seconds. Do not touch the sticks while this runs."""
+    nothing is pressed for a few seconds."""
     PROMPTS = [("A", 0x131, False), ("B", 0x130, False), ("X", 0x133, False), ("Y", 0x134, False),
                ("L", 0x136, False), ("R", 0x137, False), ("SELECT", 0x13a, False), ("START", 0x13b, False),
                ("D-pad UP", 0x220, False), ("D-pad DOWN", 0x221, False), ("D-pad LEFT", 0x222, False),
                ("D-pad RIGHT", 0x223, False), ("MENU (home) button", 0x13c, True), ("L2 / left trigger", 0x138, True),
-               ("R2 / right trigger", 0x139, True), ("L3 (left stick click)", 0x13d, True),
-               ("R3 (right stick click)", 0x13e, True)]
+               ("R2 / right trigger", 0x139, True)]
     TIMEOUT, OPT_TIMEOUT, GAP = 25.0, 5.0, 0.5
-    if not HAS_STICKS:        # (no sticks: no L2/R2 triggers or stick clicks to teach)
-        PROMPTS = [p for p in PROMPTS if p[1] not in (0x138, 0x139, 0x13d, 0x13e)]
 
     def __init__(self):
         self.flag, self.rawf = os.path.join(RUN_DIR, "keys.probe"), os.path.join(RUN_DIR, "keys.raw")
@@ -827,8 +765,8 @@ class ButtonMap:
                 with open(BTN_MAP + ".tmp", "w") as f:
                     json.dump({"keys": self.keys}, f)
                 os.replace(BTN_MAP + ".tmp", BTN_MAP)
-                if os.environ.get("RGOS_WINDOWED") != "1":
-                    subprocess.run(["/bin/sh", "/usr/bin/systemctl", "restart", "rgos-sticks"], timeout=30)
+                set_swap_ab(False)              # a fresh mapping defines A and B exactly as pressed: no extra swap on top
+                restart_hub()
             except Exception as e:
                 return self._fail("Could not save: %s" % e)
             self.stop()
@@ -868,11 +806,10 @@ class ButtonMap:
 
     def lines(self):
         if self.state == "wait":
-            return ["Starting...", "Do not touch the sticks" if HAS_STICKS else "Do not press anything yet"]
+            return ["Starting...", "Do not press anything yet"]
         if self.state == "prompt":
             label, _, optional = self.PROMPTS[self.step]
-            return ["Press %s" % label, "(wait a few seconds to skip: this one is optional)" if optional
-                    else "Do not touch the sticks" if HAS_STICKS else ""]
+            return ["Press %s" % label, "(wait a few seconds to skip: this one is optional)" if optional else ""]
         if self.state == "apply":
             return ["Applying...", ""]
         return [self.msg]
@@ -885,11 +822,11 @@ CALIB_DONE = os.environ.get("RGOS_CALIBDONE", "/var/lib/rgos/calibrated")   # ex
 
 
 def calibration_needed():
-    """True on the first start of a fresh install: the launcher then forces the stick + button calibration.
+    """True on the first start of a fresh install: the launcher then forces the button mapping.
     An install that already has its calibration files (updated from an older version) is marked done without asking."""
     if os.path.exists(CALIB_DONE):
         return False
-    if os.path.exists(BTN_MAP) and (not HAS_STICKS or os.path.exists(STICK_MAP)):
+    if os.path.exists(BTN_MAP):
         mark_calibrated()
         return False
     return True
@@ -931,7 +868,7 @@ def read_brightness():
 def read_battery():
     """Return (percent, status), preferring the live sysfs gauge over the optional daemon cache.
 
-    RG34XX-SP doesn't ship an rgos-hw device config, so relying only on /run/rgos/battery
+    The RG Rotate doesn't ship an rgos-hw device config, so relying only on /run/rgos/battery
     made Settings > Information report n/a even when Linux exposed the battery gauge.
     """
     # Read Linux's live power_supply interface first. This works independently of rgos-hw.
@@ -1112,11 +1049,11 @@ def _play_next_launcher_track():
 
 def main():
     windowed = os.environ.get("RGOS_WINDOWED") == "1"
+    ensure_folders()
     # RGOS_VIDEO=fb: use SDL's dummy driver for the off-screen canvas and draw into /dev/fb0 through fbout.
     if not windowed and os.environ.get("RGOS_VIDEO") == "fb":
         os.environ["SDL_VIDEODRIVER"] = "dummy"
     pygame.init()
-    pygame.joystick.init()
     fb = None
     win = None
     if not windowed and os.environ.get("RGOS_VIDEO") != "fb":
@@ -1181,11 +1118,30 @@ def main():
 
     # screens: home -> systems/games, recents, favorites, tools and settings
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
-    cal = bmap = None
+    bmap = None
     set_idx, tool_idx, kb = 0, 0, None
     fm, fm_pop = None, None                    # file manager (Tools > File Manager) and its popup (menu / confirm / info)
     emu_idx = 0
     wconf, wscan, wf_idx, wf_msg, wf_msg_until, wf_pending = wifictl.load_conf(), wifictl.Scanner(), 0, "", 0.0, ("", False)
+    btm, bt_idx = btctl.Manager(), 0           # Settings > Bluetooth (worker thread; rows, power state, messages)
+    btm.refresh()
+    ssh_cache, ssh_msg_until = (0.0, sshctl.info()), 0.0
+
+    def ssh_info():
+        """sshctl.info() at most once a second (it reads a few small files)."""
+        nonlocal ssh_cache
+        if time.time() - ssh_cache[0] > 1.0:
+            ssh_cache = (time.time(), sshctl.info())
+        return ssh_cache[1]
+
+    def ssh_toggle():
+        nonlocal ssh_cache, ssh_msg_until
+        ssh_msg_until = time.time() + 30
+        def job_():
+            nonlocal ssh_cache, ssh_msg_until
+            sshctl.set_enabled(not sshctl.enabled())
+            ssh_cache, ssh_msg_until = (0.0, ssh_cache[1]), 0.0
+        threading.Thread(target=job_, daemon=True).start()
 
     def wf_do(fn, msg, *args):
         """Run a Wi-Fi change off the UI thread (it talks to wpa_cli), show msg for a few seconds, then reload the saved list."""
@@ -1201,7 +1157,8 @@ def main():
     if last:                                   # start with the cursor on the system/game played last
         sys_idx = next(i for i, sy in enumerate(vsys) if sy[0] == last["sid"])
         idx_by[last["sid"]] = games_of(last["sid"]).index(last)
-    rows, list_x, list_w, top_y, row_h = 8, 20, 450 + DX, 84, 44
+    rows, list_x, list_w, top_y, row_h = 8 + DY // 44, 20, 450 + DX, 84, 44
+    PH = 352 + DY                              # height of the big panels (side card, settings panels)
     clock = pygame.time.Clock()
     rd_vol, rd_bri, rd_bat = throttled(read_volume, 0.1), throttled(read_brightness, 0.1), throttled(read_battery, 10.0)
     last_act, clk_at, clk = time.monotonic(), 0, ""
@@ -1298,25 +1255,19 @@ def main():
     # Start random background music only after the splash has finished and released audio.
     _start_launcher_music()
 
-    # First start of a fresh install: force the guided stick calibration, then the button mapping, before the launcher
-    # can be used. A failed step restarts by itself; after 3 failures MENU may skip that step (so a broken stick hub can
-    # never lock the device out). The marker file is written only when the whole setup is finished.
+    # First start of a fresh install: force the guided button mapping before the launcher can be used. A failed attempt
+    # restarts by itself; after 3 failures MENU may skip it (so a broken input hub can never lock the device out). The
+    # marker file is written only when the setup is finished.
     forced = calibration_needed()
-    forced_stage, forced_fails, forced_t = "calib" if HAS_STICKS else "bmap", 0, None
+    forced_fails, forced_t = 0, None
     if forced:
-        if forced_stage == "calib":
-            cal, view = StickCal(), "calib"
-        else:
-            bmap, view = ButtonMap(), "bmap"
+        bmap, view = ButtonMap(), "bmap"
 
     def forced_next():
-        nonlocal forced, forced_stage, forced_fails, forced_t, bmap, view
+        nonlocal forced, forced_fails, forced_t, view
         forced_fails, forced_t = 0, None
-        if forced_stage == "calib":
-            forced_stage, bmap, view = "bmap", ButtonMap(), "bmap"
-        else:
-            forced, view = False, "home"
-            mark_calibrated()
+        forced, view = False, "home"
+        mark_calibrated()
 
     blanked = False
     while code is None:
@@ -1339,7 +1290,7 @@ def main():
                 if a == "quit":
                     code = EXIT_POWER
                 elif a == "menu" and forced_fails >= 3:
-                    (cal if forced_stage == "calib" else bmap).stop()
+                    bmap.stop()
                     forced_next()
                 continue
             if view in ("games", "recents", "favorites"):
@@ -1349,9 +1300,7 @@ def main():
             if a == "quit":
                 code = EXIT_POWER
             elif a == "menu":                  # MENU / home button: back to the home screen
-                if view in ("systems", "games", "recents", "favorites", "tools", "settings", "wifi", "info", "files"):
-                    view = "home"
-                elif view == "calib" and cal and cal.state in ("done", "fail"):
+                if view in ("systems", "games", "recents", "favorites", "tools", "settings", "wifi", "bt", "ssh", "info", "files"):
                     view = "home"
                 elif view == "bmap" and bmap and bmap.state in ("done", "fail"):
                     view = "home"
@@ -1365,15 +1314,15 @@ def main():
                 elif view in ("games", "recents", "favorites"):
                     n = len(recent_games() if view == "recents" else (favorite_games() if view == "favorites" else games_of(vsys[sys_idx][0] if vsys else "")))
                     idx_by[key] = min(idx, max(0, n - 1))
-            elif view == "home":               # 3-column x 2-row home grid
-                col, row = home_idx % 3, home_idx // 3
+            elif view == "home":               # HOME_COLS-column home grid
+                col, row = home_idx % HOME_COLS, home_idx // HOME_COLS
+                nrows = (len(HOME_ITEMS) + HOME_COLS - 1) // HOME_COLS
                 if a == "left":
-                    home_idx = row * 3 + (col - 1) % 3
+                    home_idx = row * HOME_COLS + (col - 1) % HOME_COLS
                 elif a == "right":
-                    home_idx = row * 3 + (col + 1) % 3
+                    home_idx = row * HOME_COLS + (col + 1) % HOME_COLS
                 elif a in ("up", "down"):
-                    other = 1 - row
-                    candidate = other * 3 + col
+                    candidate = ((row + (1 if a == "down" else -1)) % nrows) * HOME_COLS + col
                     home_idx = candidate if candidate < len(HOME_ITEMS) else home_idx
                 elif a == "a":
                     view = HOME_ITEMS[home_idx][0]
@@ -1424,7 +1373,7 @@ def main():
                 elif a == "a":
                     tgt = TOOLS[tool_idx][3]
                     if tgt == "@view:files":
-                        fm, fm_pop, view = filemanager.FileManager(fm_roots()), None, "files"
+                        fm, fm_pop, view = make_file_manager(), None, "files"
                     else:
                         code = launch(tgt)
             elif view == "files":
@@ -1527,10 +1476,16 @@ def main():
                         wconf, wf_idx, wf_msg, wf_msg_until = wifictl.load_conf(), 0, "", 0.0
                         wscan.kick()
                         view = "wifi"
+                    elif row == "bluetooth":
+                        bt_idx, view = 0, "bt"
+                        btm.refresh()
+                    elif row == "ssh":
+                        view = "ssh"
                     elif row == "info":        # read-only system information
                         view = "info"
-                    elif row == "calib":       # guided stick calibration
-                        cal, view = StickCal(), "calib"
+                    elif row == "swapab":      # exchange A and B for the menu AND the emulators (done in the input hub)
+                        set_swap_ab(not swap_ab_on())
+                        restart_hub()
                     else:                      # guided button mapping
                         bmap, view = ButtonMap(), "bmap"
             elif view == "emulators":
@@ -1614,22 +1569,43 @@ def main():
                             kb, view = Kbd("wifi_psk", "Password for %s" % net["ssid"], "", True), "kbd"
                         else:
                             wf_do(wifictl.join, "Joining %s..." % net["ssid"], net["ssid"], None, False)
+            elif view == "bt":
+                brows = list(btm.rows)                    # snapshot: the worker thread replaces the list
+                bn = len(brows) + 1                       # toggle, devices...
+                bt_idx = min(bt_idx, bn - 1)
+                if a == "down":
+                    bt_idx = (bt_idx + 1) % bn
+                elif a == "up":
+                    bt_idx = (bt_idx - 1) % bn
+                elif a == "b":
+                    view = "settings"
+                elif a == "x":
+                    btm.scan_now()
+                elif bt_idx == 0 and a == "a":
+                    btm.toggle()
+                elif bt_idx > 0 and a in ("a", "y"):
+                    d = brows[bt_idx - 1]
+                    if a == "y":
+                        if d["paired"]:
+                            btm.act(btctl.forget, d["mac"], "Forgetting " + d["name"])
+                    elif d["connected"]:
+                        btm.act(btctl.disconnect, d["mac"], "Disconnecting " + d["name"])
+                    elif d["paired"]:
+                        btm.act(btctl.connect, d["mac"], "Connecting to " + d["name"])
+                    else:
+                        btm.act(btctl.pair, d["mac"], "Pairing with " + d["name"])
+            elif view == "ssh":
+                if a == "b":
+                    view = "settings"
+                elif a == "a":
+                    ssh_toggle()
             elif view == "bmap":
                 if bmap.state in ("done", "fail") and a in ("a", "b"):
                     view = "settings"          # (while mapping, buttons only feed the wizard; it times out by itself)
-            elif view == "calib":
-                if a in ("a", "b"):
-                    if cal.state in ("done", "fail"):
-                        view = "settings"
-                    elif a == "b":             # cancel
-                        cal.stop()
-                        view = "settings"
-        if view == "calib" and cal:
-            cal.update()
         if view == "bmap" and bmap:
             bmap.update()
         if forced:
-            wiz, now_f = (cal if forced_stage == "calib" else bmap), time.time()
+            wiz, now_f = bmap, time.time()
             if wiz.state == "done":
                 forced_t = forced_t or now_f
                 if now_f - forced_t >= 1.5:    # leave the "Saved" message up for a moment
@@ -1639,10 +1615,7 @@ def main():
                     forced_t, forced_fails = now_f, forced_fails + 1
                 elif now_f - forced_t >= 3.0:  # retry the failed step automatically
                     forced_t = None
-                    if forced_stage == "calib":
-                        cal = StickCal()
-                    else:
-                        bmap = ButtonMap()
+                    bmap = ButtonMap()
         if {"start", "select"} <= inp.held:
             code = EXIT_POWER
 
@@ -1677,7 +1650,7 @@ def main():
             info = "Tools   %s" % clk
         elif view == "files" or (view == "kbd" and kb.field.startswith("fm_")):
             info = "Tools > Files   %s" % clk
-        elif view in ("settings", "calib", "bmap"):
+        elif view in ("settings", "bmap"):
             info = "Settings   %s" % clk
         elif view == "info":
             info = "Settings > Information   %s" % clk
@@ -1685,6 +1658,10 @@ def main():
             info = "Settings > Emulators   %s" % clk
         elif view == "wifi" or (view == "kbd" and kb.field.startswith("wifi")):
             info = "Settings > Wi-Fi   %s" % clk
+        elif view == "bt":
+            info = "Settings > Bluetooth   %s" % clk
+        elif view == "ssh":
+            info = "Settings > SSH / file transfer   %s" % clk
         else:
             info = clk
         if forced:
@@ -1708,8 +1685,10 @@ def main():
 
         if view == "home":
             gap = 14
-            bw, bh = (W - 40 - 2 * gap) // 3, 148
-            x0 = (W - (3 * bw + 2 * gap)) // 2
+            nrows_h = (len(HOME_ITEMS) + HOME_COLS - 1) // HOME_COLS
+            bw, bh = (W - 40 - (HOME_COLS - 1) * gap) // HOME_COLS, (H - top_y - 48 - (nrows_h - 1) * gap) // nrows_h
+            x0 = (W - (HOME_COLS * bw + (HOME_COLS - 1) * gap)) // 2
+            vo = (bh - 148) // 2                                        # tile content is laid out for 148 px; centre it in the taller tile
             subs = {"games": "%d games" % len(all_games),
                     "recents": "%d recent" % len(recent_games()),
                     "favorites": "%d favorites" % len(favorite_games()),
@@ -1717,22 +1696,22 @@ def main():
                     "settings": "Theme, Wi-Fi, info, controls",
                     "power": "Shut down RG OS"}
             for i, (hid, hname) in enumerate(HOME_ITEMS):
-                bx, by, sel = x0 + (i % 3) * (bw + gap), top_y + (i // 3) * (bh + gap), i == home_idx
+                bx, by, sel = x0 + (i % HOME_COLS) * (bw + gap), top_y + (i // HOME_COLS) * (bh + gap), i == home_idx
                 hl, lift = draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 18, 6, sel)
                 by -= lift                                              # contents ride up with the face
                 cx = bx + bw // 2                                       # icon on top, title and subtitle centred below it
-                ICONS[hid](canvas, cx, by + 44, _mix(DIM, ACCENT, hl), _mix(PANEL, SEL_BG, hl))
+                ICONS[hid](canvas, cx, by + 44 + vo, _mix(DIM, ACCENT, hl), _mix(PANEL, SEL_BG, hl))
                 title = f_row.render(hname, True, _mix(DIM, TEXT, hl))
-                canvas.blit(title, (cx - title.get_width() // 2, by + 84))
+                canvas.blit(title, (cx - title.get_width() // 2, by + 84 + vo))
                 sub = f_small.render(fit(f_small, subs[hid], bw - 24), True, DIM)
-                canvas.blit(sub, (cx - sub.get_width() // 2, by + 114))
+                canvas.blit(sub, (cx - sub.get_width() // 2, by + 114 + vo))
             hint = "A Open   X Rescan   START+SELECT Power off"
         elif view == "tools":
             for i, (_tid, tname, tdesc, _tgt) in enumerate(TOOLS):
-                by, sel = top_y + i * 56, i == tool_idx
-                draw_button(canvas, (list_x, by, W - 2 * list_x, 52), SEL_BG if sel else PANEL, 12, 3, sel)
-                canvas.blit(f_row.render(tname, True, TEXT if sel else DIM), (list_x + 24, by + 5))
-                canvas.blit(f_small.render(fit(f_small, tdesc, W - 2 * list_x - 48), True, DIM), (list_x + 24, by + 30))
+                by, sel = top_y + i * 90, i == tool_idx
+                draw_button(canvas, (list_x, by, W - 2 * list_x, 82), SEL_BG if sel else PANEL, 12, 3, sel)
+                canvas.blit(f_row.render(tname, True, TEXT if sel else DIM), (list_x + 24, by + 16))
+                canvas.blit(f_small.render(fit(f_small, tdesc, W - 2 * list_x - 48), True, DIM), (list_x + 24, by + 46))
             hint = "A Open   B Back   START+SELECT Power off"
         elif view == "files":
             canvas.blit(f_small.render(tail_fit(f_small, fm.title(), W - 2 * list_x), True, ACCENT), (list_x, 68))
@@ -1768,7 +1747,7 @@ def main():
                 pygame.draw.rect(canvas, ACCENT, (W - list_x - 6, ty, 6, th), border_radius=3)
             status = fm.busy or fm.msg or ("%d marked" % len(fm.marked) if fm.marked else
                                            ("Clipboard: %d item%s to %s" % (len(fm.clip), "" if len(fm.clip) == 1 else "s", "move" if fm.clip_cut else "copy")) if fm.clip else "")
-            canvas.blit(f_small.render(fit(f_small, status, W - 2 * list_x), True, ACCENT), (list_x, 420))
+            canvas.blit(f_small.render(fit(f_small, status, W - 2 * list_x), True, ACCENT), (list_x, 420 + DY))
             if fm.busy:
                 bx, by, bw, bh = W // 2 - 150, H // 2 - 30, 300, 60
                 pygame.draw.rect(canvas, PANEL, (bx, by, bw, bh), border_radius=12)
@@ -1816,30 +1795,34 @@ def main():
             srows = {"theme": ("Theme", "%s   (%d of %d)   Left/Right changes it" % (THEMES[theme_index(theme_id)][1], theme_index(theme_id) + 1, len(THEMES))),
                      "splash": ("Startup splash", spl + "   (plays once at power on)   X previews"),
                      "emulators": ("Emulators", "Choose the RetroArch core used for each system"),
-                     "calib": ("Calibrate sticks", "Fixes swapped or mixed-up stick directions in menu, games and ports"),
                      "bmap": ("Map buttons", "Teach RG OS which physical button is A, B, D-pad, ... (if buttons are wrong)"),
+                     "swapab": ("Swap A / B buttons", ("ON" if swap_ab_on() else "off") + "   A toggles it (use if A and B act the wrong way round)"),
                      "wifi": ("Wi-Fi", wifictl.status_text(wst)),
+                     "bluetooth": ("Bluetooth", {None: "Pair controllers, keyboards and headsets", True: "On   A opens the device list", False: "Off   A opens the device list"}[btm.on]),
+                     "ssh": ("SSH / file transfer", ("On: ssh or sftp root@%s" % wst["ip"] if wst["ip"] else "On: connect Wi-Fi to use it") if ssh_info()["running"] else "Off   A opens it"),
                      "info": ("Information", "Build, kernel, storage, battery, volume and input status")}
             for i, (nm, sub) in enumerate(srows[r] for r in SETTINGS_ROWS):
-                by, sel = top_y + i * 46, i == set_idx
-                draw_button(canvas, (list_x, by, W - 2 * list_x, 42), SEL_BG if sel else PANEL, 12, 3, sel)
-                canvas.blit(f_row.render(nm, True, TEXT if sel else DIM), (list_x + 24, by + 3))
+                by, sel = top_y + i * 86, i == set_idx
+                draw_button(canvas, (list_x, by, W - 2 * list_x, 78), SEL_BG if sel else PANEL, 12, 3, sel)
+                canvas.blit(f_row.render(nm, True, TEXT if sel else DIM), (list_x + 24, by + 14))
                 sub_w = W - 2 * list_x - 48
                 if SETTINGS_ROWS[i] == "theme":      # colour swatches of the active theme at the right end of the row
                     sw = [THEMES[theme_index(theme_id)][2][k] for k in ("BG", "PANEL", "SEL_BG", "ACCENT", "TEXT")]
                     sx = W - list_x - 24 - len(sw) * 24
                     for j, col in enumerate(sw):
-                        pygame.draw.rect(canvas, col, (sx + j * 24, by + 11, 20, 20), border_radius=5)
-                        pygame.draw.rect(canvas, DIM, (sx + j * 24, by + 11, 20, 20), 1, border_radius=5)
+                        pygame.draw.rect(canvas, col, (sx + j * 24, by + 29, 20, 20), border_radius=5)
+                        pygame.draw.rect(canvas, DIM, (sx + j * 24, by + 29, 20, 20), 1, border_radius=5)
                     sub_w = sx - (list_x + 24) - 12
-                canvas.blit(f_small.render(fit(f_small, sub, sub_w), True, DIM), (list_x + 24, by + 24))
+                canvas.blit(f_small.render(fit(f_small, sub, sub_w), True, DIM), (list_x + 24, by + 46))
             hint = ("Left/Right Change theme   " if SETTINGS_ROWS[set_idx] == "theme" else
-                    "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else "A Open   ") + "B Back   START+SELECT Power off"
+                    "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else
+                    "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + "B Back   START+SELECT Power off"
         elif view == "emulators":
             emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch" and compatible_cores(sy[0])]
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
-            first_emu = min(max(0, emu_idx - 3), max(0, len(emu_systems) - 7))
-            for slot, sy in enumerate(emu_systems[first_emu:first_emu + 7]):
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            emu_vis = 7 + DY // 44
+            first_emu = min(max(0, emu_idx - emu_vis // 2), max(0, len(emu_systems) - emu_vis))
+            for slot, sy in enumerate(emu_systems[first_emu:first_emu + emu_vis]):
                 i = first_emu + slot
                 sid, _tag, _runner, _ext, fullname = sy
                 cores = compatible_cores(sid)
@@ -1858,22 +1841,22 @@ def main():
                 canvas.blit(f_row.render("No installed compatible RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
             hint = "Up/Down System   Left/Right Change compatible core   B Back"
         elif view == "info":
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
             info_rows = settings_info()
             for i, (k, v) in enumerate(info_rows):
-                y = top_y + 10 + i * (34 if len(info_rows) <= 9 else 31)      # 10 rows (with SD card 2) still fit the panel
+                y = top_y + 14 + i * (46 if len(info_rows) <= 9 else 42)      # 10 rows (with SD card 2) still fit the panel
                 canvas.blit(f_row.render(k, True, DIM), (list_x + 24, y))
                 canvas.blit(f_row.render(fit(f_row, v, W - 2 * list_x - 48 - 190), True, TEXT), (list_x + 214, y))
             hint = "B Back   START+SELECT Power off"
         elif view == "wifi":
             wst, wrows = wifictl.status(), wscan.rows(wconf)
             wn = len(wrows) + 2
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336), border_radius=10)
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
             head = wifictl.status_text(wst) if wconf["enabled"] else "Wi-Fi is off"
             canvas.blit(f_row.render(fit(f_row, head, W - 2 * list_x - 56), True, ACCENT), (list_x + 28, top_y + 8))
             if wst["state"] == "connected" and wst["rssi"] is not None:
                 canvas.blit(f_small.render("%d dBm" % wst["rssi"], True, DIM), (W - list_x - 90, top_y + 12))
-            vis = 7
+            vis = 7 + DY // 40
             first = min(max(0, wf_idx - vis // 2), max(0, wn - vis))
             for slot in range(min(vis, wn)):
                 i = first + slot
@@ -1912,49 +1895,86 @@ def main():
             else:
                 note = ""
             if note:
-                canvas.blit(f_small.render(fit(f_small, note, W - 2 * list_x - 56), True, TEXT), (list_x + 28, top_y + 310))
+                canvas.blit(f_small.render(fit(f_small, note, W - 2 * list_x - 56), True, TEXT), (list_x + 28, top_y + 310 + DY))
             hint = "A Connect   X Scan   Y Forget   B Back"
+        elif view == "bt":
+            brows = list(btm.rows)
+            bn = len(brows) + 1
+            bt_idx = min(bt_idx, bn - 1)
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            head = ("No Bluetooth adapter found (see rgos-logs.txt)" if btm.on is None and not btctl.adapter() else
+                    "Starting Bluetooth..." if btm.on is None else "Bluetooth is on" if btm.on else "Bluetooth is off")
+            canvas.blit(f_row.render(fit(f_row, head, W - 2 * list_x - 56), True, ACCENT), (list_x + 28, top_y + 8))
+            vis = 7 + DY // 40
+            first = min(max(0, bt_idx - vis // 2), max(0, bn - vis))
+            for slot in range(min(vis, bn)):
+                i = first + slot
+                y, sel = top_y + 44 + slot * 40, i == bt_idx
+                if sel:
+                    pygame.draw.rect(canvas, SEL_BG, (list_x + 6, y, W - 2 * list_x - 12, 38), border_radius=8)
+                    pygame.draw.rect(canvas, ACCENT, (list_x + 6, y, 5, 38), border_radius=3)
+                col = TEXT if sel else DIM
+                if i == 0:
+                    on = bool(btm.on)
+                    pygame.draw.rect(canvas, ACCENT if on else DIM, (list_x + 28, y + 11, 16, 16), 0 if on else 2, border_radius=3)
+                    canvas.blit(f_row.render("Bluetooth", True, col), (list_x + 56, y + 8))
+                    t = f_small.render("On" if on else "Off", True, DIM)
+                    canvas.blit(t, (W - list_x - 28 - t.get_width(), y + 12))
+                else:
+                    d = brows[i - 1]
+                    canvas.blit(f_row.render(fit(f_row, d["name"], W - 2 * list_x - 230), True, col), (list_x + 56, y + 8))
+                    tag = "connected" if d["connected"] else "paired" if d["paired"] else ""
+                    t = f_small.render(tag, True, ACCENT if d["connected"] else DIM)
+                    canvas.blit(t, (W - list_x - 28 - t.get_width(), y + 12))
+            if time.time() < btm.msg_until:
+                note = btm.msg
+            elif btm.scanning:
+                note = "Scanning... put your device in pairing mode"
+            elif btm.on and not brows:
+                note = "No devices - put the device in pairing mode, then press X to scan"
+            else:
+                note = ""
+            if note:
+                canvas.blit(f_small.render(fit(f_small, note, W - 2 * list_x - 56), True, TEXT), (list_x + 28, top_y + 310 + DY))
+            hint = "A Pair/Connect/Disconnect   X Scan   Y Forget   B Back"
+        elif view == "ssh":
+            si = ssh_info()
+            wst_ = wifictl.status()
+            ip_ = wst_["ip"] or "(connect Wi-Fi first)"
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            canvas.blit(f_row.render("SSH / file transfer is " + ("ON" if si["running"] else "off"), True, ACCENT), (list_x + 28, top_y + 14))
+            lines_ = [("Address", ip_), ("Port", str(si["port"])), ("User", si["user"]), ("Password", si["password"]),
+                      ("Files", "sftp://root@%s   (WinSCP, FileZilla, scp)" % (wst_["ip"] or "<ip>")),
+                      ("Folders", "/media/roms = ROMS partition,  /boot = boot partition")]
+            for k, (kk, vv) in enumerate(lines_):
+                canvas.blit(f_row.render(kk, True, DIM), (list_x + 28, top_y + 62 + k * 40))
+                canvas.blit(f_row.render(fit(f_row, vv, W - 2 * list_x - 56 - 150), True, TEXT), (list_x + 178, top_y + 62 + k * 40))
+            canvas.blit(f_small.render(fit(f_small, "Change the password: put ssh-password.txt on the boot partition. Use a key: authorized_keys.", W - 2 * list_x - 56), True, DIM),
+                        (list_x + 28, top_y + 310 + DY))
+            hint = "A Turn " + ("off" if si["running"] else "on") + "   B Back"
         elif view == "kbd":
             KW = 636 + DX
             KX = (W - KW) // 2
             canvas.blit(f_small.render(kb.title, True, DIM), (KX, top_y - 4))
-            pygame.draw.rect(canvas, PANEL, (KX, top_y + 16, KW, 40), border_radius=8)
-            pygame.draw.rect(canvas, ACCENT, (KX, top_y + 16, KW, 40), 2, border_radius=8)
+            pygame.draw.rect(canvas, PANEL, (KX, top_y + 16, KW, 52), border_radius=8)
+            pygame.draw.rect(canvas, ACCENT, (KX, top_y + 16, KW, 52), 2, border_radius=8)
             shown = kb.text if kb.show else "*" * len(kb.text)
             canvas.blit(f_row.render(tail_fit(f_row, shown, 590 + DX) + ("_" if int(time.time() * 2) % 2 == 0 else ""), True, TEXT),
-                        (KX + 14, top_y + 25))
+                        (KX + 14, top_y + 31))
             for r in range(5):
                 keys = kb.keys(r)
-                ky = top_y + 72 + r * 50 + (6 if r == 4 else 0)
+                ky = top_y + 92 + r * 80 + (8 if r == 4 else 0)
                 kw = (KW - 9 * 4) // 10 if r < 4 else (KW - 4 * 4) // 5
                 for c, k in enumerate(keys):
                     kx = KX + c * (kw + 4)
                     sel = (r == kb.row and c == kb.col)
-                    draw_button(canvas, (kx, ky, kw, 44), SEL_BG if sel else PANEL, 8, 4, sel)
+                    draw_button(canvas, (kx, ky, kw, 70), SEL_BG if sel else PANEL, 8, 4, sel)
                     label = KB_LAYER_NAMES[(kb.layer + 1) % 3] if k == "Layer" else k
                     t = f_row.render(label, True, ACCENT if (sel and r == 4) else (TEXT if sel else DIM))
-                    canvas.blit(t, (kx + (kw - t.get_width()) // 2, ky + 11))
+                    canvas.blit(t, (kx + (kw - t.get_width()) // 2, ky + (70 - t.get_height()) // 2))
             hint = "A Type   B Delete   START Done" + ("   X Show/hide" if kb.secret else "")
-        elif view == "calib":
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 330), border_radius=14)
-            canvas.blit(f_big.render("Stick calibration", True, ACCENT), (list_x + 28, top_y + 22))
-            if cal.state in ("base", "prompt", "release", "apply"):
-                n = min(cal.step + 1, len(cal.PROMPTS))
-                canvas.blit(f_small.render("Step %d of %d" % (n, len(cal.PROMPTS)), True, DIM), (list_x + 28, top_y + 58))
-            for i, line in enumerate(cal.lines()):
-                for j, wl in enumerate(wrap(f_big if i == 0 else f_row, line, W - 2 * list_x - 60)):
-                    canvas.blit((f_big if i == 0 else f_row).render(wl, True, TEXT if i == 0 else DIM),
-                                (list_x + 28, top_y + 110 + i * 56 + j * 26))
-            if cal.state == "fail":
-                hint = "A/B Back"
-            elif cal.state == "done":
-                hint = "A/B Back"
-            else:
-                hint = "B Cancel"
-            if forced:
-                hint = "Step 1 of 2 - required first-time setup" + ("   MENU Skip" if forced_fails >= 3 else "")
         elif view == "bmap":
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 330), border_radius=14)
+            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 330 + DY), border_radius=14)
             canvas.blit(f_big.render("Button mapping", True, ACCENT), (list_x + 28, top_y + 22))
             if bmap.state in ("prompt", "apply"):
                 n = min(bmap.step + 1, len(bmap.PROMPTS))
@@ -1965,7 +1985,7 @@ def main():
                                 (list_x + 28, top_y + 110 + i * 56 + j * 26))
             hint = "A/B Back" if bmap.state in ("done", "fail") else "Press the button shown (wizard stops by itself if idle)"
             if forced:
-                hint = "Step %d of %d - required first-time setup" % (2 if HAS_STICKS else 1, 2 if HAS_STICKS else 1) + ("   MENU Skip" if forced_fails >= 3 else "")
+                hint = "Required first-time setup" + ("   MENU Skip" if forced_fails >= 3 else "")
         elif view == "systems":
             if not vsys:
                 for i, m in enumerate(["No games found.",
@@ -1974,7 +1994,7 @@ def main():
                                        "or launcher scripts in roms/ports/, then press X (B = back)."]):
                     canvas.blit((f_big if i == 0 else f_row).render(m, True, TEXT if i == 0 else DIM),
                                 (40, 150 + i * 34))
-            sys_rows = 6                       # rows that fit between the header and the hint line
+            sys_rows = 6 + DY // 56                # rows that fit between the header and the hint line
             sys_first = max(0, min(sys_idx - sys_rows // 2, len(vsys) - sys_rows))
             for r, (xid, xtag, xcore, _e, xname) in enumerate(vsys):
                 if not sys_first <= r < sys_first + sys_rows:
@@ -1993,15 +2013,15 @@ def main():
                             (list_x + 98, y + 28))
             px, cnt = 500 + DX, len(games)
             if vsys:
-                pygame.draw.rect(canvas, PANEL, (px, top_y, 200, 352), border_radius=10)
-                pygame.draw.rect(canvas, SEL_BG, (px + 20, top_y + 20, 160, 110), border_radius=8)
+                pygame.draw.rect(canvas, PANEL, (px, top_y, 200, PH), border_radius=10)
+                pygame.draw.rect(canvas, SEL_BG, (px + 20, top_y + 20, 160, 110 + DY // 2), border_radius=8)
                 ini = f_logo.render(stag, True, ACCENT)
-                canvas.blit(ini, (px + 100 - ini.get_width() // 2, top_y + 52))
+                canvas.blit(ini, (px + 100 - ini.get_width() // 2, top_y + 52 + DY // 4))
                 for i, line in enumerate(wrap(f_row, sname, 170)):
-                    canvas.blit(f_row.render(line, True, TEXT), (px + 15, top_y + 148 + i * 26))
+                    canvas.blit(f_row.render(line, True, TEXT), (px + 15, top_y + 148 + DY // 2 + i * 26))
                 canvas.blit(f_small.render("%d %s%s" % (cnt, "port" if sid == "ports" else "game", "" if cnt == 1 else "s"), True, DIM),
-                            (px + 15, top_y + 300))
-                canvas.blit(f_small.render("Native Linux games" if score == "native" else "RetroArch + mGBA", True, DIM), (px + 15, top_y + 322))
+                            (px + 15, top_y + 300 + DY))
+                canvas.blit(f_small.render("Native Linux games" if score == "native" else "RetroArch + mGBA", True, DIM), (px + 15, top_y + 322 + DY))
             if not os.path.isdir(ROMS_DIR):
                 canvas.blit(f_small.render("ROMS partition not found.", True, ACCENT), (list_x + 18, H - 52))
             hint = "A Open   B Back   X Rescan   START+SELECT Power off"
@@ -2053,17 +2073,17 @@ def main():
 
             g = games[idx]
             px = 500 + DX
-            pygame.draw.rect(canvas, PANEL, (px, top_y, 200, 352), border_radius=10)
-            pygame.draw.rect(canvas, SEL_BG, (px + 20, top_y + 14, 160, 130), border_radius=8)
+            pygame.draw.rect(canvas, PANEL, (px, top_y, 200, PH), border_radius=10)
+            pygame.draw.rect(canvas, SEL_BG, (px + 20, top_y + 14, 160, 130 + DY // 2), border_radius=8)
             ini = f_logo.render(g["title"][:1].upper(), True, ACCENT)
-            canvas.blit(ini, (px + 100 - ini.get_width() // 2, top_y + 62))
-            ty_ = top_y + 152
+            canvas.blit(ini, (px + 100 - ini.get_width() // 2, top_y + 62 + DY // 4))
+            ty_ = top_y + 152 + DY // 2
             for line in wrap_n(f_row, g["title"], 170, 2):
                 canvas.blit(f_row.render(line, True, TEXT), (px + 15, ty_))
                 ty_ += 24
             canvas.blit(f_small.render("%.1f MB" % (g["size"] / 1048576), True, DIM),
-                        (px + 15, top_y + 300))
-            canvas.blit(f_small.render("Native port", True, DIM), (px + 15, top_y + 322))
+                        (px + 15, top_y + 300 + DY))
+            canvas.blit(f_small.render("Native port", True, DIM), (px + 15, top_y + 322 + DY))
             hint = ("A Run   Y Favorite/unfavorite   B Back   L/R Page   X Rescan   START+SELECT Power off"
                     if view == "games" else "A Run   B Back   L/R Page   X Rescan   START+SELECT Power off")
 

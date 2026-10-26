@@ -3,14 +3,15 @@ name: Build RGOS image or update
 on:
   workflow_dispatch:
     inputs:
-      board:
-        description: Which device build to run
+      device:
+        description: Which device to build for
         required: true
         type: choice
         options:
-          - rg-rotate
           - rg34xxsp
-        default: rg-rotate
+          - rg-rotate
+          - all
+        default: rg34xxsp
       artifact:
         description: What to build
         required: true
@@ -24,26 +25,18 @@ on:
         required: false
         type: string
         default: ''
-      ddr_variant:
-        description: rg34xxsp only - ROCKNIX H700 memory variant used for boot assets
-        required: true
-        type: choice
-        options:
-          - DDR4
-          - DDR3
-        default: DDR4
       build_psx:
-        description: rg-rotate only - build the PlayStation core from source (slow under emulation; off skips it)
+        description: build the PlayStation core from source (slow under emulation; off skips it)
         required: true
         type: boolean
         default: true
       update_extlinux:
-        description: rg-rotate update-tar only - also include extlinux.conf in the update
+        description: update-tar only - also include extlinux.conf in the update
         required: true
         type: boolean
         default: false
       rocknix_url:
-        description: rg-rotate only - override the ROCKNIX-T618 image URL (blank uses the build.sh default)
+        description: override the stock ROCKNIX image URL (blank uses the build.sh default; not allowed with device=all, the devices use different images)
         required: false
         type: string
         default: ''
@@ -52,28 +45,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: rgos-build-${{ inputs.board }}-${{ github.ref }}
+  group: rgos-build-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     # A self-hosted Linux runner with ample disk/RAM may be needed if GitHub-hosted
-    # runner disk space is insufficient for Buildroot plus the upstream image.
+    # runner disk space is insufficient for the Debian rootfs plus the upstream image.
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
       - name: Check out RGOS
         uses: actions/checkout@v4
-
-      - name: Install host dependencies (rg34xxsp)
-        if: inputs.board == 'rg34xxsp'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc build-essential cpio curl file g++ gcc git gzip libncurses-dev \
-            make mtools patch perl python3 python3-pip python3-setuptools \
-            rsync squashfs-tools unzip wget xz-utils dosfstools \
-            e2fsprogs fdisk util-linux
 
       - name: Prepare build ID
         id: metadata
@@ -92,117 +75,19 @@ jobs:
             exit 2
           fi
           echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
-          echo "Building ${{ inputs.board }} artifact: ${{ inputs.artifact }} (ID: $build_id)"
+          if [[ "${{ inputs.device }}" == "all" && -n "${{ inputs.rocknix_url }}" ]]; then
+            echo "rocknix_url cannot be combined with device=all (each device has its own stock image)." >&2
+            exit 2
+          fi
+          echo "Building ${{ inputs.device }} artifact: ${{ inputs.artifact }} (ID: $build_id)"
 
-      - name: Restore Buildroot caches (rg34xxsp)
-        if: inputs.board == 'rg34xxsp'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ~/.buildroot-ccache
-            buildroot/dl
-          key: rgos-rg34xxsp-br-${{ hashFiles('buildroot-external/configs/rgos_rg34xxsp_defconfig') }}-${{ github.run_id }}
-          restore-keys: |
-            rgos-rg34xxsp-br-${{ hashFiles('buildroot-external/configs/rgos_rg34xxsp_defconfig') }}-
-            rgos-rg34xxsp-br-
-
-      - name: Build disk image (rg34xxsp)
-        if: inputs.board == 'rg34xxsp' && inputs.artifact == 'img'
-        env:
-          RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
-          RGOS_JOBS: '2'
-          RGOS_H700_DDR: ${{ inputs.ddr_variant }}
-          CCACHE_MAXSIZE: 6G
-        run: |
-          set -euo pipefail
-          bash ./build.sh prepare
-          bash ./build.sh build
-          test -s output/rgos-rg34xxsp.img
-
-      - name: Build update tar (rg34xxsp)
-        if: inputs.board == 'rg34xxsp' && inputs.artifact == 'update-tar'
-        env:
-          RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
-          RGOS_JOBS: '2'
-          RGOS_H700_DDR: ${{ inputs.ddr_variant }}
-          CCACHE_MAXSIZE: 6G
-        run: |
-          set -euo pipefail
-          bash ./build.sh prepare
-          bash ./build.sh update
-          test -s "output/rgos-update-${RGOS_BUILD_ID}.tar"
-
-      # Save even when the build failed: the compiler cache is what makes the next attempt fast (LLVM/Mesa take ~2.5 h from scratch).
-      - name: Save Buildroot caches (rg34xxsp)
-        if: always() && inputs.board == 'rg34xxsp'
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.buildroot-ccache
-            buildroot/dl
-          key: rgos-rg34xxsp-br-${{ hashFiles('buildroot-external/configs/rgos_rg34xxsp_defconfig') }}-${{ github.run_id }}
-
-      - name: Verify update archive (rg34xxsp)
-        if: inputs.board == 'rg34xxsp' && inputs.artifact == 'update-tar'
-        env:
-          RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
-        run: |
-          python3 - "$RGOS_BUILD_ID" "output/rgos-update-${RGOS_BUILD_ID}.tar" <<'PY'
-          import json, sys, tarfile
-          build_id, path = sys.argv[1:]
-          with tarfile.open(path, 'r:') as archive:
-              names = archive.getnames()
-              if 'manifest.json' not in names:
-                  raise SystemExit('Update tar has no manifest.json')
-              manifest = json.load(archive.extractfile('manifest.json'))
-              if manifest.get('id') != build_id:
-                  raise SystemExit('Update manifest build ID mismatch')
-              if 'boot/rgos-initrd.gz' not in names or 'boot/extlinux/extlinux.conf' not in names:
-                  raise SystemExit('Update tar is missing required boot files')
-              for name, digest in manifest.get('files', {}).items():
-                  member = archive.extractfile('boot/' + name)
-                  if member is None:
-                      raise SystemExit(f'Manifest file missing from archive: {name}')
-                  import hashlib
-                  actual = hashlib.sha256(member.read()).hexdigest()
-                  if actual != digest:
-                      raise SystemExit(f'SHA-256 mismatch: {name}')
-          print(f'Validated update archive: {path}')
-          PY
-
-      - name: Upload disk image (rg34xxsp)
-        if: inputs.board == 'rg34xxsp' && inputs.artifact == 'img'
-        uses: actions/upload-artifact@v4
-        with:
-          name: rgos-${{ steps.metadata.outputs.build_id }}-img
-          path: output/rgos-rg34xxsp.img
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
-      - name: Upload update tar (rg34xxsp)
-        if: inputs.board == 'rg34xxsp' && inputs.artifact == 'update-tar'
-        uses: actions/upload-artifact@v4
-        with:
-          name: rgos-${{ steps.metadata.outputs.build_id }}-update-tar
-          path: output/rgos-update-${{ steps.metadata.outputs.build_id }}.tar
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 14
-
-      # ---------------------------------------------------------------------------------------------
-      # RG Rotate (boards/other/rg-rotate): Debian rootfs on top of the stock ROCKNIX-T618 image.
-      # build.sh needs root, loop devices, debootstrap and qemu-user-static (arm64 chroot).
-      # ---------------------------------------------------------------------------------------------
-      - name: Free disk space (rg-rotate)
-        if: inputs.board == 'rg-rotate'
+      - name: Free disk space
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
           sudo apt-get clean
           df -h /
 
-      - name: Install host dependencies (rg-rotate)
-        if: inputs.board == 'rg-rotate'
+      - name: Install host dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -220,56 +105,73 @@ jobs:
           fi
           test -e /proc/sys/fs/binfmt_misc/qemu-aarch64 || { echo "qemu-aarch64 binfmt handler is not registered" >&2; exit 1; }
 
-      - name: Build disk image (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'img'
+      - name: Build disk image
+        if: inputs.artifact == 'img'
         env:
+          DEVICE: ${{ inputs.device }}
           BUILD_PSX: ${{ inputs.build_psx }}
           ROCKNIX_URL_INPUT: ${{ inputs.rocknix_url }}
         run: |
           set -euo pipefail
           [[ "$BUILD_PSX" == "true" ]] || export PSX_REPO=none
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
-          bash ./build.sh rg-rotate image
-          test -s boards/other/rg-rotate/out/rg-rotate-rgos.img
+          bash ./build.sh "$DEVICE" image
+          if [[ "$DEVICE" == "all" ]]; then
+            test -s out/rg-rotate-rgos.img && test -s out/rg34xxsp-rgos.img
+          else
+            test -s "out/$DEVICE-rgos.img"
+          fi
 
-      - name: Verify disk image (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'img'
-        working-directory: boards/other/rg-rotate
+      - name: Verify disk image
+        if: inputs.artifact == 'img'
         run: |
           set -euo pipefail
-          img=out/rg-rotate-rgos.img
-          loop="$(sudo losetup -Pfr --show "$img")"
-          mnt="$(mktemp -d)"
-          cleanup() { set +e; mountpoint -q "$mnt" && sudo umount "$mnt"; sudo losetup -d "$loop"; }
-          trap cleanup EXIT
-          sudo partprobe "$loop" 2>/dev/null || true
-          for _ in 1 2 3 4 5; do [[ -b "${loop}p1" ]] && break; sleep 1; done
+          verify() {
+            local img="$1" ptable="$2" loop mnt label
+            loop="$(sudo losetup -Pfr --show "$img")"
+            mnt="$(mktemp -d)"
+            sudo partprobe "$loop" 2>/dev/null || true
+            for _ in 1 2 3 4 5; do [[ -b "${loop}p1" ]] && break; sleep 1; done
+            label="$(sudo blkid -s LABEL -o value "${loop}p1")"
+            [[ "$label" == "RGOS" ]] || { echo "$img: boot partition label is '$label', expected RGOS" >&2; sudo losetup -d "$loop"; return 1; }
+            if [[ "$ptable" == gpt ]]; then
+              sudo sgdisk -i 3 "$img" | grep -q "^Partition name: 'uboot'" \
+                || { echo "$img: partition 3 is not 'uboot': the device would boot Android" >&2; sudo losetup -d "$loop"; return 1; }
+            else
+              sfdisk -d "$img" | grep -q '^label: dos' \
+                || { echo "$img: not an MBR image" >&2; sudo losetup -d "$loop"; return 1; }
+            fi
+            sudo mount -o ro "${loop}p1" "$mnt"
+            local rc=0 f
+            for f in SYSTEM rgos-initrd.cpio extlinux/extlinux.conf extlinux/extlinux.conf.stock; do
+              test -s "$mnt/$f" || { echo "$img: boot partition is missing $f" >&2; rc=1; }
+            done
+            if [[ "$ptable" == dos ]]; then
+              test -s "$mnt/dtb.img" || { echo "$img: boot partition is missing dtb.img" >&2; rc=1; }
+            fi
+            grep -q 'rdinit=/rgos-init' "$mnt/extlinux/extlinux.conf" || { echo "$img: extlinux.conf has no rdinit=/rgos-init" >&2; rc=1; }
+            if grep -rqi 'LABEL=ROCKNIX' "$mnt/extlinux"; then echo "$img: extlinux still references LABEL=ROCKNIX" >&2; rc=1; fi
+            sudo umount "$mnt"; sudo losetup -d "$loop"
+            (( rc == 0 )) && echo "Validated $img: label RGOS, $ptable partition table, SYSTEM + initramfs present."
+            return $rc
+          }
+          case "${{ inputs.device }}" in
+            rg34xxsp)  verify out/rg34xxsp-rgos.img dos ;;
+            rg-rotate) verify out/rg-rotate-rgos.img gpt ;;
+            all)       verify out/rg-rotate-rgos.img gpt; verify out/rg34xxsp-rgos.img dos ;;
+          esac
 
-          label="$(sudo blkid -s LABEL -o value "${loop}p1")"
-          [[ "$label" == "RGOS" ]] || { echo "Boot partition label is '$label', expected RGOS" >&2; exit 1; }
-          sudo sgdisk -i 3 "$img" | grep -q "^Partition name: 'uboot'" \
-            || { echo "Partition 3 is not 'uboot': the device would boot Android" >&2; exit 1; }
-
-          sudo mount -o ro "${loop}p1" "$mnt"
-          for f in SYSTEM rgos-initrd.cpio extlinux/extlinux.conf extlinux/extlinux.conf.stock; do
-            test -s "$mnt/$f" || { echo "Boot partition is missing $f" >&2; exit 1; }
-          done
-          grep -q 'rdinit=/rgos-init' "$mnt/extlinux/extlinux.conf" || { echo "extlinux.conf has no rdinit=/rgos-init" >&2; exit 1; }
-          if grep -rqi 'LABEL=ROCKNIX' "$mnt/extlinux"; then
-            echo "extlinux still references LABEL=ROCKNIX" >&2; exit 1
-          fi
-          echo "Validated $img: label RGOS, uboot partition, SYSTEM + initramfs present."
-
-      - name: Compress disk image (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'img'
-        working-directory: boards/other/rg-rotate/out
+      - name: Compress disk image
+        if: inputs.artifact == 'img'
+        working-directory: out
         run: |
-          sudo gzip -6 -f rg-rotate-rgos.img
-          ls -la rg-rotate-rgos.img.gz
+          sudo gzip -6 -f ./*-rgos.img
+          ls -la ./*-rgos.img.gz
 
-      - name: Build update tar (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'update-tar'
+      - name: Build update tar
+        if: inputs.artifact == 'update-tar'
         env:
+          DEVICE: ${{ inputs.device }}
           UPDATE_ID: ${{ steps.metadata.outputs.build_id }}
           BUILD_PSX: ${{ inputs.build_psx }}
           INCLUDE_EXTLINUX: ${{ inputs.update_extlinux }}
@@ -279,58 +181,66 @@ jobs:
           [[ "$BUILD_PSX" == "true" ]] || export PSX_REPO=none
           [[ "$INCLUDE_EXTLINUX" != "true" ]] || export UPDATE_EXTLINUX=1
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
-          bash ./build.sh rg-rotate update
-          test -s "boards/other/rg-rotate/out/rgos-update-${UPDATE_ID}.tar"
+          bash ./build.sh "$DEVICE" update
+          if [[ "$DEVICE" == "all" ]]; then
+            test -s "out/rgos-update-rg-rotate-${UPDATE_ID}.tar" && test -s "out/rgos-update-rg34xxsp-${UPDATE_ID}.tar"
+          else
+            test -s "out/rgos-update-${DEVICE}-${UPDATE_ID}.tar"
+          fi
 
-      - name: Verify update archive (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'update-tar'
+      - name: Verify update archive
+        if: inputs.artifact == 'update-tar'
         env:
           RGOS_BUILD_ID: ${{ steps.metadata.outputs.build_id }}
         run: |
-          python3 - "$RGOS_BUILD_ID" "boards/other/rg-rotate/out/rgos-update-${RGOS_BUILD_ID}.tar" <<'PY'
-          import hashlib, json, sys, tarfile
-          build_id, path = sys.argv[1:]
-          with tarfile.open(path, 'r:') as archive:
-              names = archive.getnames()
-              if 'manifest.json' not in names:
-                  raise SystemExit('Update tar has no manifest.json')
-              manifest = json.load(archive.extractfile('manifest.json'))
-              if manifest.get('id') != build_id:
-                  raise SystemExit('Update manifest build ID mismatch')
-              if manifest.get('device') != 'rg-rotate':
-                  raise SystemExit('Update manifest device is not rg-rotate')
-              files = manifest.get('files', {})
-              for required in ('SYSTEM', 'rgos-initrd.cpio'):
-                  if required not in files or 'boot/' + required not in names:
-                      raise SystemExit(f'Update tar is missing {required}')
-              for name, digest in files.items():
-                  member = archive.extractfile('boot/' + name)
-                  if member is None:
-                      raise SystemExit(f'Manifest file missing from archive: {name}')
-                  h = hashlib.sha256()
-                  for chunk in iter(lambda: member.read(1 << 20), b''):
-                      h.update(chunk)
-                  if h.hexdigest() != digest:
-                      raise SystemExit(f'SHA-256 mismatch: {name}')
-          print(f'Validated update archive: {path}')
+          python3 - "$RGOS_BUILD_ID" out/rgos-update-*-"$RGOS_BUILD_ID".tar <<'PY'
+          import hashlib, json, os, re, sys, tarfile
+          build_id, paths = sys.argv[1], sys.argv[2:]
+          if not paths:
+              raise SystemExit('No update tar was produced')
+          for path in paths:
+              device = re.fullmatch(r'rgos-update-(.+)-' + re.escape(build_id) + r'\.tar', os.path.basename(path)).group(1)
+              with tarfile.open(path, 'r:') as archive:
+                  names = archive.getnames()
+                  if 'manifest.json' not in names:
+                      raise SystemExit(path + ': no manifest.json')
+                  manifest = json.load(archive.extractfile('manifest.json'))
+                  if manifest.get('id') != build_id:
+                      raise SystemExit(path + ': manifest build ID mismatch')
+                  if manifest.get('device') != device:
+                      raise SystemExit(path + ': manifest device is not ' + device)
+                  files = manifest.get('files', {})
+                  for required in ('SYSTEM', 'rgos-initrd.cpio'):
+                      if required not in files or 'boot/' + required not in names:
+                          raise SystemExit(path + ': missing ' + required)
+                  for name, digest in files.items():
+                      member = archive.extractfile('boot/' + name)
+                      if member is None:
+                          raise SystemExit(path + ': manifest file missing from archive: ' + name)
+                      h = hashlib.sha256()
+                      for chunk in iter(lambda: member.read(1 << 20), b''):
+                          h.update(chunk)
+                      if h.hexdigest() != digest:
+                          raise SystemExit(path + ': SHA-256 mismatch: ' + name)
+              print('Validated update archive: ' + path)
           PY
 
-      - name: Upload disk image (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'img'
+      - name: Upload disk image
+        if: inputs.artifact == 'img'
         uses: actions/upload-artifact@v4
         with:
-          name: rg-rotate-rgos-${{ steps.metadata.outputs.build_id }}-img
-          path: boards/other/rg-rotate/out/rg-rotate-rgos.img.gz
+          name: rgos-${{ inputs.device }}-${{ steps.metadata.outputs.build_id }}-img
+          path: out/*-rgos.img.gz
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-      - name: Upload update tar (rg-rotate)
-        if: inputs.board == 'rg-rotate' && inputs.artifact == 'update-tar'
+      - name: Upload update tar
+        if: inputs.artifact == 'update-tar'
         uses: actions/upload-artifact@v4
         with:
-          name: rg-rotate-rgos-${{ steps.metadata.outputs.build_id }}-update-tar
-          path: boards/other/rg-rotate/out/rgos-update-${{ steps.metadata.outputs.build_id }}.tar
+          name: rgos-${{ inputs.device }}-${{ steps.metadata.outputs.build_id }}-update-tar
+          path: out/rgos-update-*-${{ steps.metadata.outputs.build_id }}.tar
           if-no-files-found: error
           compression-level: 0
           retention-days: 14

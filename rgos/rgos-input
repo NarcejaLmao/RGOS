@@ -5,8 +5,7 @@ Reads the raw button devices (gpio-keys etc.), translates every key to a canonic
 gamecontrollerdb.txt are written for) and re-publishes them as one uinput device, "RG OS Gamepad". Buttons and the D-pad
 only: there is no analog stick, axis, ADC or joystick-axis handling anywhere in RG OS.
 
-  * "sources": which input devices to merge: ["gpio-keys-joypad"] (default when the ROCKNIX joypad node exists in the
-    device tree = RG34XX-SP) or "auto" (every event device that has pad buttons, D-pad keys or a hat; power/volume/lid/
+  * "sources": which input devices to merge: ["gpio-keys-joypad"] or "auto" (default: every event device that has pad buttons, D-pad keys or a hat; power/volume/lid/
     touch devices are skipped). A list of name substrings picks devices by hand.
   * known BTN_* codes pass through, ABS_HAT0X/Y become the D-pad, anything else comes from the table the menu's
     Settings > Map buttons wizard saved in /var/lib/rgos/button-map.json (or "keymap" {"<code>": "<canonical code>"} in input.json).
@@ -20,7 +19,6 @@ Config: optional top-level "enabled": false in /etc/rgos/input.json leaves the r
 import errno, fcntl, glob, json, os, select, signal, struct, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-DT = "/proc/device-tree/rocknix-singleadc-joypad"    # only used to recognise the RG34XX-SP (which raw button device to read)
 CONF = "/etc/rgos/input.json"
 FLAG = "/run/rgos/inputhub"
 STATUS = "/run/rgos/inputhub.status"
@@ -476,9 +474,8 @@ def run():
             time.sleep(3600)
         return 0
     os.makedirs("/run/rgos", exist_ok=True)
-    has_dt = os.path.isdir(DT)
-    spec = iconf.get("sources") or ([RAW_NAME] if has_dt else "auto")
-    legacy = spec == [RAW_NAME]                 # RG34XX-SP: publish exactly the raw pad's own key codes, as always
+    spec = iconf.get("sources") or "auto"
+    legacy = spec == [RAW_NAME]                 # only when input.json names the raw gpio-keys-joypad device: publish its own key codes as-is
     translator = Translator(load_keymap(iconf), legacy=legacy, auto_map=bool(iconf.get("auto_map_buttons", True)))
     if os.path.exists(SWAPAB):
         translator.swap = {0x130: 0x131, 0x131: 0x130}

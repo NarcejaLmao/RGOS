@@ -1,7 +1,0 @@
-#!/bin/sh
-# minimal shim: the menu runs "systemctl restart rgos-sticks" after calibration; everything else is a no-op
-if [ "$1" = restart ] && [ "$2" = rgos-sticks ]; then
-    pkill -f /opt/rgos/rgos-sticks 2>/dev/null; sleep 1
-    python3 /opt/rgos/rgos-sticks >> /var/log/rgos-sticks.log 2>&1 &
-fi
-exit 0

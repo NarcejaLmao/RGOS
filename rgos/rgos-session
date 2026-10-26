@@ -40,7 +40,7 @@ if [ -d /lib/modules ]; then
     for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -iE 'joypad|pwm|gpio-keys|evdev|uinput' \
                | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
 fi
-# GPU + sound for the emulators: Panfrost (Mali-G31) and the H700 audio codec. Built into some kernels (then nothing is found
+# GPU + sound for the emulators: the GPU driver and the audio codec. Built into some kernels (then nothing is found
 # and this does nothing), modules in others (then there is no udev to load them for us). Dependencies come in via modules.dep.
 if [ -d /lib/modules ]; then
     for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/drivers/gpu/drm/' \
@@ -58,18 +58,20 @@ adev=$(python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import hwctl; c 
 [ -f /opt/rgos/rgos-audio-prep ] && python3 /opt/rgos/rgos-audio-prep > /var/log/rgos-audio-prep.log 2>&1   # speaker routing: stock mixer state + init.txt
 # what the sound stack looks like (copied into rgos-logs.txt): no card here means the codec driver did not load or its firmware is missing
 { echo "--- /proc/asound/cards"; cat /proc/asound/cards 2>&1; echo "--- playback PCMs"; ls /proc/asound/card*/pcm*p 2>&1
-  echo "--- sound modules"; lsmod 2>/dev/null | grep -iE 'snd|sprd|agdsp|audio|sc27|vbc|codec'
+  echo "--- sound modules"; lsmod 2>/dev/null | grep -iE 'snd|sprd|agdsp|audio|sc27|vbc|codec|sun4i|sunxi|ahub'
   echo "--- dmesg"; dmesg 2>/dev/null | grep -iE 'snd|asoc|alsa|audio|agdsp|vbc|codec|firmware' | tail -n 60; } > /var/log/rgos-audio.log 2>&1
 # offline update: <card>/update/*.tar (built by ./build.sh update) is installed on the boot partition, then reboot
 if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
 python3 /opt/rgos/rgos-update boot 2>>/var/log/rgos-update.log
 [ $? -eq 10 ] && { sync; reboot -f; sleep 60; }
 fixperms
-# first boot: create partition 4 (exFAT, all the free space on the card) and format it; a no-op once it exists (rgos/rgos-roms)
+# first boot: create the ROMS partition (exFAT, all the free space on the card; partition 4 on a GPT card, 3 on an MBR card) and format it;
+# a no-op once it exists (rgos/rgos-roms, which also writes the partition number to /run/rgos/roms-part)
 sh /opt/rgos/rgos-roms 2>>/var/log/rgos-roms.log
-# ROMS = partition 4 (ext4; FAT32/exFAT cards from the earlier builds still mount) of the card we booted from, on /media/roms.
+# ROMS = partition 4 (GPT cards, RG Rotate) or 3 (MBR cards, RG34XXSP) of the card we booted from, on /media/roms (exFAT; FAT32/ext4 still mount).
 if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
-roms=""; case "$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)" in /dev/mmcblk*p1) src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts); roms="${src%p1}p4" ;; esac
+romsn=$(cat /run/rgos/roms-part 2>/dev/null); case "$romsn" in 3|4) ;; *) romsn=4 ;; esac
+roms=""; case "$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)" in /dev/mmcblk*p1) src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts); roms="${src%p1}p${romsn}" ;; esac
 if [ -n "$roms" ] && [ -b "$roms" ] && ! mountpoint -q /media/roms; then
     { grep -qw exfat /proc/filesystems || modprobe exfat 2>/dev/null; mount -t exfat -o noatime,umask=000 "$roms" /media/roms 2>/dev/null; } \
       || mount -t vfat -o noatime,umask=000 "$roms" /media/roms 2>/dev/null \

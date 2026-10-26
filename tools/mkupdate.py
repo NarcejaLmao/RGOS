@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
-"""Pack a staged boot directory into an RG OS update tar (see overlay/opt/rgos/rgos-update for the format).
+"""Build an RG OS update tar that rgos/rgos-update installs.
 
-usage: mkupdate.py STAGE_DIR OUT.tar --id BUILD_ID [--device rg34xx-sp] [--no-kernel]
-
-STAGE_DIR is the directory build.sh stages for the boot partition (rgos-initrd.gz, rgos.dtb, KERNEL/Image,
-extlinux/extlinux.conf). --no-kernel leaves the kernel out (a slimmer tar; the kernel on the card must then match the
-modules inside the new initramfs).
+usage: mkupdate.py OUT.tar ID DEVICE NAME=PATH [NAME=PATH ...]
+  ID      build id, [A-Za-z0-9._-]{1,64}; an update whose id is already installed is skipped on the device
+  DEVICE  "rg-rotate" or "rg34xxsp" (must match /etc/rgos-device on the device)
+  NAME    a boot-partition file name: SYSTEM, SYSTEM.md5, rgos-initrd.cpio, KERNEL, KERNEL.md5,
+          dtb.img, device_trees/ums512-rg-rotate.dtb, device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb or extlinux/extlinux.conf
+Copy the tar to the update/ folder of the ROMS partition (or the boot partition) and reboot.
 """
-import argparse, hashlib, json, os, sys, tarfile, time
+import hashlib
+import io
+import json
+import os
+import re
+import sys
+import tarfile
 
-BOOT_FILES = ("rgos.dtb", "KERNEL", "Image", "rgos-initrd.gz", "extlinux/extlinux.conf")
+BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb", "dtb.img", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
+              "extlinux/extlinux.conf")          # keep in sync with rgos/rgos-update
 
 
 def sha256(path):
@@ -20,50 +28,38 @@ def sha256(path):
     return h.hexdigest()
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("stage")
-    ap.add_argument("out")
-    ap.add_argument("--id", required=True)
-    ap.add_argument("--device", default="any")
-    ap.add_argument("--no-kernel", action="store_true")
-    a = ap.parse_args()
-
-    names = [n for n in BOOT_FILES if os.path.isfile(os.path.join(a.stage, n))]
-    if a.no_kernel:
-        names = [n for n in names if n not in ("KERNEL", "Image")]
-    for need in ("rgos-initrd.gz", "extlinux/extlinux.conf"):
-        if need not in names:
-            sys.exit("ERROR: %s missing in %s" % (need, a.stage))
-    if "KERNEL" in names and "Image" in names:
-        names.remove("Image")
-
-    manifest = {"format": 1, "id": a.id, "device": a.device,
-                "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "files": {n: sha256(os.path.join(a.stage, n)) for n in names}}
-    data = (json.dumps(manifest, indent=2) + "\n").encode()
-
-    os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
-    tmp = a.out + ".part"
-    with tarfile.open(tmp, "w", format=tarfile.GNU_FORMAT) as tf:
+def main(argv):
+    if len(argv) < 5:
+        sys.exit(__doc__)
+    out, uid, device = argv[1:4]
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", uid):
+        sys.exit("bad id %r" % uid)
+    files = {}
+    for a in argv[4:]:
+        name, _, path = a.partition("=")
+        if name not in BOOT_FILES:
+            sys.exit("not an updatable file: %s (allowed: %s)" % (name, ", ".join(BOOT_FILES)))
+        if not os.path.isfile(path):
+            sys.exit("missing file for %s: %s" % (name, path))
+        files[name] = path
+    if not files:
+        sys.exit("no files given")
+    man = {"format": 1, "id": uid, "device": device, "files": {n: sha256(p) for n, p in files.items()}}
+    data = json.dumps(man, indent=1, sort_keys=True).encode()
+    with tarfile.open(out, "w", format=tarfile.PAX_FORMAT) as tf:
         ti = tarfile.TarInfo("manifest.json")
-        ti.size, ti.mtime, ti.mode = len(data), int(time.time()), 0o644
-        import io
+        ti.size, ti.mode = len(data), 0o644
         tf.addfile(ti, io.BytesIO(data))
-        for n in names:
-            p = os.path.join(a.stage, n)
-            ti = tf.gettarinfo(p, arcname="boot/" + n)
-            ti.uid = ti.gid = 0
-            ti.uname = ti.gname = ""
-            ti.mode = 0o644
-            with open(p, "rb") as f:
-                tf.addfile(ti, f)
-    os.replace(tmp, a.out)
-    print("Update tar: %s (%.1f MiB)" % (a.out, os.path.getsize(a.out) / 1048576))
-    for n in names:
-        print("  boot/%-24s %s" % (n, manifest["files"][n][:16]))
-    print("  id %s, device %s" % (a.id, a.device))
+        for name in BOOT_FILES:                  # same order the device replaces them in
+            if name in files:
+                ti = tf.gettarinfo(files[name], "boot/" + name)
+                ti.uid = ti.gid = 0
+                ti.uname = ti.gname = ""
+                ti.mode = 0o644
+                with open(files[name], "rb") as f:
+                    tf.addfile(ti, f)
+    print("update: %s (%d MiB), id %s, device %s: %s" % (out, os.path.getsize(out) >> 20, uid, device, ", ".join(files)))
 
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv)

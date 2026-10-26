@@ -6,11 +6,12 @@ ROMS partition of the SD card). On the next boot rgos-session runs `rgos-update 
 tar, checks it, replaces the files on the FAT boot partition and reboots into the new system.
 
 Tar layout (made by tools/mkupdate.py, i.e. `./build.sh update`):
-  manifest.json                     {"format": 1, "id": "...", "device": "rg-rotate", "files": {"SYSTEM": "<sha256>", ...}}
+  manifest.json                     {"format": 1, "id": "...", "device": "rg-rotate" | "rg34xxsp", "files": {"SYSTEM": "<sha256>", ...}}
   boot/SYSTEM                       the Debian squashfs (the RG OS system itself)
   boot/SYSTEM.md5                   its md5 line (only if the card has one)
   boot/rgos-initrd.cpio             the RG OS initramfs
-  boot/KERNEL, boot/KERNEL.md5, boot/device_trees/ums512-rg-rotate.dtb, boot/extlinux/extlinux.conf     optional
+  boot/KERNEL, boot/KERNEL.md5, boot/extlinux/extlinux.conf     optional
+  boot/device_trees/ums512-rg-rotate.dtb (RG Rotate), boot/dtb.img + boot/device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb (RG34XXSP)   optional
 Only those exact file names are ever written, and only inside the boot partition.
 
 Safety:
@@ -29,7 +30,7 @@ Exit status: 10 = update installed, reboot now; 0 = nothing to do, or the update
 """
 import hashlib, json, os, posixpath, re, shutil, subprocess, sys, tarfile, time
 
-BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
+BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb", "dtb.img", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
               "extlinux/extlinux.conf")    # also the order they are replaced in (extlinux.conf last, SYSTEM.md5 right after SYSTEM)
 ID_FILE = "rgos-update.id"
 UPD_DIR = "update"
@@ -195,7 +196,7 @@ def sane(name, head):
         return head[:4] == b"hsqs"                                  # squashfs, little endian
     if name == "KERNEL":
         return head[56:60] == b"ARM\x64" or head[:2] in (b"\x1f\x8b", b"MZ")
-    if name.endswith(".dtb"):
+    if name.endswith(".dtb") or name == "dtb.img":
         return head[:4] == b"\xd0\x0d\xfe\xed"
     if name == "rgos-initrd.cpio":
         return head[:6] in (b"070701", b"070702") or head[:2] == b"\x1f\x8b"
@@ -234,7 +235,7 @@ def read_tar(path):
         device = open(DEVICE_FILE).read().strip()
     except OSError:
         device = ""
-    if man.get("device") not in ("any", device):
+    if man.get("device") != device:
         raise UpdateError("built for %r, this device is %r" % (man.get("device"), device))
     payload = {f: members["boot/" + f] for f in BOOT_FILES if "boot/" + f in members}
     if not payload:

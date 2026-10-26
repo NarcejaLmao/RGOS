@@ -17,9 +17,9 @@ SYSFS_GPIO = "/sys/class/gpio"
 
 def device():
     try:
-        return open(DEVFILE).read().strip() or "rg34xx-sp"
+        return open(DEVFILE).read().strip() or "rg-rotate"
     except OSError:
-        return "rg34xx-sp"
+        return "rg-rotate"
 
 
 def _merge(a, b):
