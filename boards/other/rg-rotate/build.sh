@@ -145,6 +145,13 @@ echo '{"enabled": false, "mountpoint": "/media/roms2"}' > "$ROOTFS/etc/rgos/sdca
 [[ -f "$HERE/config/retroarch.cfg" ]] || { echo "!! $HERE/config/retroarch.cfg missing"; exit 1; }
 cp "$HERE/config/retroarch.cfg" "$ROOTFS/etc/rgos/retroarch.cfg"
 mkdir -p "$ROOTFS/etc/rgos/autoconfig" && cp "$HERE"/config/autoconfig/*.cfg "$ROOTFS/etc/rgos/autoconfig/"
+# Startup splash: menu.py plays /etc/rgos/splash/splash.mjpg (+ splash.json / splash.wav) once, when the launcher starts (see rgos/splash.py).
+# A file on the ROMS card (splash/splash.mjpg) still overrides it. The video is 720x480; the menu canvas is 720x720, so it is letterboxed.
+if [[ -s "$HERE/splash/splash.mjpg" ]]; then
+  mkdir -p "$ROOTFS/etc/rgos/splash" && cp "$HERE"/splash/splash.* "$ROOTFS/etc/rgos/splash/"
+else
+  echo "!! $HERE/splash/splash.mjpg missing: no startup splash in this image"
+fi
 # Cores that have no Debian package: Neo Geo Pocket (mednafen_ngp, from NGP_SRC) and PlayStation (pcsx_rearmed, git clone with submodules
 # from PSX_REPO). Prebuilt aarch64 *_libretro.so files in cores/ are copied as they are and those cores are then not built. Anything else is
 # compiled inside the rootfs (native aarch64 under qemu, several minutes) and the compiler is removed again. A failed core build only costs

@@ -59,6 +59,12 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
 - Not tested on hardware: whether the Wi-Fi/Bluetooth chip's kernel drivers and firmware (taken from the stock ROCKNIX image) bring up
   `wlan0` / `hci0`. If one does not show up, `rgos-logs.txt` on the boot partition says why (`no Bluetooth adapter ...`, `no-adapter`).
 
+## Startup splash
+- `build.sh` installs `splash/splash.mjpg` (+ `splash.json`, `splash.wav`) as `/etc/rgos/splash/`. The launcher (`menu.py`) plays it once, as soon as
+  it starts at power on (video + sound; any button skips it), then the home screen appears. It does not replay after a game.
+- The video is 720x480 and is letterboxed on the 720x720 canvas. Put your own `splash/splash.mjpg` on the ROMS card to override it, or turn it off
+  or mute it in Settings > Startup splash (X previews it).
+
 ## Volume buttons and speaker
 - `rgos/rgos-volume` runs from boot: it finds the speaker's ALSA card, un-mutes the output switches, restores the saved volume
   (`rgos-data/volume.json`, default 70 %) and handles **VOL+ / VOL- (5 % steps, hold to repeat)** and a mute key. The keys are read from every
