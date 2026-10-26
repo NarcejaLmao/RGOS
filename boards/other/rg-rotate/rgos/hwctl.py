@@ -371,6 +371,37 @@ def audio_enable(card, extra=()):
 
 AUDIO_DIR = "/etc/rgos/audio"
 
+# Vendor codecs (Unisoc) expose their output enables as plain BOOLEAN controls ("Speaker Switch", "HPL Switch", "Inter PA Switch", ...)
+# that the ALSA *simple* mixer often does not list, so audio_enable() never sees them. audio_enable_raw() walks `amixer contents` instead.
+RAW_ON_RE = re.compile(r"speaker|spk|ear|headphone|headset|\bhp[lr]?\b|line ?out|\bpa\b|\bamp\b|\bdac\b|playback|output|\bout\b", re.I)
+RAW_SKIP_RE = re.compile(r"capture|record|mic|adc|\bin\b|input|loop|bypass|sidetone|test|debug|voice|call|\bbt\b|bluetooth|\bfm\b|mute all", re.I)
+
+
+def audio_enable_raw(card, run=None):
+    """Switch on every playback-output BOOLEAN control of the card (and switch OFF ones named '... Mute'), returning the lines done.
+    Controls for capture / voice call / bluetooth / loopback are left alone. Best effort: never raises."""
+    run = run or _run
+    out, done, cur = run(["amixer", "-c", str(card), "contents"]) or "", [], None
+    for line in out.splitlines():
+        m = re.match(r"\s*numid=(\d+),iface=\w+,name='([^']*)'", line)
+        if m:
+            cur = (m.group(1), m.group(2))
+            continue
+        if cur and re.search(r"type=BOOLEAN,access=\S*w", line):
+            numid, name = cur
+            cur = None
+            if RAW_SKIP_RE.search(name) or not RAW_ON_RE.search(name):
+                continue
+            if re.search(r"mute$", name.strip(), re.I):
+                val = "off"
+            elif re.search(r"(switch|enable|on)$", name.strip(), re.I):
+                val = "on"
+            else:
+                continue
+            run(["amixer", "-c", str(card), "-q", "cset", "numid=" + numid, val])
+            done.append("%s=%s" % (name, val))
+    return done
+
 
 def _audio_init_lines(path, user_conf):
     """Mixer setup commands: shipped /etc/rgos/audio/init.txt (one per line, # comments) + hw.json {"audio": {"init": [...]}}.
@@ -411,6 +442,11 @@ def audio_prepare(card, audio_dir=AUDIO_DIR, user_conf=USER_CONF, run=None):
     for args in _audio_init_lines(os.path.join(audio_dir, "init.txt"), user_conf):
         run(["amixer", "-c", str(card), "-q"] + args)
         log.append("amixer %s" % " ".join(args))
+    try:
+        raw = audio_enable_raw(card, run)
+        log.append("output switches set by name (no stock mixer state / init.txt needed): %s" % (", ".join(raw) or "none found"))
+    except Exception as e:
+        log.append("audio_enable_raw failed: %r" % e)
     return log
 
 
