@@ -3,13 +3,15 @@
 
 Reads the raw button devices (gpio-keys etc.), translates every key to a canonical code (the codes retroarch.cfg and
 gamecontrollerdb.txt are written for) and re-publishes them as one uinput device, "RG OS Gamepad". Buttons and the D-pad
-only: there is no analog stick, axis, ADC or joystick-axis handling anywhere in RG OS.
+only, unless the device config turns "analog" on (RG34XXSP: two sticks).
 
   * "sources": which input devices to merge: ["gpio-keys-joypad"] or "auto" (default: every event device that has pad buttons, D-pad keys or a hat; power/volume/lid/
     touch devices are skipped). A list of name substrings picks devices by hand.
   * known BTN_* codes pass through, ABS_HAT0X/Y become the D-pad, anything else comes from the table the menu's
     Settings > Map buttons wizard saved in /var/lib/rgos/button-map.json (or "keymap" {"<code>": "<canonical code>"} in input.json).
   /etc/rgos/input-<device>.json (device = /etc/rgos-device) is merged over input.json.
+  * "analog": true (RG34XXSP only; the image ships it in input-rg34xxsp.json) also publishes the two analog sticks: ABS_X/ABS_Y (left)
+    and ABS_RX/ABS_RY (right) of the source device are scaled to -32767..32767 and forwarded. Off everywhere else.
 
 usage: rgos-input                run the hub
        rgos-input reset-buttons  forget the button mapping saved by the menu's Map buttons wizard
@@ -98,6 +100,10 @@ UI_DEV_SETUP = _IOW("U", 3, 92)
 UI_SET_EVBIT, UI_SET_KEYBIT = _IOW("U", 100, 4), _IOW("U", 101, 4)
 UI_SET_FFBIT = _IOW("U", 107, 4)
 EV_FF, FF_RUMBLE = 0x15, 0x50
+UI_SET_ABSBIT = _IOW("U", 103, 4)
+UI_ABS_SETUP = _IOW("U", 4, 28)                # struct uinput_abs_setup: __u16 code, 2 pad bytes, struct input_absinfo (6 x __s32)
+ANALOG_AXES = (0x00, 0x01, 0x03, 0x04)         # ABS_X, ABS_Y (left stick), ABS_RX, ABS_RY (right stick): joydev axes 0..3 in this order
+ASTICK = 32767                                 # published range of every stick axis: -ASTICK..ASTICK
 
 
 def log(*a):
@@ -121,7 +127,7 @@ def key_codes(fd):
     return [i for i in range(96 * 8) if buf[i >> 3] >> (i & 7) & 1]
 
 
-def make_uinput(codes, ff=False):
+def make_uinput(codes, ff=False, axes=()):
     fd = None
     for p in ("/dev/uinput", "/dev/input/uinput"):
         try:
@@ -135,6 +141,11 @@ def make_uinput(codes, ff=False):
         fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY)
         for c in codes:
             fcntl.ioctl(fd, UI_SET_KEYBIT, c)
+        if axes:                                # analog sticks: absolute axes, -ASTICK..ASTICK, deadzone is left to RetroArch
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_ABS)
+            for a in axes:
+                fcntl.ioctl(fd, UI_SET_ABSBIT, a)
+                fcntl.ioctl(fd, UI_ABS_SETUP, struct.pack("<H2x6i", a, 0, -ASTICK, ASTICK, 0, 0, 0))
         if ff:                                  # rumble: RetroArch / SDL upload FF_RUMBLE effects to this pad (see ffpad.py)
             fcntl.ioctl(fd, UI_SET_EVBIT, EV_FF)
             fcntl.ioctl(fd, UI_SET_FFBIT, FF_RUMBLE)
@@ -227,6 +238,7 @@ class Translator:
         self.astate = {}
         self.prof = {}                              # device name -> {"keys": {code: canon}}
         self.swap = {}                              # canonical code -> code actually published (A/B swap)
+        self.analog = False                         # publish the sticks (device config "analog": true)
 
     def learn(self, name, keys):
         """Profile one source from its key capability bits (`keys` = set of codes) and say what was decided."""
@@ -282,6 +294,17 @@ class Translator:
                 self.astate[k] = on
                 out.append((EV_KEY, canon, 1 if on else 0))
         return out
+
+
+    def stick(self, code, value, rng):
+        """An analog stick axis of the source, rescaled to -ASTICK..ASTICK (centre of the source's own range = 0). [] when analog is off."""
+        if not self.analog or code not in ANALOG_AXES:
+            return []
+        lo, hi = rng
+        if hi <= lo:
+            lo, hi = -AMAX, AMAX
+        mid, half = (lo + hi) / 2.0, max((hi - lo) / 2.0, 1.0)
+        return [(EV_ABS, code, max(-ASTICK, min(ASTICK, int(round((value - mid) / half * ASTICK)))))]
 
 
 class Source:
@@ -437,8 +460,11 @@ class KeyProbe:
     """While the menu's button wizard runs (flag file), publish the last raw key/hat/trigger press of any source."""
     def __init__(self):
         self.n, self.next_check, self.on = 0, 0.0, False
+        self.skip_axes = ()                         # analog stick axes: moving a stick must not be recorded as a button press
 
     def feed(self, src, t, c, v):
+        if t == EV_ABS and c in self.skip_axes:
+            return
         now = time.time()
         if now >= self.next_check:
             self.next_check, self.on = now + 0.1, os.path.exists(KEYS_PROBE)
@@ -477,6 +503,7 @@ def run():
     spec = iconf.get("sources") or "auto"
     legacy = spec == [RAW_NAME]                 # only when input.json names the raw gpio-keys-joypad device: publish its own key codes as-is
     translator = Translator(load_keymap(iconf), legacy=legacy, auto_map=bool(iconf.get("auto_map_buttons", True)))
+    translator.analog = bool(iconf.get("analog", False))
     if os.path.exists(SWAPAB):
         translator.swap = {0x130: 0x131, 0x131: 0x130}
         log("A/B swap is ON (Settings > Swap A / B buttons)")
@@ -484,8 +511,8 @@ def run():
         os.unlink(MAP_REPORT)
     except OSError:
         pass
-    log("hub config: sources %s, legacy codes %s, keymap entries %d, auto-map %s" %
-        (spec, legacy, len(translator.keymap), translator.auto_map))
+    log("hub config: sources %s, legacy codes %s, keymap entries %d, auto-map %s, analog sticks %s" %
+        (spec, legacy, len(translator.keymap), translator.auto_map, translator.analog))
 
     # 1. the source devices (wait until at least one exists)
     srcs = {}
@@ -521,7 +548,7 @@ def run():
     ufd, tries = None, 0
     while not STOP and ufd is None:
         try:
-            ufd = make_uinput(codes, ff=motor is not None)
+            ufd = make_uinput(codes, ff=motor is not None, axes=ANALOG_AXES if translator.analog else ())
         except OSError as e:
             tries += 1
             if tries == 1:
@@ -543,6 +570,8 @@ def run():
     log("hub up: '%s'" % HUB_NAME)
 
     probe_keys = KeyProbe()
+    if translator.analog:
+        probe_keys.skip_axes = ANALOG_AXES
     last_status, next_scan = 0.0, time.time() + 3.0
     try:
         while not STOP:
@@ -599,6 +628,7 @@ def run():
                         batch += translator.key(x.name, c, v)
                     elif t == EV_ABS:
                         batch += translator.abs(x.name, c, v, x.absrange(c))
+                        batch += translator.stick(c, v, x.absrange(c))
                     elif t == EV_SYN:
                         batch.append((EV_SYN, 0, 0))
                 for t, c, v in batch:

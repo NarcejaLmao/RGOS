@@ -245,6 +245,15 @@ for f in usr/sbin/dropbear usr/bin/dropbearkey usr/lib/openssh/sftp-server usr/b
 done
 ls "$ROOTFS"/usr/libexec/bluetooth/bluetoothd "$ROOTFS"/usr/lib/bluetooth/bluetoothd >/dev/null 2>&1 || echo "!! bluetoothd is missing from the image"
 echo "$DEVICE" > "$ROOTFS/etc/rgos-device"
+# RG34XXSP only: analog sticks. The input hub publishes ABS_X/Y/RX/RY of the stock joypad device (input-rg34xxsp.json, read by rgos-input
+# because it is named after /etc/rgos-device) and RetroArch gets the matching axis binds (retroarch-rg34xxsp.cfg, appended by rgos-launch).
+# Other devices get neither file, so their input is exactly what it was.
+if [[ "$DEVICE" == "rg34xxsp" ]]; then
+  mkdir -p "$ROOTFS/etc/rgos"
+  echo '{"analog": true}' > "$ROOTFS/etc/rgos/input-rg34xxsp.json"
+  [[ -f "$HERE/config/retroarch-rg34xxsp.cfg" ]] || { echo "!! $HERE/config/retroarch-rg34xxsp.cfg missing"; exit 1; }
+  cp "$HERE/config/retroarch-rg34xxsp.cfg" "$ROOTFS/etc/rgos/retroarch-rg34xxsp.cfg"
+fi
 # Startup splash (video + sound, sized for the device's canvas: splash-<device>.mjpg) and bundled launcher music. menu.py looks in /etc/rgos/splash and /opt/rgos/music;
 # music / splash added to the ROMS partition (music/, splash/splash.mjpg) is picked up as well.
 if [[ -d "$HERE/splash" ]]; then

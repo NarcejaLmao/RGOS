@@ -193,8 +193,23 @@ def show_error(title, detail):
     time.sleep(0 if os.environ.get("RGOS_NO_HW") else 4)
 
 
+def device_cfg():
+    """/etc/rgos/retroarch-<device>.cfg (device = /etc/rgos-device) if the image ships one, else None. Per-device RetroArch binds,
+    e.g. the RG34XXSP's analog sticks; it comes first in the append list so run.cfg and the user's retroarch.cfg can still override it."""
+    try:
+        with open(os.environ.get("RGOS_DEVICE_FILE", "/etc/rgos-device")) as f:
+            dev = f.read().strip()
+    except OSError:
+        return None
+    p = os.path.join(os.path.dirname(RA_CFG), "retroarch-%s.cfg" % dev) if dev.replace("-", "").isalnum() else None
+    return p if p and os.path.isfile(p) else None
+
+
 def build_command(core_path, content, roms_root, cfg_run):
     appends = [cfg_run]
+    dev_cfg = device_cfg()
+    if dev_cfg:
+        appends.insert(0, dev_cfg)
     user = os.path.join(roms_root, "config", "retroarch.cfg")
     if os.path.isfile(user):
         appends.append(user)
