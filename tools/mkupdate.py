@@ -5,7 +5,7 @@ usage: mkupdate.py OUT.tar ID DEVICE NAME=PATH [NAME=PATH ...]
   ID      build id, [A-Za-z0-9._-]{1,64}; an update whose id is already installed is skipped on the device
   DEVICE  "rg-rotate" or "rg34xxsp" (must match /etc/rgos-device on the device)
   NAME    a boot-partition file name: SYSTEM, SYSTEM.md5, rgos-initrd.cpio, KERNEL, KERNEL.md5,
-          dtb.img, device_trees/ums512-rg-rotate.dtb, device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb or extlinux/extlinux.conf
+          dtb.img, device_trees/ums512-rg-rotate.dtb or extlinux/extlinux.conf
 Copy the tar to the update/ folder of the ROMS partition (or the boot partition) and reboot.
 """
 import hashlib
@@ -16,7 +16,7 @@ import re
 import sys
 import tarfile
 
-BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb", "dtb.img", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
+BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "dtb.img", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
               "extlinux/extlinux.conf")          # keep in sync with rgos/rgos-update
 
 

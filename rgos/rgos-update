@@ -11,7 +11,7 @@ Tar layout (made by tools/mkupdate.py, i.e. `./build.sh update`):
   boot/SYSTEM.md5                   its md5 line (only if the card has one)
   boot/rgos-initrd.cpio             the RG OS initramfs
   boot/KERNEL, boot/KERNEL.md5, boot/extlinux/extlinux.conf     optional
-  boot/device_trees/ums512-rg-rotate.dtb (RG Rotate), boot/dtb.img + boot/device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb (RG34XXSP)   optional
+  boot/device_trees/ums512-rg-rotate.dtb (RG Rotate), boot/dtb.img (RG34XXSP)   optional
 Only those exact file names are ever written, and only inside the boot partition.
 
 Safety:
@@ -30,7 +30,7 @@ Exit status: 10 = update installed, reboot now; 0 = nothing to do, or the update
 """
 import hashlib, json, os, posixpath, re, shutil, subprocess, sys, tarfile, time
 
-BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb", "dtb.img", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
+BOOT_FILES = ("device_trees/ums512-rg-rotate.dtb", "dtb.img", "KERNEL", "KERNEL.md5", "rgos-initrd.cpio", "SYSTEM", "SYSTEM.md5",
               "extlinux/extlinux.conf")    # also the order they are replaced in (extlinux.conf last, SYSTEM.md5 right after SYSTEM)
 ID_FILE = "rgos-update.id"
 UPD_DIR = "update"

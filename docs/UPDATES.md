@@ -1,6 +1,6 @@
 # Offline updates (.tar from the SD card)
 
-RG OS (RG Rotate and RG34XXSP) boots a Debian squashfs (`SYSTEM`) plus a small initramfs from the FAT boot partition. An update replaces files on that partition: `SYSTEM` (and its `.md5`), `rgos-initrd.cpio`, and optionally `KERNEL`, the device tree (`device_trees/ums512-rg-rotate.dtb` on the RG Rotate; `dtb.img` and `device_trees/sun50i-h700-anbernic-rg34xx-sp.dtb` on the RG34XXSP) and `extlinux/extlinux.conf`.
+RG OS (RG Rotate and RG34XXSP) boots a Debian squashfs (`SYSTEM`) plus a small initramfs from the FAT boot partition. An update replaces files on that partition: `SYSTEM` (and its `.md5`), `rgos-initrd.cpio`, and optionally `KERNEL`, the device tree (`device_trees/ums512-rg-rotate.dtb` on the RG Rotate; `dtb.img` on the RG34XXSP) and `extlinux/extlinux.conf`.
 
 ## Build
 

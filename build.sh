@@ -7,7 +7,7 @@
 # For each device the stock ROCKNIX image is downloaded and ONLY its SYSTEM squashfs is replaced with a bare-bones Debian arm64 that
 # starts the RG OS menu (white screen only as a fallback). The partition table, bootloader area, kernel and device tree(s) are left
 # byte-for-byte alone (RG34XXSP: dtb.img is copied from the stock device_trees/ folder, exactly what the ROCKNIX install guide tells you to
-# do by hand). ROCKNIX's init (which waits 60 s and prints "NEVER TOUCH boot=...") is bypassed by a tiny RG OS initramfs (initramfs/)
+# do by hand, and device_trees/ is then removed so dtb.img is the only device tree on the card). ROCKNIX's init (which waits 60 s and prints "NEVER TOUCH boot=...") is bypassed by a tiny RG OS initramfs (initramfs/)
 # loaded through extlinux.conf; extlinux.conf.stock keeps the original.
 #
 # Run as root on Debian/Ubuntu (WSL2 is fine). A device is ALWAYS required; running it with no argument only prints this help:
@@ -89,7 +89,7 @@ case "$DEVICE" in
     ROCKNIX_H700_VERSION="${ROCKNIX_H700_VERSION:-20261001}"
     BASE_URL="https://github.com/ROCKNIX/distribution/releases/download/${ROCKNIX_H700_VERSION}/ROCKNIX-H700.aarch64-${ROCKNIX_H700_VERSION}-${H700_RAM}.img.gz"
     # ROCKNIX boots the device tree named dtb.img in the root of the boot partition (extlinux.conf: FDT /dtb.img). The install guide has you
-    # copy device_trees/<your console>.dtb to dtb.img by hand; the build does exactly that. v2 panel units: RG34XXSP_DTB=sun50i-h700-anbernic-rg34xx-sp-v2-panel
+    # copy device_trees/<your console>.dtb to dtb.img by hand; the build does exactly that and then deletes device_trees/. v2 panel units: RG34XXSP_DTB=sun50i-h700-anbernic-rg34xx-sp-v2-panel
     RG34XXSP_DTB="${RG34XXSP_DTB:-sun50i-h700-anbernic-rg34xx-sp}"
     [[ "$RG34XXSP_DTB" =~ ^sun50i-h700-anbernic-rg34xx-sp(-v2-panel)?$ ]] || { echo "RG34XXSP_DTB must be sun50i-h700-anbernic-rg34xx-sp or sun50i-h700-anbernic-rg34xx-sp-v2-panel" >&2; exit 1; }
     ;;
@@ -155,6 +155,9 @@ if [[ "$DEVICE" == "rg34xxsp" ]]; then
   [[ -f "$DTB_SRC" ]] || { echo "!! $RG34XXSP_DTB.dtb is not in the stock image's device_trees/ ($(ls "$WORK/mnt/device_trees" 2>/dev/null | tr '\n' ' '))"; exit 1; }
   echo "==> dtb.img <- device_trees/$RG34XXSP_DTB.dtb"
   cp -f "$DTB_SRC" "$WORK/mnt/dtb.img"
+  # only this console's dtb.img stays on the RGOS partition: the stock device_trees/ folder (one dtb per H700 console) is removed
+  echo "==> Removing device_trees/ from the boot partition (dtb.img is the only device tree kept)"
+  rm -rf "$WORK/mnt/device_trees"
   grep -qi '^[[:space:]]*fdt[[:space:]]\+/dtb.img' "$WORK/mnt/extlinux/extlinux.conf" 2>/dev/null \
     || echo "!! stock extlinux.conf does not load /dtb.img (FDT line differs); check the config printed above"
 fi
@@ -505,5 +508,5 @@ echo "RG OS logs are copied to rgos-logs.txt on the card's FAT partition at 8, 2
 if [[ "$DEVICE" == "rg-rotate" ]]; then
   echo "Flash the SPL once (cd spl-flasher && ./flash-spl.sh), then write the image to the SD card."
 else
-  echo "Write the image to the SD card (the H700 boots straight from it; no SPL flashing). dtb.img = $RG34XXSP_DTB.dtb; to change it, copy another file from device_trees/ over dtb.img."
+  echo "Write the image to the SD card (the H700 boots straight from it; no SPL flashing). dtb.img = $RG34XXSP_DTB.dtb; to change it, rebuild with RG34XXSP_DTB=... (device_trees/ is not on the card)."
 fi
