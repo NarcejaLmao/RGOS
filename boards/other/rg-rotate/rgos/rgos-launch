@@ -32,8 +32,8 @@ HUB_NAME = "RG OS Gamepad"             # the input hub's virtual pad (rgos-input
 EARLY_FAIL_S = 6.0                     # a non-zero exit sooner than this is shown on the console
 
 # Used only if the menu module cannot be imported (e.g. no pygame): what this build installs and supports.
-FALLBACK_DEFAULT = {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte"}
-FALLBACK_COMPAT = {"gba": ("mgba",), "gb": ("gambatte", "mgba"), "gbc": ("gambatte", "mgba")}
+FALLBACK_DEFAULT = {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "nestopia"}
+FALLBACK_COMPAT = {"gba": ("mgba",), "gb": ("gambatte", "mgba"), "gbc": ("gambatte", "mgba"), "nes": ("nestopia", "fceumm")}
 
 
 def log(msg):

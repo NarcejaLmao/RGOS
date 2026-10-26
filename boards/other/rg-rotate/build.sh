@@ -20,11 +20,11 @@ PSX_REPO="${PSX_REPO:-https://github.com/libretro/pcsx_rearmed.git}"   # PlaySta
 NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
 # Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),
 # with Mesa (Panfrost) for KMS output and SDL2 for input.
-# Also: Snes9x (SNES; Debian non-free, hence --components below) Genesis Plus GX (Mega Drive, Master System, Game Gear, SG-1000, Sega CD, Pico; Debian non-free) and Beetle WonderSwan (WS / WSC). libretro-beetle-psx is NOT in EMU_PKGS:
+# Also: Nestopia (NES / Famicom, Debian package libretro-nestopia), Snes9x (SNES; Debian non-free, hence --components below) and Beetle WonderSwan (WS / WSC). libretro-beetle-psx is NOT in EMU_PKGS:
 # a package missing from the suite aborts debootstrap, so it is installed best-effort later (PlayStation uses pcsx_rearmed, built from source). The Neo Geo Pocket core has no Debian
 # package: it is compiled from source in the rootfs below (NGP_SRC), or drop a prebuilt aarch64 *_libretro.so into cores/ next to build.sh.
-# More libretro cores: EXTRA_PKGS="libretro-nestopia" sudo -E ./build.sh  (Debian package names)
-EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-beetle-wswan,libretro-genesisplusgx,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
+# More libretro cores: EXTRA_PKGS="libretro-genesisplusgx" sudo -E ./build.sh  (Debian package names)
+EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-nestopia,libretro-beetle-wswan,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
 EXTRA_PKGS="${EXTRA_PKGS:-}"
 # The exFAT ROMS partition (partition 4) is NOT in the image: rgos/rgos-roms creates it on the device's first boot, using all the
 # free space on the card, and formats it exFAT.
@@ -145,13 +145,6 @@ echo '{"enabled": false, "mountpoint": "/media/roms2"}' > "$ROOTFS/etc/rgos/sdca
 [[ -f "$HERE/config/retroarch.cfg" ]] || { echo "!! $HERE/config/retroarch.cfg missing"; exit 1; }
 cp "$HERE/config/retroarch.cfg" "$ROOTFS/etc/rgos/retroarch.cfg"
 mkdir -p "$ROOTFS/etc/rgos/autoconfig" && cp "$HERE"/config/autoconfig/*.cfg "$ROOTFS/etc/rgos/autoconfig/"
-# Startup splash: menu.py plays /etc/rgos/splash/splash.mjpg (+ splash.json / splash.wav) once, when the launcher starts (see rgos/splash.py).
-# A file on the ROMS card (splash/splash.mjpg) still overrides it. The video is 720x480; the menu canvas is 720x720, so it is letterboxed.
-if [[ -s "$HERE/splash/splash.mjpg" ]]; then
-  mkdir -p "$ROOTFS/etc/rgos/splash" && cp "$HERE"/splash/splash.* "$ROOTFS/etc/rgos/splash/"
-else
-  echo "!! $HERE/splash/splash.mjpg missing: no startup splash in this image"
-fi
 # Cores that have no Debian package: Neo Geo Pocket (mednafen_ngp, from NGP_SRC) and PlayStation (pcsx_rearmed, git clone with submodules
 # from PSX_REPO). Prebuilt aarch64 *_libretro.so files in cores/ are copied as they are and those cores are then not built. Anything else is
 # compiled inside the rootfs (native aarch64 under qemu, several minutes) and the compiler is removed again. A failed core build only costs
@@ -211,7 +204,7 @@ echo "==> libretro cores in the image: ${CORES:-NONE}"
 # a core counts as present if ANY of the library directories has it ("ls A B C" fails when just one of the globs is empty, which
 # wrongly reported every core as missing)
 core_present() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
-for c in gambatte mgba snes9x genesis_plus_gx mednafen_wswan mednafen_ngp pcsx_rearmed; do
+for c in gambatte mgba nestopia snes9x mednafen_wswan mednafen_ngp pcsx_rearmed; do
   core_present "$c" || echo "!! ${c}_libretro.so is missing from the image (a Debian libretro package missing, or the source build of that core failed)"
 done
 # Beetle PSX is only an optional fallback for pcsx_rearmed

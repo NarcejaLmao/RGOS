@@ -1,7 +1,7 @@
 # rg-rotate-rgos
 
 A bare-bones Debian (arm64) SD card image for the Anbernic RG Rotate that boots into the RG OS menu/launcher,
-with RetroArch (aarch64) and the Gambatte (Game Boy / Game Boy Color), mGBA (Game Boy Advance), Snes9x (SNES), Beetle WonderSwan, Beetle NGP (Neo Geo Pocket) and PCSX-ReARMed (PlayStation, Beetle PSX as fallback) cores.
+with RetroArch (aarch64) and the Gambatte (Game Boy / Game Boy Color), mGBA (Game Boy Advance), Nestopia (NES / Famicom), Snes9x (SNES), Beetle WonderSwan, Beetle NGP (Neo Geo Pocket) and PCSX-ReARMed (PlayStation, Beetle PSX as fallback) cores.
 
 ## How it works
 - `build.sh` downloads the ROCKNIX-T618 image and copies it (partition table, bootloader area, kernel, DTB unchanged). Its `SYSTEM`
@@ -59,20 +59,6 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
 - Not tested on hardware: whether the Wi-Fi/Bluetooth chip's kernel drivers and firmware (taken from the stock ROCKNIX image) bring up
   `wlan0` / `hci0`. If one does not show up, `rgos-logs.txt` on the boot partition says why (`no Bluetooth adapter ...`, `no-adapter`).
 
-## Sega systems (Genesis Plus GX)
-- `build.sh` installs `libretro-genesisplusgx` (Debian non-free). One core, six launcher systems, each with its own ROM folder under `roms/`:
-  `genesis` (.md .gen .smd .bin .mdx .68k), `mastersystem` (.sms), `gamegear` (.gg), `sg1000` (.sg), `segacd` (.cue .chd .iso .m3u), `segapico` (.bin .md);
-  cartridge systems also take .zip. A system only shows up in the menu once its core is installed.
-- Sega CD needs a BIOS in `bios/`: `bios_CD_U.bin` (US), `bios_CD_E.bin` (Europe) or `bios_CD_J.bin` (Japan). Pico support in the core is preliminary.
-- 32X is not a Genesis Plus GX system: `sega32x` now maps to PicoDrive only and stays hidden until a `picodrive_libretro.so` is in the image (drop one in `cores/`).
-- The Debian package is 1.7.4 (2022); check that `.chd` Sega CD images load, otherwise use `.cue`/`.bin`.
-
-## Startup splash
-- `build.sh` installs `splash/splash.mjpg` (+ `splash.json`, `splash.wav`) as `/etc/rgos/splash/`. The launcher (`menu.py`) plays it once, as soon as
-  it starts at power on (video + sound; any button skips it), then the home screen appears. It does not replay after a game.
-- The video is 720x480 and is letterboxed on the 720x720 canvas. Put your own `splash/splash.mjpg` on the ROMS card to override it, or turn it off
-  or mute it in Settings > Startup splash (X previews it).
-
 ## Volume buttons and speaker
 - `rgos/rgos-volume` runs from boot: it finds the speaker's ALSA card, un-mutes the output switches, restores the saved volume
   (`rgos-data/volume.json`, default 70 %) and handles **VOL+ / VOL- (5 % steps, hold to repeat)** and a mute key. The keys are read from every
@@ -98,9 +84,9 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
   renamed or moved from the file manager. Everything else there (e.g. `rgos-logs.txt`) can.
 
 ## Emulation
-- RetroArch and the `gambatte` and `mgba` cores come from Debian packages (see `EMU_PKGS` in `build.sh`); `config/retroarch.cfg` and
-  `config/autoconfig/RG_OS_Gamepad.cfg` are installed to `/etc/rgos/`. Snes9x (Debian non-free: debootstrap runs with `--components=main,non-free`) and `libretro-beetle-wswan` are in `EMU_PKGS`. The Neo Geo Pocket core (`mednafen_ngp`) has no Debian package: `build.sh` compiles it inside the rootfs from `NGP_SRC` (default: libretro/beetle-ngp-libretro master; `NGP_SRC=none` skips it), or copies any prebuilt aarch64 `*_libretro.so` found in `cores/`. `pcsx_rearmed` is built the same way from `PSX_REPO` (needs `git` on the build PC; `PSX_REPO=none` skips it); Debian's `libretro-beetle-psx` is installed as a best-effort fallback (skipped with a notice if the suite doesn't have it). If a core build fails the image is still produced without it. Add more cores with `EXTRA_PKGS="libretro-nestopia ..."`.
-- Put ROMs in `roms/gba/` (`.gba`, mGBA; BIOS optional: `gba_bios.bin` in `bios/`), `roms/gb/` (`.gb`), `roms/gbc/` (`.gbc`), `roms/snes/` (`.sfc`, `.smc`), `roms/ws/` (WonderSwan) and `roms/wsc/` (WonderSwan Color), `roms/ngp/` (Neo Geo Pocket) and `roms/ngpc/` (Neo Geo Pocket Color) and `roms/psx/` (PlayStation: `.cue`+`.bin`, `.chd`, `.pbp`, `.m3u`; put a BIOS such as `scph1001.bin` in `bios/`) on the ROMS partition; saves and states go to `saves/<system>/`
+- RetroArch and the `gambatte`, `mgba`, `nestopia` and `snes9x` cores come from Debian packages (see `EMU_PKGS` in `build.sh`); `config/retroarch.cfg` and
+  `config/autoconfig/RG_OS_Gamepad.cfg` are installed to `/etc/rgos/`. Snes9x (Debian non-free: debootstrap runs with `--components=main,non-free`) and `libretro-beetle-wswan` are in `EMU_PKGS`. The Neo Geo Pocket core (`mednafen_ngp`) has no Debian package: `build.sh` compiles it inside the rootfs from `NGP_SRC` (default: libretro/beetle-ngp-libretro master; `NGP_SRC=none` skips it), or copies any prebuilt aarch64 `*_libretro.so` found in `cores/`. `pcsx_rearmed` is built the same way from `PSX_REPO` (needs `git` on the build PC; `PSX_REPO=none` skips it); Debian's `libretro-beetle-psx` is installed as a best-effort fallback (skipped with a notice if the suite doesn't have it). If a core build fails the image is still produced without it. Add more cores with `EXTRA_PKGS="libretro-genesisplusgx ..."`.
+- Put ROMs in `roms/gba/` (`.gba`, mGBA; BIOS optional: `gba_bios.bin` in `bios/`), `roms/gb/` (`.gb`), `roms/gbc/` (`.gbc`), `roms/nes/` (`.nes`, `.unf`, `.unif`, `.zip`; Famicom Disk System `.fds` needs `disksys.rom` in `bios/`), `roms/snes/` (`.sfc`, `.smc`), `roms/ws/` (WonderSwan) and `roms/wsc/` (WonderSwan Color), `roms/ngp/` (Neo Geo Pocket) and `roms/ngpc/` (Neo Geo Pocket Color) and `roms/psx/` (PlayStation: `.cue`+`.bin`, `.chd`, `.pbp`, `.m3u`; put a BIOS such as `scph1001.bin` in `bios/`) on the ROMS partition; saves and states go to `saves/<system>/`
   and `states/<system>/` next to them.
 - In a game: MENU+START returns to the launcher, MENU+SELECT opens the RetroArch menu.
 
