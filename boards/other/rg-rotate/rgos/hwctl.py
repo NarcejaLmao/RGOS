@@ -369,6 +369,51 @@ def audio_enable(card, extra=()):
     return done
 
 
+AUDIO_DIR = "/etc/rgos/audio"
+
+
+def _audio_init_lines(path, user_conf):
+    """Mixer setup commands: shipped /etc/rgos/audio/init.txt (one per line, # comments) + hw.json {"audio": {"init": [...]}}.
+    A line is the argument list of `amixer -c <card> -q`, e.g.  sset 'Speaker Switch' on   or   cset name='Speaker Mux' 1"""
+    import shlex
+    lines = []
+    try:
+        with open(path) as f:
+            lines += [l.strip() for l in f]
+    except OSError:
+        pass
+    try:
+        with open(user_conf) as f:
+            extra = (json.load(f).get("audio") or {}).get("init") or []
+        lines += [x for x in extra if isinstance(x, str)]
+    except (OSError, ValueError, AttributeError):
+        pass
+    out = []
+    for l in lines:
+        if l and not l.startswith("#"):
+            try:
+                out.append(shlex.split(l))
+            except ValueError:
+                pass
+    return out
+
+
+def audio_prepare(card, audio_dir=AUDIO_DIR, user_conf=USER_CONF, run=None):
+    """One-time speaker routing after the sound card appears: restore the mixer state captured from the stock ROCKNIX image
+    (asound.state: the codec's output routes and gains as the vendor left them), then run the init commands. Returns a list of
+    log lines. Every step is best effort: a missing file or a failing command never stops the boot."""
+    run = run or _run
+    log = []
+    state = os.path.join(audio_dir, "asound.state")
+    if os.path.isfile(state) and os.path.getsize(state) > 0:
+        run(["alsactl", "-f", state, "restore", str(card)])
+        log.append("restored mixer state %s on card %d" % (state, card))
+    for args in _audio_init_lines(os.path.join(audio_dir, "init.txt"), user_conf):
+        run(["amixer", "-c", str(card), "-q"] + args)
+        log.append("amixer %s" % " ".join(args))
+    return log
+
+
 # ------------------------------------------------------------------------------------------------ vibration motor
 class Motor:
     """On/off vibration motor. Modes (conf["rumble"]["mode"], default auto):

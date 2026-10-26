@@ -17,7 +17,7 @@ mkdir -p /run/rgos /var/lib/rgos /var/log /media/roms /dev/pts /boot
 fixperms() {
     chown -R 0:0 /opt/rgos /etc/rgos /var/lib/rgos 2>/dev/null
     chmod -R a+rwX /etc/rgos /var/lib/rgos 2>/dev/null
-    chmod 755 /usr/bin/systemctl /opt/rgos/rgos-session /opt/rgos/rgos-input /opt/rgos/rgos-volume /opt/rgos/rgos-update /opt/rgos/rgos-launch /opt/rgos/menu.py 2>/dev/null
+    chmod 755 /usr/bin/systemctl /opt/rgos/rgos-audio-prep /opt/rgos/rgos-session /opt/rgos/rgos-input /opt/rgos/rgos-volume /opt/rgos/rgos-update /opt/rgos/rgos-launch /opt/rgos/menu.py 2>/dev/null
     chmod a+rw /dev/input/* /dev/uinput /dev/fb* /dev/snd/* /dev/dri/* /dev/tty1 2>/dev/null
 }
 # settings dir (/var/lib/rgos: button map, state) MUST be writable. If it is not (read-only or odd /var/lib
@@ -55,6 +55,7 @@ fi
 for _ in $(seq 1 30); do grep -q '\[' /proc/asound/cards 2>/dev/null && break; sleep 0.5; done   # up to 15 s: the audio DSP firmware loads late
 adev=$(python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import hwctl; c = hwctl.audio_card(); print("plughw:%d,%d" % (c, hwctl.audio_pcm(c)))' 2>/dev/null)
 [ -n "$adev" ] && { export AUDIODEV="$adev" SDL_AUDIODRIVER=alsa; echo "audio: AUDIODEV=$AUDIODEV" >> /var/log/rgos-state.log; }
+[ -f /opt/rgos/rgos-audio-prep ] && python3 /opt/rgos/rgos-audio-prep > /var/log/rgos-audio-prep.log 2>&1   # speaker routing: stock mixer state + init.txt
 # what the sound stack looks like (copied into rgos-logs.txt): no card here means the codec driver did not load or its firmware is missing
 { echo "--- /proc/asound/cards"; cat /proc/asound/cards 2>&1; echo "--- playback PCMs"; ls /proc/asound/card*/pcm*p 2>&1
   echo "--- sound modules"; lsmod 2>/dev/null | grep -iE 'snd|sprd|agdsp|audio|sc27|vbc|codec'
@@ -115,7 +116,7 @@ python3 /opt/rgos/rgos-input >> /var/log/rgos-input.log 2>&1 &
     { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
       T=""; command -v timeout >/dev/null 2>&1 && T="timeout 4"
       $T python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
-      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-audio.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
+      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-audio.log /var/log/rgos-audio-prep.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
       echo "--- settings dir"; id; grep -E ' (/|/var|/var/lib|/var/lib/rgos) ' /proc/mounts; ls -ld /var /var/lib /var/lib/rgos 2>&1
       ls -la /var/lib/rgos 2>&1; { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo "write test: ok"; } 2>&1 || echo "write test: FAILED"
       cat /var/log/rgos-state.log 2>&1

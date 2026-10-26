@@ -78,6 +78,16 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
 - If there is no sound or the keys do nothing, `rgos-volume.log` in `rgos-logs.txt` lists the mixer controls found and which were used. Override
   with `rgos-data/hw.json`: `{"audio": {"card": 0, "controls": ["Speaker"], "step": 5}}`.
 
+## Speaker routing (audio-prep)
+- Loading the sound drivers is not always enough: the codec's speaker routes are vendor mixer controls that are off after boot. `build.sh` copies
+  ROCKNIX's saved mixer state (`asound.state`, and `asound.conf` if present) from the stock SYSTEM to `/etc/rgos/audio/`. At boot, once the card is
+  there, `rgos/rgos-audio-prep` restores that state with `alsactl`, runs the commands in `audio/init.txt` (installed as `/etc/rgos/audio/init.txt`),
+  then un-mutes the outputs. Only after that does the splash play. The build prints whether a stock `asound.state` was found.
+- If the speaker is still silent: open `rgos-logs.txt`, section `rgos-audio-prep.log`. It lists every mixer control (`amixer contents`). Put the
+  ones that need setting in `audio/init.txt`, or without rebuilding in `hw.json` on the ROMS partition:
+  `{"audio": {"init": ["sset 'Speaker Switch' on", "cset name='Speaker Mux' 1"]}}` (each entry is the argument list of `amixer -c <card> -q`).
+- Not tested on hardware: which controls the Rotate's codec needs is not known from here, so the shipped `init.txt` is empty.
+
 ## Windows drive letters
 - Partition order on the card is fixed: p1 RGOS, p2 STORAGE (ext4, Windows ignores it), p3 uboot (2 MiB, Windows ignores it), p4 ROMS. Windows decides the letters, and
   it remembers them per partition. RGOS is identical in every flash, so it keeps its old letter; ROMS used to get a new random

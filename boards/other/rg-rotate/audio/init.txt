@@ -1,0 +1,6 @@
+# Mixer commands run once at boot after the sound card appears (arguments of `amixer -c <card> -q`).
+# Add what the codec needs to route the speaker, e.g.:
+#   sset 'Speaker Switch' on
+#   cset name='Speaker Mux' 1
+# The full control list is in rgos-audio.log (inside rgos-logs.txt on the boot partition, section "amixer contents").
+# The same lines can go in hw.json on the ROMS partition: {"audio": {"init": ["sset 'Speaker Switch' on"]}}

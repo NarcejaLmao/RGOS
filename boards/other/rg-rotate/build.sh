@@ -113,6 +113,15 @@ echo "==> Firmware directory: ${FWDIR:-NONE FOUND} ($FWBEST files)"
 [[ -n "$FWDIR" ]] && { mkdir -p "$ROOTFS/lib/firmware"; cp -a "$FWDIR"/. "$ROOTFS/lib/firmware/"; }
 # the Unisoc BSP drivers look in /system/etc/firmware (WCN modem, audio DSP): point it at the same files
 mkdir -p "$ROOTFS/system/etc"; ln -sfn /lib/firmware "$ROOTFS/system/etc/firmware"
+# Audio: the T618 codec's speaker routes are vendor mixer controls that stay off after boot. Take the mixer state ROCKNIX saves
+# (asound.state) and any asound.conf from the stock SYSTEM; rgos-audio-prep restores it at boot. init.txt (audio/) adds commands.
+mkdir -p "$ROOTFS/etc/rgos/audio"
+AST="$(find "$WORK/system" -name asound.state -type f 2>/dev/null | head -1)"
+if [[ -n "$AST" ]]; then cp "$AST" "$ROOTFS/etc/rgos/audio/asound.state"; echo "==> Stock mixer state: $AST"
+else echo "!! no asound.state in the stock SYSTEM: the speaker relies on audio/init.txt and the driver defaults"; fi
+ACF="$(find "$WORK/system" -name asound.conf -type f 2>/dev/null | head -1)"; [[ -n "$ACF" ]] && cp "$ACF" "$ROOTFS/etc/asound.conf" && echo "==> Stock asound.conf: $ACF"
+echo "==> Stock audio scripts (for reference): $(find "$WORK/system" -type f \( -iname '*audio*' -o -iname '*amixer*' -o -iname '*alsa*.sh' \) -path '*bin*' 2>/dev/null | sed "s#$WORK/system/##" | head -10 | tr '\n' ' ')"
+[[ -d "$HERE/audio" ]] && cp "$HERE"/audio/init.txt "$ROOTFS/etc/rgos/audio/init.txt"
 # What the stock kernel offers for Wi-Fi / Bluetooth: printed here and shipped as /etc/rgos/wireless-modules.txt, so
 # rgos-logs.txt on the card can say which driver should have loaded when "No Wi-Fi adapter found" shows.
 mkdir -p "$ROOTFS/etc/rgos"
