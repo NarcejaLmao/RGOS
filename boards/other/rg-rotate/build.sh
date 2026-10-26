@@ -139,6 +139,18 @@ for f in usr/sbin/dropbear usr/bin/dropbearkey usr/lib/openssh/sftp-server usr/b
 done
 ls "$ROOTFS"/usr/libexec/bluetooth/bluetoothd "$ROOTFS"/usr/lib/bluetooth/bluetoothd >/dev/null 2>&1 || echo "!! bluetoothd is missing from the image"
 echo "rg-rotate" > "$ROOTFS/etc/rgos-device"
+# Startup splash (video + sound, 720x720 for the square panel) and bundled launcher music. menu.py looks in /etc/rgos/splash and /opt/rgos/music;
+# music / splash added to the ROMS partition (music/, splash/splash.mjpg) is picked up as well.
+if [[ -d "$HERE/splash" ]]; then
+  mkdir -p "$ROOTFS/etc/rgos/splash" && cp "$HERE"/splash/* "$ROOTFS/etc/rgos/splash/"
+else
+  echo "!! $HERE/splash missing: no startup splash in the image"
+fi
+if [[ -d "$HERE/music" ]]; then
+  mkdir -p "$ROOTFS/opt/rgos/music" && cp "$HERE"/music/* "$ROOTFS/opt/rgos/music/"
+else
+  echo "!! $HERE/music missing: no bundled launcher music in the image"
+fi
 printf 'BUILD_ID=%s\n' "$(date +%Y%m%d-%H%M)" > "$ROOTFS/etc/rgos-release"
 echo '{"enabled": false, "mountpoint": "/media/roms2"}' > "$ROOTFS/etc/rgos/sdcard.json"
 # RetroArch config + the autoconfig profile for the input hub's pad

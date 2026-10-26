@@ -59,6 +59,13 @@ Restore stock SPL with `spl-flasher/restore-stock-spl.sh` (see spl-flasher/READM
 - Not tested on hardware: whether the Wi-Fi/Bluetooth chip's kernel drivers and firmware (taken from the stock ROCKNIX image) bring up
   `wlan0` / `hci0`. If one does not show up, `rgos-logs.txt` on the boot partition says why (`no Bluetooth adapter ...`, `no-adapter`).
 
+## Startup splash and launcher music
+- **Splash:** when the launcher starts, it plays `/etc/rgos/splash/splash-rg-rotate.mjpg` (720x720 MJPEG, 24 fps, from `splash/`) with `splash.wav`,
+  once per power-on (the menu restarting after a game does not replay it). Any button skips it. Settings > Startup splash switches it between
+  video + sound, video only and off (X previews it). Your own video: put `splash/splash.mjpg` (+ optional `splash.json` / `splash.wav`) on the ROMS partition.
+- **Music:** tracks in `music/` are installed to `/opt/rgos/music`; tracks on the ROMS partition's `music/` folder are added too. Formats: MP3, OGG, WAV, FLAC, MOD, XM, IT, S3M.
+  They play shuffled after the splash, without repeats until the list is used up, and stop when a game starts. Logs: `launcher music ...` / `splash: ...` lines in `rgos-menu.log` (inside `rgos-logs.txt`).
+
 ## Volume buttons and speaker
 - `rgos/rgos-volume` runs from boot: it finds the speaker's ALSA card, un-mutes the output switches, restores the saved volume
   (`rgos-data/volume.json`, default 70 %) and handles **VOL+ / VOL- (5 % steps, hold to repeat)** and a mute key. The keys are read from every
