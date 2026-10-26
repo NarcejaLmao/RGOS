@@ -17,13 +17,15 @@ ROCKNIX_URL="${ROCKNIX_URL:-https://github.com/beebono/distribution/releases/dow
 DEBIAN_SUITE="${DEBIAN_SUITE:-trixie}"
 DEBIAN_MIRROR="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
 PSX_REPO="${PSX_REPO:-https://github.com/libretro/pcsx_rearmed.git}"   # PlayStation core (pcsx_rearmed, built from source); PSX_REPO=none skips it
+GENESIS_REPO="${GENESIS_REPO:-https://github.com/libretro/Genesis-Plus-GX.git}"   # Genesis Plus GX (Mega Drive / Master System / Game Gear / SG-1000 / Sega CD), built from source only if Debian has no package; GENESIS_REPO=none skips that fallback
 NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
 # Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),
 # with Mesa (Panfrost) for KMS output and SDL2 for input.
 # Also: Nestopia (NES / Famicom, Debian package libretro-nestopia), Snes9x (SNES; Debian non-free, hence --components below) and Beetle WonderSwan (WS / WSC). libretro-beetle-psx is NOT in EMU_PKGS:
 # a package missing from the suite aborts debootstrap, so it is installed best-effort later (PlayStation uses pcsx_rearmed, built from source). The Neo Geo Pocket core has no Debian
 # package: it is compiled from source in the rootfs below (NGP_SRC), or drop a prebuilt aarch64 *_libretro.so into cores/ next to build.sh.
-# More libretro cores: EXTRA_PKGS="libretro-genesisplusgx" sudo -E ./build.sh  (Debian package names)
+# Genesis Plus GX is installed best-effort after debootstrap (Debian package libretro-genesisplusgx, else built from GENESIS_REPO), because a package missing from the suite would abort debootstrap.
+# More libretro cores: EXTRA_PKGS="libretro-xyz" sudo -E ./build.sh  (Debian package names)
 EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-nestopia,libretro-beetle-wswan,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
 EXTRA_PKGS="${EXTRA_PKGS:-}"
 # The exFAT ROMS partition (partition 4) is NOT in the image: rgos/rgos-roms creates it on the device's first boot, using all the
@@ -179,13 +181,22 @@ if chroot "$ROOTFS" apt-get update >/dev/null 2>&1 \
 else
   echo "   (libretro-beetle-psx is not available in $DEBIAN_SUITE; PlayStation uses pcsx_rearmed only)"
 fi
+# Genesis Plus GX (Mega Drive / Genesis, Master System, Game Gear, SG-1000, Sega CD): Debian package if the suite has it, else built below
+if chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libretro-genesisplusgx >/dev/null 2>&1; then
+  echo "==> Installed libretro-genesisplusgx (Genesis Plus GX)"
+else
+  echo "   (libretro-genesisplusgx is not available in $DEBIAN_SUITE; it will be built from $GENESIS_REPO)"
+fi
 if ls "$HERE"/cores/*_libretro.so >/dev/null 2>&1; then
   echo "==> Copying prebuilt cores from cores/"; cp "$HERE"/cores/*_libretro.so "$LRDIR/"
 fi
-WANT_NGP=0; WANT_PSX=0
+WANT_NGP=0; WANT_PSX=0; WANT_GEN=0
 [[ "$NGP_SRC" != none && ! -e "$LRDIR/mednafen_ngp_libretro.so" ]] && WANT_NGP=1
 [[ "$PSX_REPO" != none && ! -e "$LRDIR/pcsx_rearmed_libretro.so" ]] && WANT_PSX=1
-if (( WANT_NGP || WANT_PSX )); then
+# (core_present is defined further down; this is the same test, needed before the compiler step)
+have_core() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
+[[ "$GENESIS_REPO" != none ]] && ! have_core genesis_plus_gx && WANT_GEN=1
+if (( WANT_NGP || WANT_PSX || WANT_GEN )); then
   echo "==> Installing a compiler in the rootfs to build libretro cores"
   rm -rf "$ROOTFS/tmp/core-src"; mkdir -p "$ROOTFS/tmp/core-src"
   cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
@@ -201,6 +212,19 @@ if (( WANT_NGP || WANT_PSX )); then
       ); then echo "   mednafen_ngp_libretro.so built"
       else echo "!! could not build the Neo Geo Pocket core: NGP/NGPC will have no core (put a prebuilt mednafen_ngp_libretro.so in cores/ and rebuild)"; fi
     fi
+    if (( WANT_GEN )); then
+      echo "==> Building the Genesis Plus GX core (genesis_plus_gx)"
+      if (
+        set -e
+        command -v git >/dev/null || { echo "git is not installed on this PC (apt install git)"; exit 1; }
+        rm -rf "$WORK/genesis-plus-gx"
+        git clone -q --depth 1 "$GENESIS_REPO" "$WORK/genesis-plus-gx"
+        cp -r "$WORK/genesis-plus-gx" "$ROOTFS/tmp/core-src/gen"
+        chroot "$ROOTFS" sh -c 'cd /tmp/core-src/gen && make -f Makefile.libretro platform=unix -j"$(nproc)"'
+        install -m 755 "$ROOTFS"/tmp/core-src/gen/genesis_plus_gx_libretro.so "$LRDIR/genesis_plus_gx_libretro.so"
+      ); then echo "   genesis_plus_gx_libretro.so built"
+      else echo "!! could not build Genesis Plus GX: Mega Drive / Master System / Game Gear / Sega CD will have no core (put a prebuilt genesis_plus_gx_libretro.so in cores/ and rebuild)"; fi
+    fi
     if (( WANT_PSX )); then
       echo "==> Building the PlayStation core (pcsx_rearmed, aarch64 dynarec)"
       if (
@@ -215,7 +239,7 @@ if (( WANT_NGP || WANT_PSX )); then
       else echo "!! could not build pcsx_rearmed: PlayStation falls back to mednafen_psx (Beetle PSX, slower; software renderer)"; fi
     fi
   else
-    echo "!! could not install a compiler in the rootfs: skipped building Neo Geo Pocket / PlayStation cores"
+    echo "!! could not install a compiler in the rootfs: skipped building the Genesis Plus GX / Neo Geo Pocket / PlayStation cores"
   fi
   chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove gcc g++ make >/dev/null 2>&1 || true
   rm -rf "$ROOTFS/tmp/core-src" "$ROOTFS/etc/resolv.conf"
@@ -225,7 +249,7 @@ echo "==> libretro cores in the image: ${CORES:-NONE}"
 # a core counts as present if ANY of the library directories has it ("ls A B C" fails when just one of the globs is empty, which
 # wrongly reported every core as missing)
 core_present() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
-for c in gambatte mgba nestopia snes9x mednafen_wswan mednafen_ngp pcsx_rearmed; do
+for c in gambatte mgba nestopia genesis_plus_gx snes9x mednafen_wswan mednafen_ngp pcsx_rearmed; do
   core_present "$c" || echo "!! ${c}_libretro.so is missing from the image (a Debian libretro package missing, or the source build of that core failed)"
 done
 # Beetle PSX is only an optional fallback for pcsx_rearmed

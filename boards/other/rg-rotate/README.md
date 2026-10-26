@@ -136,6 +136,7 @@ The binds are written straight into `config/retroarch.cfg` (`input_player1_*_btn
   ones in and restarts. Any error renames everything back and the boot partition keeps working.
 - The tar is renamed `.applied` or `.failed` and a result line is added to `update/rgos-update.log` on the card. An update whose id is already
   installed (`rgos-update.id` on the boot partition) is skipped. To roll back from a PC, rename `SYSTEM.prev` over `SYSTEM`.
+- Cores: Nestopia (NES) comes from the Debian package; Genesis Plus GX (Mega Drive, Master System, Game Gear, SG-1000, Sega CD) is installed from `libretro-genesisplusgx` if the suite has it, otherwise built from `GENESIS_REPO` (`GENESIS_REPO=none` skips the build). A `!!` line at the end of the build lists any core that is missing.
 - A full `SYSTEM` is about 500 MB; the boot partition needs roughly that much free space (an older `.prev` is deleted automatically if needed).
 - `rgos/rgos-update apply TAR BOOTDIR` applies a tar to a mounted boot partition by hand.
 
