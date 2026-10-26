@@ -29,12 +29,13 @@ RGOS_RETROARCH_CONF_OPTS = \
 	--enable-kms --enable-egl --enable-opengles --enable-opengles3
 
 # No X11 on the device. Without EGL_NO_X11, Mesa's EGL/eglplatform.h includes <X11/Xlib.h> on Linux, so RetroArch's configure
-# header probe for EGL/eglext.h fails ("Build assumed that EGL/egl.h exists, but cannot locate"). Passing the define through CFLAGS
-# did not reach that probe (the CI build of Mesa 26.2.5 still failed with it), so it is also set inside the staged header itself.
+# header probe for EGL/eglext.h fails ("Build assumed that EGL/egl.h exists, but cannot locate"). An earlier attempt passed the
+# define through CFLAGS only, and the CI build of Mesa 26.2.5 still failed, so CFLAGS evidently does not reach that probe. The
+# define is now put where no probe can miss it:
+#   1. in tiny compiler wrapper scripts that RetroArch is told to use as CC/CXX (every probe and every compile goes through
+#      them), and
+#   2. inside the staged eglplatform.h itself.
 RGOS_RETROARCH_EGL_CFLAGS = -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS
-RGOS_RETROARCH_FLAGS = \
-	CFLAGS="$(TARGET_CFLAGS) $(RGOS_RETROARCH_EGL_CFLAGS)" \
-	CXXFLAGS="$(TARGET_CXXFLAGS) $(RGOS_RETROARCH_EGL_CFLAGS)"
 
 define RGOS_RETROARCH_EGL_NO_X11_HEADER
 	f=$(STAGING_DIR)/usr/include/EGL/eglplatform.h; \
@@ -44,8 +45,34 @@ define RGOS_RETROARCH_EGL_NO_X11_HEADER
 endef
 RGOS_RETROARCH_PRE_CONFIGURE_HOOKS += RGOS_RETROARCH_EGL_NO_X11_HEADER
 
+# configure runs the compiler as "$CC" (one quoted word), so extra flags cannot be appended to CC: use wrapper scripts.
+define RGOS_RETROARCH_CC_WRAPPERS
+	printf '#!/bin/sh\nexec %s %s "$$@"\n' '$(TARGET_CC)' '$(RGOS_RETROARCH_EGL_CFLAGS)' > $(@D)/rgos-cc
+	printf '#!/bin/sh\nexec %s %s "$$@"\n' '$(TARGET_CXX)' '$(RGOS_RETROARCH_EGL_CFLAGS)' > $(@D)/rgos-cxx
+	chmod +x $(@D)/rgos-cc $(@D)/rgos-cxx
+endef
+RGOS_RETROARCH_PRE_CONFIGURE_HOOKS += RGOS_RETROARCH_CC_WRAPPERS
+
+RGOS_RETROARCH_FLAGS = \
+	CC="$(@D)/rgos-cc" CXX="$(@D)/rgos-cxx" \
+	CFLAGS="$(TARGET_CFLAGS) $(RGOS_RETROARCH_EGL_CFLAGS)" \
+	CXXFLAGS="$(TARGET_CXXFLAGS) $(RGOS_RETROARCH_EGL_CFLAGS)"
+
+# Replays the header probe RetroArch's configure makes (eglext.h on its own) with the same compiler and prints the compiler's
+# real error if it fails, so the CI log shows the cause instead of RetroArch's generic "cannot locate" message. Informational
+# only: configure's own verdict decides.
+define RGOS_RETROARCH_EGL_PREFLIGHT
+	printf '#include <EGL/eglext.h>\nint main(void){return 0;}\n' > $(@D)/rgos-egl-probe.c; \
+	if ! $(@D)/rgos-cc -c -o $(@D)/rgos-egl-probe.o $(@D)/rgos-egl-probe.c; then \
+		echo "==== EGL header preflight: compiler error above (configure may still fail) ===="; \
+		ls -la $(STAGING_DIR)/usr/include/EGL $(STAGING_DIR)/usr/include/KHR 2>&1; \
+		head -n 40 $(STAGING_DIR)/usr/include/EGL/eglplatform.h 2>&1; \
+	fi
+endef
+
 # If configure still fails, print the end of its config.log (the failing compiler command and error) so the CI log shows the real cause.
 define RGOS_RETROARCH_CONFIGURE_CMDS
+	$(RGOS_RETROARCH_EGL_PREFLIGHT)
 	cd $(@D) && $(TARGET_MAKE_ENV) $(TARGET_CONFIGURE_OPTS) $(RGOS_RETROARCH_FLAGS) \
 		PKG_CONF_PATH="$(PKG_CONFIG_HOST_BINARY)" \
 		./configure $(RGOS_RETROARCH_CONF_OPTS) || { \
