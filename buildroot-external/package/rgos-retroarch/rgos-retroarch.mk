@@ -45,6 +45,18 @@ define RGOS_RETROARCH_EGL_NO_X11_HEADER
 endef
 RGOS_RETROARCH_PRE_CONFIGURE_HOOKS += RGOS_RETROARCH_EGL_NO_X11_HEADER
 
+# The real cause of the "Build assumed that EGL/egl.h exists, but cannot locate" failure (seen in the CI preflight output: "unknown
+# type name 'EGLDisplay' / 'EGLenum'" from eglext.h): Mesa's EGL/eglext.h is not self-contained, it expects EGL/egl.h to have been
+# included before it. RetroArch's configure probes <EGL/eglext.h> on its own, so the probe cannot compile whatever -D flags are
+# passed. Make eglext.h include egl.h itself (both have include guards, so this is harmless for every other user of the header).
+define RGOS_RETROARCH_EGLEXT_SELF_CONTAINED
+	f=$(STAGING_DIR)/usr/include/EGL/eglext.h; \
+	if [ -f "$$f" ] && ! grep -q RGOS_EGLEXT_INCLUDES_EGL "$$f"; then \
+		{ printf '/* RGOS_EGLEXT_INCLUDES_EGL: make eglext.h usable on its own */\n#include <EGL/egl.h>\n'; cat "$$f"; } > "$$f.rgos" && mv "$$f.rgos" "$$f"; \
+	fi
+endef
+RGOS_RETROARCH_PRE_CONFIGURE_HOOKS += RGOS_RETROARCH_EGLEXT_SELF_CONTAINED
+
 # configure runs the compiler as "$CC" (one quoted word), so extra flags cannot be appended to CC: use wrapper scripts.
 define RGOS_RETROARCH_CC_WRAPPERS
 	printf '#!/bin/sh\nexec %s %s "$$@"\n' '$(TARGET_CC)' '$(RGOS_RETROARCH_EGL_CFLAGS)' > $(@D)/rgos-cc
