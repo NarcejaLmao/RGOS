@@ -204,6 +204,9 @@ debootstrap --arch=arm64 --variant=minbase --foreign --components=main,non-free 
 mkdir -p "$ROOTFS/usr/sbin"; printf '#!/bin/sh\nexit 101\n' > "$ROOTFS/usr/sbin/policy-rc.d"; chmod +x "$ROOTFS/usr/sbin/policy-rc.d"
 chroot "$ROOTFS" /debootstrap/debootstrap --second-stage
 rm -f "$ROOTFS/usr/sbin/policy-rc.d"
+# Everything debootstrap installed (python3, python3-pygame and the SDL libraries it needs, ...) is marked manual, so the later
+# "apt-get purge --auto-remove" of the compiler toolchain can never remove it as an orphaned dependency.
+chroot "$ROOTFS" sh -c "dpkg-query -W -f='\${Package}\n' | xargs -r apt-mark manual" >/dev/null 2>&1 || true
 echo "$DEVICE-rgos" > "$ROOTFS/etc/hostname"
 
 # SSH / SFTP (Dropbear): root login with the default password "rgos" (override: ssh-password.txt on the boot partition).
@@ -399,6 +402,12 @@ KEEP
     echo "!! could not install a compiler in the rootfs: skipped building the Genesis Plus GX / Neo Geo Pocket / PlayStation cores"
   fi
   chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove gcc g++ make git cmake ninja-build pkg-config '*-dev' >/dev/null 2>&1 || true
+  # the launcher cannot start without pygame: if the purge (or anything else) took it away, put it back before the network config goes
+  if ! chroot "$ROOTFS" python3 -c 'import pygame' >/dev/null 2>&1; then
+    echo "!! pygame is not importable after the toolchain purge; reinstalling python3-pygame"
+    chroot "$ROOTFS" apt-get update >/dev/null 2>&1 || true
+    chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall python3-pygame || true
+  fi
   rm -rf "$ROOTFS/tmp/core-src" "$ROOTFS/etc/resolv.conf"
 fi
 CORES="$(ls "$ROOTFS"/usr/local/lib/libretro/*_libretro.so "$ROOTFS"/usr/lib/*/libretro/*_libretro.so "$ROOTFS"/usr/lib/libretro/*_libretro.so 2>/dev/null | xargs -rn1 basename | tr '\n' ' ' || true)"
@@ -472,7 +481,15 @@ ln -sf ../../sbin/rgos-init "$ROOTFS/usr/lib/systemd/systemd"
 ln -sf rgos-init            "$ROOTFS/usr/sbin/init"
 ln -sf usr/sbin/rgos-init   "$ROOTFS/init"
 rm -f "$ROOTFS/usr/bin/qemu-aarch64-static"
-chroot "$ROOTFS" python3 -c 'import pygame' 2>&1 | tail -2 || true
+if ! chroot "$ROOTFS" python3 -c 'import pygame; print("pygame", pygame.version.ver)'; then
+  echo "==> pygame missing from the rootfs: installing python3-pygame"
+  cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf" 2>/dev/null || true
+  chroot "$ROOTFS" apt-get update || true
+  chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pygame || true
+  rm -f "$ROOTFS/etc/resolv.conf"
+  chroot "$ROOTFS" python3 -c 'import pygame; print("pygame", pygame.version.ver)' \
+    || { echo "!! pygame still cannot be imported: the RG OS launcher would not start. Aborting the build." >&2; exit 1; }
+fi
 rm -rf "$ROOTFS/var/cache/apt" "$ROOTFS/var/lib/apt/lists" "$ROOTFS/usr/share/doc" "$ROOTFS/usr/share/man"
 
 # 4. new SYSTEM ------------------------------------------------------------------
