@@ -60,7 +60,13 @@ class Mixer:
         conf = read_json(USER_CONF).get("audio", {})
         if not isinstance(conf, dict):
             conf = {}
-        self.step = max(1, min(25, int(conf.get("step", 5) or 5)))
+        # A hand-edited hw.json must not prevent the volume daemon from starting.
+        # Invalid values (for example, "step": "fast") fall back to the default.
+        try:
+            step = int(conf.get("step", 5) or 5)
+        except (TypeError, ValueError, OverflowError):
+            step = 5
+        self.step = max(1, min(25, step))
         self.card = None
         self.controls = []
         self.switches = []
