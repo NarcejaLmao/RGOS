@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RG OS menu - original frontend for the Anbernic RG Rotate and RG34XXSP.
+"""RG OS menu - original frontend for the Anbernic RG Rotate, RG34XXSP and RG35XX H.
 
 Lists the native Linux ports in <ROMS>/roms/ports/ (the .sh launchers) and on selection writes the script path to
 /run/rgos/launch and exits with code 10 so the session loop can run it.
@@ -75,10 +75,11 @@ def _device():
 # filled exactly, no bars, no stretching):
 #   rg-rotate  square (1:1) screen, 720x720
 #   rg34xxsp   3:2 screen, 720x480 (the layout every screen below was first written for)
+#   rg35xxh    4:3 screen (640x480 panel), 720x540 canvas (DY = 60: one more row than the RG34XXSP)
 # DY is the height gained over the 720x480 layout (0 on the RG34XXSP); every screen below spends it on more rows / taller
 # panels instead of leaving blank space.
 DEVICE_ID = os.environ.get("RGOS_DEVICE") or _device() or "rg-rotate"
-CANVAS = {"rg-rotate": (720, 720), "rg34xxsp": (720, 480)}
+CANVAS = {"rg-rotate": (720, 720), "rg34xxsp": (720, 480), "rg35xxh": (720, 540)}
 W, H = CANVAS.get(DEVICE_ID, CANVAS["rg-rotate"])
 DY = H - 480
 DX = 0                                         # horizontal layout offset (unused: the width is unchanged)
@@ -1699,6 +1700,20 @@ def main():
                 bx, by, sel = x0 + (i % HOME_COLS) * (bw + gap), top_y + (i // HOME_COLS) * (bh + gap), i == home_idx
                 hl, lift = draw_button(canvas, (bx, by, bw, bh), SEL_BG if sel else PANEL, 18, 6, sel)
                 by -= lift                                              # contents ride up with the face
+                if bh < 130:
+                    # Short tiles (RG34XXSP, 720x480: 106 px high): the stacked layout below needs ~148 px, so icon, title and
+                    # subtitle ran into each other and out of the tile. Lay them out side by side instead: icon in a fixed column
+                    # on the left, title and a (wrapped, at most two lines) subtitle to its right, the block centred vertically.
+                    icx, tx = bx + 62, bx + 128
+                    ICONS[hid](canvas, icx, by + bh // 2, _mix(DIM, ACCENT, hl), _mix(PANEL, SEL_BG, hl))
+                    title = f_row.render(fit(f_row, hname, bw - (tx - bx) - 14), True, _mix(DIM, TEXT, hl))
+                    sub_lines = wrap(f_small, subs[hid], bw - (tx - bx) - 14)[:2]
+                    th_, lh_ = title.get_height(), f_small.get_linesize() + 1
+                    ty0 = by + (bh - (th_ + 4 + lh_ * len(sub_lines))) // 2
+                    canvas.blit(title, (tx, ty0))
+                    for li, ln in enumerate(sub_lines):
+                        canvas.blit(f_small.render(ln, True, DIM), (tx, ty0 + th_ + 4 + li * lh_))
+                    continue
                 cx = bx + bw // 2                                       # icon on top, title and subtitle centred below it
                 ICONS[hid](canvas, cx, by + 44 + vo, _mix(DIM, ACCENT, hl), _mix(PANEL, SEL_BG, hl))
                 title = f_row.render(hname, True, _mix(DIM, TEXT, hl))

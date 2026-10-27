@@ -10,7 +10,7 @@ only, unless the device config turns "analog" on (RG34XXSP: two sticks).
   * known BTN_* codes pass through, ABS_HAT0X/Y become the D-pad, anything else comes from the table the menu's
     Settings > Map buttons wizard saved in /var/lib/rgos/button-map.json (or "keymap" {"<code>": "<canonical code>"} in input.json).
   /etc/rgos/input-<device>.json (device = /etc/rgos-device) is merged over input.json.
-  * "analog": true (RG34XXSP only; the image ships it in input-rg34xxsp.json) also publishes the two analog sticks: ABS_X/ABS_Y (left)
+  * "analog": true (RG34XXSP and RG35XX H; the image ships it in input-rg34xxsp.json) also publishes the two analog sticks: ABS_X/ABS_Y (left)
     and ABS_RX/ABS_RY (right) of the source device are scaled to -32767..32767 and forwarded. Off everywhere else.
 
 usage: rgos-input                run the hub

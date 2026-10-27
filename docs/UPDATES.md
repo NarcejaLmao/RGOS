@@ -24,7 +24,7 @@ The installed build id is stored in `rgos-update.id` on the boot partition; a ta
 ## Safety
 
 * Files are staged as `*.new`, fsynced and SHA-256 checked before anything is replaced.
-* Wrong device (`manifest.json` `device` must match `/etc/rgos-device`, i.e. `rg-rotate` or `rg34xxsp`), unknown files, bad paths, damaged tar, too little free space: nothing is changed and the old system boots.
+* Wrong device (`manifest.json` `device` must match `/etc/rgos-device`, i.e. `rg-rotate`, `rg34xxsp` or `rg35xxh`), unknown files, bad paths, damaged tar, too little free space: nothing is changed and the old system boots.
 * Replaced files are kept as `*.prev` on the boot partition when there is room. To roll back by hand, put the card in a PC and rename them back.
 
 Manual test on a PC: `rgos-update apply TAR BOOTDIR` (set `RGOS_DEVICE_FILE`, `RGOS_UPDATE_LOG`, `RGOS_UPDATE_TTY` to local paths).

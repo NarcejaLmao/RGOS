@@ -5,11 +5,13 @@ Debian + the RG OS launcher on top of each handheld's stock ROCKNIX SD image. On
 | Device | Argument | SoC | Base image | Partition table |
 |---|---|---|---|---|
 | Anbernic RG34XXSP | `rg34xxsp` | Allwinner H700 | ROCKNIX-H700 (DDR4) | MBR |
+| Anbernic RG35XX H | `rg35xxh` | Allwinner H700 | ROCKNIX-H700 (DDR4) | MBR |
 | Anbernic RG Rotate | `rg-rotate` | Unisoc T618 | ROCKNIX-T618 | GPT (`uboot` partition) |
 
 ## Build
 
     sudo ./build.sh rg34xxsp        # out/rg34xxsp-rgos.img
+    sudo ./build.sh rg35xxh         # out/rg35xxh-rgos.img
     sudo ./build.sh rg-rotate       # out/rg-rotate-rgos.img
     sudo ./build.sh all             # both
     sudo ./build.sh rg34xxsp update # offline update tar (see docs/UPDATES.md)
@@ -17,6 +19,13 @@ Debian + the RG OS launcher on top of each handheld's stock ROCKNIX SD image. On
 `sudo ./build.sh` with no device only prints the usage text; nothing is downloaded, mounted or written.
 
 See `docs/BUILD-WORKFLOW.md` (GitHub Actions and build options) and `docs/UPDATES.md`.
+
+## RG35XX H notes
+
+* Same stock ROCKNIX H700 image as the RG34XXSP; the build copies `device_trees/sun50i-h700-anbernic-rg35xx-h.dtb` to `dtb.img`. The RG35XX H has two PCB generations: if the screen shows garbage, rebuild with `RG35XXH_DTB=sun50i-h700-anbernic-rg35xx-h-rev6-panel sudo -E ./build.sh rg35xxh`.
+* DDR4 is the default (the RG35XX H has LPDDR4); `H700_RAM=DDR3` builds on the DDR3 image.
+* 640x480 (4:3) screen: the menu canvas is 720x540, scaled to fill the panel exactly. Startup splash: `splash/splash-rg35xxh.mjpg`.
+* Analog sticks use the same input-hub option and RetroArch axis binds as the RG34XXSP (left = axes 0/1, right = 2/3).
 
 ## RG34XXSP notes
 

@@ -6,12 +6,12 @@ ROMS partition of the SD card). On the next boot rgos-session runs `rgos-update 
 tar, checks it, replaces the files on the FAT boot partition and reboots into the new system.
 
 Tar layout (made by tools/mkupdate.py, i.e. `./build.sh update`):
-  manifest.json                     {"format": 1, "id": "...", "device": "rg-rotate" | "rg34xxsp", "files": {"SYSTEM": "<sha256>", ...}}
+  manifest.json                     {"format": 1, "id": "...", "device": "rg-rotate" | "rg34xxsp" | "rg35xxh", "files": {"SYSTEM": "<sha256>", ...}}
   boot/SYSTEM                       the Debian squashfs (the RG OS system itself)
   boot/SYSTEM.md5                   its md5 line (only if the card has one)
   boot/rgos-initrd.cpio             the RG OS initramfs
   boot/KERNEL, boot/KERNEL.md5, boot/extlinux/extlinux.conf     optional
-  boot/device_trees/ums512-rg-rotate.dtb (RG Rotate), boot/dtb.img (RG34XXSP)   optional
+  boot/device_trees/ums512-rg-rotate.dtb (RG Rotate), boot/dtb.img (RG34XXSP, RG35XX H)   optional
 Only those exact file names are ever written, and only inside the boot partition.
 
 Safety:

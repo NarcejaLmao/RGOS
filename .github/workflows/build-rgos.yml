@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - rg34xxsp
+          - rg35xxh
           - rg-rotate
           - all
         default: rg34xxsp
@@ -117,7 +118,7 @@ jobs:
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
           bash ./build.sh "$DEVICE" image
           if [[ "$DEVICE" == "all" ]]; then
-            test -s out/rg-rotate-rgos.img && test -s out/rg34xxsp-rgos.img
+            test -s out/rg-rotate-rgos.img && test -s out/rg34xxsp-rgos.img && test -s out/rg35xxh-rgos.img
           else
             test -s "out/$DEVICE-rgos.img"
           fi
@@ -157,8 +158,9 @@ jobs:
           }
           case "${{ inputs.device }}" in
             rg34xxsp)  verify out/rg34xxsp-rgos.img dos ;;
+            rg35xxh)   verify out/rg35xxh-rgos.img dos ;;
             rg-rotate) verify out/rg-rotate-rgos.img gpt ;;
-            all)       verify out/rg-rotate-rgos.img gpt; verify out/rg34xxsp-rgos.img dos ;;
+            all)       verify out/rg-rotate-rgos.img gpt; verify out/rg34xxsp-rgos.img dos; verify out/rg35xxh-rgos.img dos ;;
           esac
 
       - name: Compress disk image
@@ -183,7 +185,7 @@ jobs:
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
           bash ./build.sh "$DEVICE" update
           if [[ "$DEVICE" == "all" ]]; then
-            test -s "out/rgos-update-rg-rotate-${UPDATE_ID}.tar" && test -s "out/rgos-update-rg34xxsp-${UPDATE_ID}.tar"
+            test -s "out/rgos-update-rg-rotate-${UPDATE_ID}.tar" && test -s "out/rgos-update-rg34xxsp-${UPDATE_ID}.tar" && test -s "out/rgos-update-rg35xxh-${UPDATE_ID}.tar"
           else
             test -s "out/rgos-update-${DEVICE}-${UPDATE_ID}.tar"
           fi
