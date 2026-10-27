@@ -31,6 +31,11 @@ on:
         required: true
         type: boolean
         default: true
+      build_gc:
+        description: RG Rotate only - build the GameCube core (Dolphin libretro) from source (very slow under emulation; off skips it)
+        required: true
+        type: boolean
+        default: true
       update_extlinux:
         description: update-tar only - also include extlinux.conf in the update
         required: true
@@ -111,10 +116,12 @@ jobs:
         env:
           DEVICE: ${{ inputs.device }}
           BUILD_PSX: ${{ inputs.build_psx }}
+          BUILD_GC: ${{ inputs.build_gc }}
           ROCKNIX_URL_INPUT: ${{ inputs.rocknix_url }}
         run: |
           set -euo pipefail
           [[ "$BUILD_PSX" == "true" ]] || export PSX_REPO=none
+          [[ "$BUILD_GC" == "true" ]] || export GC_REPO=none
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
           bash ./build.sh "$DEVICE" image
           if [[ "$DEVICE" == "all" ]]; then
@@ -176,11 +183,13 @@ jobs:
           DEVICE: ${{ inputs.device }}
           UPDATE_ID: ${{ steps.metadata.outputs.build_id }}
           BUILD_PSX: ${{ inputs.build_psx }}
+          BUILD_GC: ${{ inputs.build_gc }}
           INCLUDE_EXTLINUX: ${{ inputs.update_extlinux }}
           ROCKNIX_URL_INPUT: ${{ inputs.rocknix_url }}
         run: |
           set -euo pipefail
           [[ "$BUILD_PSX" == "true" ]] || export PSX_REPO=none
+          [[ "$BUILD_GC" == "true" ]] || export GC_REPO=none
           [[ "$INCLUDE_EXTLINUX" != "true" ]] || export UPDATE_EXTLINUX=1
           [[ -z "$ROCKNIX_URL_INPUT" ]] || export ROCKNIX_URL="$ROCKNIX_URL_INPUT"
           bash ./build.sh "$DEVICE" update

@@ -9,7 +9,7 @@ The workflow at `.github/workflows/build-rgos.yml` manually builds either a flas
 3. Choose the `device` (`rg34xxsp`, `rg35xxh`, `rg-rotate` or `all`) and `img` or `update-tar`.
    - `img`: artifact `rgos-<device>-<id>-img` containing `<device>-rgos.img.gz` (gunzip it, then flash). The run checks that partition 1 is labelled `RGOS`, `extlinux.conf` has `rdinit=/rgos-init` and no `LABEL=ROCKNIX`, and then the device-specific part: RG Rotate = partition 3 is `uboot` (GPT); RG34XXSP = MBR image with `dtb.img` present.
    - `update-tar`: `rgos-update-<device>-<id>.tar` (manifest device `rg-rotate` or `rg34xxsp`, SHA-256 checked). Tick *update_extlinux* to include `extlinux.conf`.
-4. Optionally provide a build ID, turn off *build_psx* (skips the slow emulated PlayStation core build) or override *rocknix_url* (not with `device=all`: each device has its own stock image).
+4. Optionally provide a build ID, turn off *build_psx* (skips the slow emulated PlayStation core build), turn off *build_gc* (skips the RG Rotate-only GameCube core, see `docs/GAMECUBE.md`) or override *rocknix_url* (not with `device=all`: each device has its own stock image).
 5. When the run succeeds, open its summary and download the artifact under **Artifacts**.
 
 The workflow installs debootstrap, qemu-user-static and the partitioning tools, frees runner disk space, runs `./build.sh <device> image|update`, and validates the result. Update tar files are checked against the SHA-256 hashes in `manifest.json`. Artifacts are retained for 14 days.

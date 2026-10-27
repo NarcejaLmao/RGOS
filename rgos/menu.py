@@ -52,6 +52,9 @@ SYSTEMS = [("gba", "GBA", "retroarch", (".gba",), "Game Boy Advance"),
            # PlayStation: pcsx_rearmed (built from source, fast on ARM) or Beetle PSX from Debian. Disc images only (.cue/.chd/.pbp/.m3u/.iso);
            # .bin is not listed because a .cue already points at it. A BIOS (scph1001.bin, scph5501.bin, ...) in ROMS/bios/ is recommended.
            ("psx", "PSX", "retroarch", (".cue", ".chd", ".pbp", ".m3u", ".iso", ".img", ".ccd"), "Sony PlayStation"),
+           # Nintendo GameCube (Dolphin libretro core), RG Rotate only; no Wii. Disc images/dumps only. .iso is shared with Wii dumps,
+           # so keep Wii games out of roms/gc (.wbfs/.wad are not listed). Needs the GameCube BIOS (IPL.bin) in ROMS/bios/dolphin-emu/Sys/GC/<region>/ for the boot logo (optional).
+           ("gc", "GC", "retroarch", (".gcm", ".iso", ".gcz", ".rvz", ".ciso", ".m3u", ".dol", ".elf"), "Nintendo GameCube"),
            # FBNeo runs arcade boards (CPS1/2/3, Konami, Irem, ...) and Neo Geo; ROMs stay zipped, named as MAME/FBNeo expect.
            ("arcade", "ARC", "retroarch", (".zip", ".7z"), "Arcade (FinalBurn Neo)"),
            ("neogeo", "NEO", "retroarch", (".zip", ".7z"), "Neo Geo"),
@@ -313,7 +316,7 @@ def default_core(sid):
             "sega32x": "genesis_plus_gx", "segapico": "genesis_plus_gx",
             "arcade": "fbneo", "neogeo": "fbneo",
             "atari2600": "stella2014", "atari5200": "atari800", "atari7800": "prosystem",
-            "ngp": "mednafen_ngp", "ngpc": "mednafen_ngp", "psx": "pcsx_rearmed", "ws": "mednafen_wswan", "wsc": "mednafen_wswan"}.get(sid, "")
+            "ngp": "mednafen_ngp", "ngpc": "mednafen_ngp", "psx": "pcsx_rearmed", "gc": "dolphin", "ws": "mednafen_wswan", "wsc": "mednafen_wswan"}.get(sid, "")
 
 
 # Only offer cores known to support the selected system. The list is intersected
@@ -337,6 +340,7 @@ SYSTEM_CORE_COMPATIBILITY = {
     "ngp": ("mednafen_ngp", "race"),
     "ngpc": ("mednafen_ngp", "race"),
     "psx": ("pcsx_rearmed", "mednafen_psx", "mednafen_psx_hw", "swanstation"),
+    "gc": ("dolphin",),
     "ws": ("mednafen_wswan",),
     "wsc": ("mednafen_wswan",),
     "arcade": ("fbneo",),
@@ -355,6 +359,9 @@ def compatible_cores(sid, cores=None):
 if os.environ.get("RGOS_ALL_SYSTEMS") != "1":
     _have_cores = installed_cores()
     SYSTEMS = [sy for sy in SYSTEMS if sy[2] != "retroarch" or compatible_cores(sy[0], _have_cores)]
+    # GameCube is an RG Rotate feature only: hidden on every other device even if a dolphin core file ends up there.
+    if (os.environ.get("RGOS_DEVICE") or _device() or "rg-rotate") != "rg-rotate":
+        SYSTEMS = [sy for sy in SYSTEMS if sy[0] != "gc"]
 
 
 def ensure_folders():

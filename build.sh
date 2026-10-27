@@ -120,6 +120,8 @@ DEBIAN_SUITE="${DEBIAN_SUITE:-trixie}"
 DEBIAN_MIRROR="${DEBIAN_MIRROR:-http://deb.debian.org/debian}"
 PSX_REPO="${PSX_REPO:-https://github.com/libretro/pcsx_rearmed.git}"   # PlayStation core (pcsx_rearmed, built from source); PSX_REPO=none skips it
 GENESIS_REPO="${GENESIS_REPO:-https://github.com/libretro/Genesis-Plus-GX.git}"   # Genesis Plus GX (Mega Drive / Master System / Game Gear / SG-1000 / Sega CD), built from source only if Debian has no package; GENESIS_REPO=none skips that fallback
+GC_REPO="${GC_REPO:-https://github.com/libretro/dolphin.git}"   # Nintendo GameCube core (Dolphin libretro, built from source). RG Rotate ONLY (other devices never get it); GC_REPO=none skips it
+[[ "$DEVICE" == "rg-rotate" ]] || GC_REPO=none
 NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
 # Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),
 # with Mesa (Panfrost) for KMS output and SDL2 for input.
@@ -319,13 +321,15 @@ fi
 if ls "$HERE"/cores/*_libretro.so >/dev/null 2>&1; then
   echo "==> Copying prebuilt cores from cores/"; cp "$HERE"/cores/*_libretro.so "$LRDIR/"
 fi
-WANT_NGP=0; WANT_PSX=0; WANT_GEN=0
+[[ "$DEVICE" == "rg-rotate" ]] || rm -f "$LRDIR/dolphin_libretro.so"   # GameCube core: RG Rotate only, even if a prebuilt one sits in cores/
+WANT_NGP=0; WANT_PSX=0; WANT_GEN=0; WANT_GC=0
 [[ "$NGP_SRC" != none && ! -e "$LRDIR/mednafen_ngp_libretro.so" ]] && WANT_NGP=1
 [[ "$PSX_REPO" != none && ! -e "$LRDIR/pcsx_rearmed_libretro.so" ]] && WANT_PSX=1
 # (core_present is defined further down; this is the same test, needed before the compiler step)
 have_core() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so "$ROOTFS/usr/lib/libretro/$1"_libretro.so "$ROOTFS/usr/local/lib/libretro/$1"_libretro.so; do [[ -e "$f" ]] && return 0; done; return 1; }
 [[ "$GENESIS_REPO" != none ]] && ! have_core genesis_plus_gx && WANT_GEN=1
-if (( WANT_NGP || WANT_PSX || WANT_GEN )); then
+[[ "$GC_REPO" != none && ! -e "$LRDIR/dolphin_libretro.so" ]] && WANT_GC=1
+if (( WANT_NGP || WANT_PSX || WANT_GEN || WANT_GC )); then
   echo "==> Installing a compiler in the rootfs to build libretro cores"
   rm -rf "$ROOTFS/tmp/core-src"; mkdir -p "$ROOTFS/tmp/core-src"
   cp -L /etc/resolv.conf "$ROOTFS/etc/resolv.conf"
@@ -367,10 +371,34 @@ if (( WANT_NGP || WANT_PSX || WANT_GEN )); then
       ); then echo "   pcsx_rearmed_libretro.so built"
       else echo "!! could not build pcsx_rearmed: PlayStation falls back to mednafen_psx (Beetle PSX, slower; software renderer)"; fi
     fi
+    if (( WANT_GC )); then
+      echo "==> Building the GameCube core (Dolphin libretro, GameCube only in the menu; RG Rotate)"
+      if chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates cmake ninja-build pkg-config \
+           libevdev-dev libudev-dev libasound2-dev libpulse-dev libgl-dev libegl-dev libgles-dev libdrm-dev libgbm-dev libusb-1.0-0-dev libbluetooth-dev \
+           libcurl4-openssl-dev libpng-dev libminizip-dev liblzo2-dev libmbedtls-dev libhidapi-dev zlib1g-dev libxi-dev libxrandr-dev libx11-dev \
+           && (
+        rm -rf "$WORK/dolphin-libretro"
+        git clone -q --depth 1 --recurse-submodules --shallow-submodules "$GC_REPO" "$WORK/dolphin-libretro" || exit 1
+        cp -r "$WORK/dolphin-libretro" "$ROOTFS/tmp/core-src/gc" || exit 1
+        chroot "$ROOTFS" sh -c 'cd /tmp/core-src/gc && cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLIBRETRO=ON -DENABLE_QT=OFF -DENABLE_NOGUI=OFF -DENABLE_X11=OFF -DENABLE_TESTS=OFF -DENABLE_ANALYTICS=OFF -DENABLE_LTO=OFF -DUSE_DISCORD_PRESENCE=OFF -DENABLE_CLI_TOOL=OFF && cmake --build build -j"$(nproc)"' || exit 1
+        so="$(find "$ROOTFS/tmp/core-src/gc" -name dolphin_libretro.so -type f | head -n1)"
+        [[ -n "$so" ]] || exit 1
+        install -m 755 "$so" "$LRDIR/dolphin_libretro.so" || exit 1
+        # Dolphin looks for <system dir>/dolphin-emu/Sys; rgos-launch copies this to <ROMS>/bios/dolphin-emu/Sys on the first GameCube launch
+        mkdir -p "$ROOTFS/usr/local/share/rgos/dolphin-emu"
+        cp -r "$ROOTFS/tmp/core-src/gc/Data/Sys" "$ROOTFS/usr/local/share/rgos/dolphin-emu/Sys" || exit 1
+        # keep the runtime libraries the core links against when the -dev packages are purged below
+        cat > "$ROOTFS/tmp/core-src/keep-libs.sh" <<'KEEP'
+ldd /usr/local/lib/libretro/dolphin_libretro.so | awk '/=>/ {print $3}' | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | sort -u | xargs -r apt-mark manual
+KEEP
+        chroot "$ROOTFS" sh /tmp/core-src/keep-libs.sh
+      ); then echo "   dolphin_libretro.so built"
+      else echo "!! could not build the GameCube core: GameCube will not appear on the RG Rotate (put a prebuilt dolphin_libretro.so in cores/ and rebuild)"; rm -f "$LRDIR/dolphin_libretro.so"; fi
+    fi
   else
     echo "!! could not install a compiler in the rootfs: skipped building the Genesis Plus GX / Neo Geo Pocket / PlayStation cores"
   fi
-  chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove gcc g++ make >/dev/null 2>&1 || true
+  chroot "$ROOTFS" env DEBIAN_FRONTEND=noninteractive apt-get purge -y --auto-remove gcc g++ make git cmake ninja-build pkg-config '*-dev' >/dev/null 2>&1 || true
   rm -rf "$ROOTFS/tmp/core-src" "$ROOTFS/etc/resolv.conf"
 fi
 CORES="$(ls "$ROOTFS"/usr/local/lib/libretro/*_libretro.so "$ROOTFS"/usr/lib/*/libretro/*_libretro.so "$ROOTFS"/usr/lib/libretro/*_libretro.so 2>/dev/null | xargs -rn1 basename | tr '\n' ' ' || true)"
@@ -381,6 +409,7 @@ core_present() { local f; for f in "$ROOTFS"/usr/lib/*/libretro/"$1"_libretro.so
 for c in gambatte mgba nestopia genesis_plus_gx snes9x mednafen_wswan mednafen_ngp pcsx_rearmed; do
   core_present "$c" || echo "!! ${c}_libretro.so is missing from the image (a Debian libretro package missing, or the source build of that core failed)"
 done
+if [[ "$DEVICE" == "rg-rotate" && "$GC_REPO" != none ]]; then core_present dolphin || echo "!! dolphin_libretro.so is missing from the image: no GameCube on this build"; fi
 # Beetle PSX is only an optional fallback for pcsx_rearmed
 core_present mednafen_psx || core_present pcsx_rearmed || echo "!! no PlayStation core (neither pcsx_rearmed nor mednafen_psx) is in the image"
 [[ -x "$ROOTFS/usr/bin/retroarch" ]] || echo "!! retroarch is not in the image (package missing from $DEBIAN_SUITE?)"

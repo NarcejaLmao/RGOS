@@ -16,7 +16,7 @@ visible on the device; the full log stays in /var/log/rgos-retroarch.log. Always
 Testing on a PC: RGOS_RA_BIN, RGOS_RA_CFG, RGOS_RUN, RGOS_ROMS, RGOS_CORE_DIRS, RGOS_STATE, RGOS_RA_LOG, RGOS_NO_HW=1
 override the device paths.
 """
-import glob, json, os, re, subprocess, sys, time
+import glob, shutil, json, os, re, subprocess, sys, time
 
 RA_BIN = os.environ.get("RGOS_RA_BIN", "retroarch")
 RA_CFG = os.environ.get("RGOS_RA_CFG", "/etc/rgos/retroarch.cfg")
@@ -175,6 +175,18 @@ def make_dirs(sid, roms_root):
             log("cannot create %s: %s (saves may be lost)" % (d, e))
 
 
+def ensure_dolphin_sys(roms_root):
+    """The Dolphin core wants <system dir>/dolphin-emu/Sys. The image ships a copy; put it on the ROMS card once (exFAT: no symlinks)."""
+    src, dst = "/usr/local/share/rgos/dolphin-emu/Sys", os.path.join(roms_root, "bios", "dolphin-emu", "Sys")
+    if os.path.isdir(dst) or not os.path.isdir(src):
+        return
+    try:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copytree(src, dst)
+    except OSError as e:
+        log("cannot copy Dolphin Sys to %s: %s" % (dst, e))
+
+
 def tail(path, n=12):
     try:
         with open(path, errors="replace") as f:
@@ -294,6 +306,8 @@ def main(argv):
                    "Looked for cores in: %s" % ", ".join(CORE_DIRS))
         return 0
     log("%s: system=%s core=%s" % (target, sid, core))
+    if core == "dolphin":
+        ensure_dolphin_sys(ROMS_ROOT)
     launch_retroarch(sid, core, core_file(core), target)
     return 0
 
