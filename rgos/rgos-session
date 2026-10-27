@@ -46,20 +46,65 @@ if [ -d /lib/modules ]; then
     for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/drivers/gpu/drm/' \
                | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi' \
                | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
-    # sound: every driver under sound/ (the Unisoc T618 codec / audio DSP / ASoC modules have vendor names that no name filter can
-    # list); modprobe pulls the dependencies in from modules.dep and a driver that does not match this hardware just stays idle
-    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/sound/' \
-               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
+    # sound is loaded by load_audio_modules below (after the GPU loop), not by a /sound/ path filter
+fi
+# Sound stack. On the Unisoc T618 the ASoC card (vbc-rxpx-codec-sc27xx) is built in and defers its probe until EVERY piece it names
+# exists: the VBC CPU DAI, MCDT, the agcp DMA, the digital codec, the AGDSP mailbox / boot driver and the AW87391 amp. Those drivers
+# do not all live under sound/ (the mailbox, DMA and AGDSP boot drivers are in drivers/), so a path filter on /sound/ left the card
+# stuck on "Parsing dai link 16 failed(-517)" with no /proc/asound/card*. Load by path AND by name, several passes (every new driver
+# re-triggers the deferred card probe), and log what was tried so a missing module is visible in rgos-logs.txt.
+AUDLOG=/var/log/rgos-audio-load.log
+audio_mod_names() {
+    find /lib/modules -name '*.ko*' 2>/dev/null \
+      | grep -E '/sound/|sprd|sc27|sc2730|agdsp|agcp|audcp|audio|mcdt|vbc|aw87|aw873|asoc|snd|codec|mailbox|i2s|iis|dmaengine|virt-dma' \
+      | grep -vE 'wcn|wlan|btsprd|marlin|sdiohal|bluetooth|/net/|/gpu/|/media/|/usb/|/input/|/video/|/staging/' \
+      | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u
+}
+load_audio_modules() {
+    for m in $(audio_mod_names); do
+        out=$(modprobe "$m" 2>&1) || echo "modprobe $m: ${out:-failed}" >> $AUDLOG
+    done
+}
+if [ -d /lib/modules ]; then
+    { echo "== audio module candidates"; audio_mod_names | tr '\n' ' '; echo; } > $AUDLOG 2>&1
+    for pass in 1 2 3; do
+        echo "== pass $pass $(date +%T)" >> $AUDLOG
+        load_audio_modules
+        grep -q '\[' /proc/asound/cards 2>/dev/null && break
+        sleep 1
+    done
 fi
 # speaker: wait (up to 15 s) for the sound card, then point the launcher's own sounds (SDL/pygame) at the same ALSA card the games use
-for _ in $(seq 1 30); do grep -q '\[' /proc/asound/cards 2>/dev/null && break; sleep 0.5; done   # up to 15 s: the audio DSP firmware loads late
+for i in $(seq 1 30); do grep -q '\[' /proc/asound/cards 2>/dev/null && break; [ $((i % 10)) -eq 0 ] && load_audio_modules; sleep 0.5; done   # up to 15 s: the audio DSP firmware loads late
 adev=$(python3 -c 'import sys; sys.path.insert(0, "/opt/rgos"); import hwctl; c = hwctl.audio_card(); print("plughw:%d,%d" % (c, hwctl.audio_pcm(c)))' 2>/dev/null)
 [ -n "$adev" ] && { export AUDIODEV="$adev" SDL_AUDIODRIVER=alsa; echo "audio: AUDIODEV=$AUDIODEV" >> /var/log/rgos-state.log; }
 [ -f /opt/rgos/rgos-audio-prep ] && python3 /opt/rgos/rgos-audio-prep > /var/log/rgos-audio-prep.log 2>&1   # speaker routing: stock mixer state + init.txt
 # what the sound stack looks like (copied into rgos-logs.txt): no card here means the codec driver did not load or its firmware is missing
-{ echo "--- /proc/asound/cards"; cat /proc/asound/cards 2>&1; echo "--- playback PCMs"; ls /proc/asound/card*/pcm*p 2>&1
-  echo "--- sound modules"; lsmod 2>/dev/null | grep -iE 'snd|sprd|agdsp|audio|sc27|vbc|codec|sun4i|sunxi|ahub'
-  echo "--- dmesg"; dmesg 2>/dev/null | grep -iE 'snd|asoc|alsa|audio|agdsp|vbc|codec|firmware' | tail -n 60; } > /var/log/rgos-audio.log 2>&1
+audio_report() {
+  echo "--- /proc/asound/cards"; cat /proc/asound/cards 2>&1; echo "--- playback PCMs"; ls /proc/asound/card*/pcm*p 2>&1
+  echo "--- sound-ish modules loaded"; lsmod 2>/dev/null | grep -iE 'snd|sprd|agdsp|audio|sc27|vbc|codec|mcdt|agcp|aw87|mailbox|dma|i2s'
+  echo "--- devices still deferred (the one named here is what the sound card is waiting for)"; cat /sys/kernel/debug/devices_deferred 2>&1
+  echo "--- platform drivers (sound / DSP related)"; ls /sys/bus/platform/drivers 2>/dev/null | grep -iE 'sprd|sc27|vbc|mcdt|agcp|agdsp|audcp|aw87|audio|sound|i2s|mailbox|dma'
+  echo "--- platform devices (sound / DSP related) and their driver"
+  for d in /sys/bus/platform/devices/*; do n=${d##*/}; case "$n" in *vbc*|*mcdt*|*agcp*|*agdsp*|*audcp*|*sound*|*audio*|*i2s*|*mailbox*|*dma*|*codec*) echo "$n -> $(readlink $d/driver 2>/dev/null | sed 's#.*/##')";; esac; done
+  for d in /sys/bus/i2c/devices/*; do echo "i2c ${d##*/}: $(cat $d/name 2>/dev/null) -> $(readlink $d/driver 2>/dev/null | sed 's#.*/##')"; done 2>/dev/null
+  echo "--- DSP firmware files"; ls -l /lib/firmware 2>&1 | grep -iE 'agdsp|audcp|dsp|pm_sys|sprd'; ls -lR /lib/firmware/sprd 2>&1 | head -30
+  echo "--- module load failures (rgos-audio-load.log)"; tail -n 60 $AUDLOG 2>&1
+  echo "--- dmesg (sound/DSP; the per-FE-link ASoC spam is dropped, 'deferred' / firmware / errors kept)"
+  dmesg 2>/dev/null | grep -iE 'snd|asoc|alsa|audio|agdsp|audcp|vbc|codec|mcdt|agcp|aw873|mailbox|firmware|deferred|sprd.*(fail|err)' \
+    | grep -vE 'name : FE_|stream_name : FE_|asoc_sprd_card_dai_link_of: parse for codec failed|sub_parse_of parse phandle .codec. failed' | tail -n 120
+}
+audio_report > /var/log/rgos-audio.log 2>&1
+# late card: if the card was not there yet, keep retrying the module load for a minute, then route the speaker and refresh the report
+if ! grep -q '\[' /proc/asound/cards 2>/dev/null; then
+  ( for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+      sleep 5; load_audio_modules
+      if grep -q '\[' /proc/asound/cards 2>/dev/null; then
+        sleep 1; python3 /opt/rgos/rgos-audio-prep > /var/log/rgos-audio-prep.log 2>&1; break
+      fi
+    done
+    audio_report > /var/log/rgos-audio.log 2>&1 ) >/dev/null 2>&1 &
+fi
 # offline update: <card>/update/*.tar (built by ./build.sh update) is installed on the boot partition, then reboot
 if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
 python3 /opt/rgos/rgos-update boot 2>>/var/log/rgos-update.log
@@ -118,7 +163,7 @@ python3 /opt/rgos/rgos-input >> /var/log/rgos-input.log 2>&1 &
     { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
       T=""; command -v timeout >/dev/null 2>&1 && T="timeout 4"
       $T python3 -c 'import pygame; print("pygame", pygame.version.ver)' 2>&1
-      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-audio.log /var/log/rgos-audio-prep.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
+      for f in /var/log/rgos-menu.log /var/log/rgos-input.log /var/log/rgos-launch.log /var/log/rgos-retroarch.log /var/log/rgos-roms.log /var/log/rgos-volume.log /var/log/rgos-audio.log /var/log/rgos-audio-prep.log /var/log/rgos-audio-load.log /var/log/rgos-wifi.log /var/log/rgos-bt.log /var/log/rgos-ssh.log; do echo "--- $f"; tail -n 100 "$f" 2>&1; done
       echo "--- settings dir"; id; grep -E ' (/|/var|/var/lib|/var/lib/rgos) ' /proc/mounts; ls -ld /var /var/lib /var/lib/rgos 2>&1
       ls -la /var/lib/rgos 2>&1; { touch /var/lib/rgos/.w && rm -f /var/lib/rgos/.w && echo "write test: ok"; } 2>&1 || echo "write test: FAILED"
       cat /var/log/rgos-state.log 2>&1

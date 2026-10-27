@@ -4,3 +4,4 @@
 #   cset name='Speaker Mux' 1
 # The full control list is in rgos-audio.log (inside rgos-logs.txt on the boot partition, section "amixer contents").
 # The same lines can go in hw.json on the ROMS partition: {"audio": {"init": ["sset 'Speaker Switch' on"]}}
+# RG Rotate (T618): "DSP VBC Profile Select" = 961216512 is set automatically by rgos-audio-prep when the control exists.

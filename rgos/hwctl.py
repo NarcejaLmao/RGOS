@@ -442,6 +442,15 @@ def audio_prepare(card, audio_dir=AUDIO_DIR, user_conf=USER_CONF, run=None):
     for args in _audio_init_lines(os.path.join(audio_dir, "init.txt"), user_conf):
         run(["amixer", "-c", str(card), "-q"] + args)
         log.append("amixer %s" % " ".join(args))
+    # Unisoc T618 (RG Rotate): the AGDSP VBC profile selector is what makes the DSP-mediated path produce sound at all; at its default
+    # value playback is silent (beebono/rg-rotate-linux DEVICE-BRINGUP.md: "DSP VBC Profile Select = 961216512"). A restored stock
+    # asound.state normally carries it; set it here when the control exists so a missing / incomplete state file is not fatal.
+    try:
+        if "DSP VBC Profile Select" in (run(["amixer", "-c", str(card), "controls"]) or ""):
+            run(["amixer", "-c", str(card), "-q", "cset", "name=DSP VBC Profile Select", "961216512"])
+            log.append("amixer cset name='DSP VBC Profile Select' 961216512")
+    except Exception as e:
+        log.append("VBC profile select failed: %r" % e)
     try:
         raw = audio_enable_raw(card, run)
         log.append("output switches set by name (no stock mixer state / init.txt needed): %s" % (", ".join(raw) or "none found"))
