@@ -115,8 +115,25 @@ fixperms
 sh /opt/rgos/rgos-roms 2>>/var/log/rgos-roms.log
 # ROMS = partition 4 (GPT cards, RG Rotate) or 3 (MBR cards, RG34XXSP) of the card we booted from, on /media/roms (exFAT; FAT32/ext4 still mount).
 if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
-romsn=$(cat /run/rgos/roms-part 2>/dev/null); case "$romsn" in 3|4) ;; *) romsn=4 ;; esac
-roms=""; case "$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)" in /dev/mmcblk*p1) src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts); roms="${src%p1}p${romsn}" ;; esac
+src=$(awk '$2=="/boot"{print $1; exit}' /proc/mounts)
+romsn=$(cat /run/rgos/roms-part 2>/dev/null)
+case "$romsn" in
+  3|4) ;;
+  *)
+    # Recover safely if rgos-roms could not write its runtime marker. H700 images use
+    # an MBR (ROMS partition 3); RG Rotate uses GPT (ROMS partition 4). The old
+    # unconditional fallback to 4 made H700 devices miss their ROMS partition.
+    romsn=4
+    case "$src" in
+      /dev/mmcblk*p1)
+        disk=${src%p1}
+        pttype=$(blkid -p -o value -s PTTYPE "$disk" 2>/dev/null)
+        case "$pttype" in dos) romsn=3 ;; gpt) romsn=4 ;; esac
+        ;;
+    esac
+    ;;
+esac
+roms=""; case "$src" in /dev/mmcblk*p1) roms="${src%p1}p${romsn}" ;; esac
 if [ -n "$roms" ] && [ -b "$roms" ] && ! mountpoint -q /media/roms; then
     { grep -qw exfat /proc/filesystems || modprobe exfat 2>/dev/null; mount -t exfat -o noatime,umask=000 "$roms" /media/roms 2>/dev/null; } \
       || mount -t vfat -o noatime,umask=000 "$roms" /media/roms 2>/dev/null \

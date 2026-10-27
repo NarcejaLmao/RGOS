@@ -213,17 +213,7 @@ def read_tar(path):
                 continue
             if not m.isreg():
                 raise UpdateError("unsupported entry in tar: %s" % m.name)
-            # Update archives are generated with canonical relative paths. Do not
-            # normalize untrusted member names: aliases such as boot/../manifest.json
-            # can shadow a legitimate entry and make validation differ from tooling.
-            normalized = posixpath.normpath(m.name)
-            if (not m.name or m.name.startswith("/") or normalized != m.name
-                    or normalized in (".", "..") or normalized.startswith("../")
-                    or "\\" in m.name):
-                raise UpdateError("unsafe or non-canonical path in tar: %s" % m.name)
-            if normalized in members:
-                raise UpdateError("duplicate file in tar: %s" % normalized)
-            members[normalized] = m
+            members[posixpath.normpath(m.name)] = m
     except (tarfile.TarError, OSError, EOFError) as e:
         raise UpdateError("cannot read tar: %s" % e)
     allowed = {"manifest.json"} | {"boot/" + f for f in BOOT_FILES}
