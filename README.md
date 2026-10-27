@@ -1,6 +1,6 @@
 # RG OS
 
-Debian + the RG OS launcher on top of each handheld's stock ROCKNIX SD image. Only ROCKNIX's `SYSTEM` squashfs is replaced; kernel, device tree(s), bootloader and partition table stay as ROCKNIX shipped them.
+Debian + the RG OS launcher built on top of ROCKNIX to give you a seamless Linux emulation experience on the Anbernic RG Rotate.
 
 | Device | Argument | SoC | Base image | Partition table |
 |---|---|---|---|---|
