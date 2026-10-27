@@ -1823,8 +1823,12 @@ def main():
                      "bluetooth": ("Bluetooth", {None: "Pair controllers, keyboards and headsets", True: "On   A opens the device list", False: "Off   A opens the device list"}[btm.on]),
                      "ssh": ("SSH / file transfer", ("On: ssh or sftp root@%s" % wst["ip"] if wst["ip"] else "On: connect Wi-Fi to use it") if ssh_info()["running"] else "Off   A opens it"),
                      "info": ("Information", "Build, kernel, storage, battery, volume and input status")}
+            set_vis = max(1, PH // 86)                     # settings rows that fit above the hint line
+            set_first = min(max(0, set_idx - set_vis // 2), max(0, len(SETTINGS_ROWS) - set_vis))
             for i, (nm, sub) in enumerate(srows[r] for r in SETTINGS_ROWS):
-                by, sel = top_y + i * 86, i == set_idx
+                if not set_first <= i < set_first + set_vis:
+                    continue                               # scrolled out of view
+                by, sel = top_y + (i - set_first) * 86, i == set_idx
                 draw_button(canvas, (list_x, by, W - 2 * list_x, 78), SEL_BG if sel else PANEL, 12, 3, sel)
                 canvas.blit(f_row.render(nm, True, TEXT if sel else DIM), (list_x + 24, by + 14))
                 sub_w = W - 2 * list_x - 48
@@ -1836,6 +1840,12 @@ def main():
                         pygame.draw.rect(canvas, DIM, (sx + j * 24, by + 29, 20, 20), 1, border_radius=5)
                     sub_w = sx - (list_x + 24) - 12
                 canvas.blit(f_small.render(fit(f_small, sub, sub_w), True, DIM), (list_x + 24, by + 46))
+            if len(SETTINGS_ROWS) > set_vis:                # scrollbar on the right edge
+                tr_h = set_vis * 86 - 8
+                th_h = max(24, tr_h * set_vis // len(SETTINGS_ROWS))
+                th_y = top_y + (tr_h - th_h) * set_first // max(1, len(SETTINGS_ROWS) - set_vis)
+                pygame.draw.rect(canvas, PANEL, (W - 12, top_y, 6, tr_h), border_radius=3)
+                pygame.draw.rect(canvas, ACCENT, (W - 12, th_y, 6, th_h), border_radius=3)
             hint = ("Left/Right Change theme   " if SETTINGS_ROWS[set_idx] == "theme" else
                     "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else
                     "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + "B Back   START+SELECT Power off"
