@@ -60,13 +60,7 @@ class Mixer:
         conf = read_json(USER_CONF).get("audio", {})
         if not isinstance(conf, dict):
             conf = {}
-        # A hand-edited hw.json must not prevent the volume daemon from starting.
-        # Invalid values (for example, "step": "fast") fall back to the default.
-        try:
-            step = int(conf.get("step", 5) or 5)
-        except (TypeError, ValueError, OverflowError):
-            step = 5
-        self.step = max(1, min(25, step))
+        self.step = max(1, min(25, int(conf.get("step", 5) or 5)))
         self.card = None
         self.controls = []
         self.switches = []
@@ -162,6 +156,7 @@ def change(mixer, st, key):
 
 # ---------------------------------------------------------------- input devices that carry the volume keys
 def has_volume_keys(path):
+    """Return true for devices exposing any key handled by this daemon, including mute-only devices."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
     except OSError:
@@ -169,7 +164,8 @@ def has_volume_keys(path):
     try:
         buf = bytearray(96)
         fcntl.ioctl(fd, EVIOCGBIT_KEY, buf)
-        return any(buf[k // 8] & (1 << (k % 8)) for k in (KEY_VOLUMEUP, KEY_VOLUMEDOWN))
+        return any(buf[k // 8] & (1 << (k % 8))
+                   for k in (KEY_VOLUMEUP, KEY_VOLUMEDOWN, KEY_MUTE))
     except OSError:
         return False
     finally:
