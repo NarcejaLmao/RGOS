@@ -354,6 +354,24 @@ def compatible_cores(sid, cores=None):
     return [core for core in SYSTEM_CORE_COMPATIBILITY.get(sid, ()) if core in installed]
 
 
+CORE_NAMES = {"mgba": "mGBA", "gpsp": "gpSP", "vbam": "VBA-M", "gambatte": "Gambatte", "sameboy": "SameBoy", "gearboy": "Gearboy",
+              "nestopia": "Nestopia", "fceumm": "FCEUmm", "quicknes": "QuickNES", "mesen": "Mesen", "mesen_s": "Mesen-S",
+              "snes9x": "Snes9x", "snes9x2010": "Snes9x 2010", "bsnes": "bsnes", "bsnes_hd_beta": "bsnes-hd",
+              "genesis_plus_gx": "Genesis Plus GX", "picodrive": "PicoDrive", "stella2014": "Stella 2014", "stella": "Stella",
+              "atari800": "Atari800", "prosystem": "ProSystem", "mednafen_ngp": "Beetle NeoPop", "race": "RACE",
+              "mednafen_wswan": "Beetle Cygne", "pcsx_rearmed": "PCSX ReARMed", "mednafen_psx": "Beetle PSX",
+              "mednafen_psx_hw": "Beetle PSX HW", "swanstation": "SwanStation", "dolphin": "Dolphin", "fbneo": "FinalBurn Neo",
+              "mednafen_gba": "Beetle GBA", "mednafen_gb": "Beetle GB"}
+
+
+def core_label(sid, state):
+    """Display name of the RetroArch core that will run this system (the Settings > Emulators choice, else the default)."""
+    core = state.get("emulators", {}).get(sid)
+    if core not in SYSTEM_CORE_COMPATIBILITY.get(sid, ()):
+        core = default_core(sid)
+    return CORE_NAMES.get(core) or core.replace("_", " ") or "RetroArch"
+
+
 # Only systems that can actually run are kept: native ports always, RetroArch systems only when at least one compatible core is
 # installed. Systems without a core never show up in the menu and get no ROM folder. RGOS_ALL_SYSTEMS=1 keeps the full list (PC testing).
 if os.environ.get("RGOS_ALL_SYSTEMS") != "1":
@@ -1867,8 +1885,8 @@ def main():
                     pygame.draw.rect(canvas, SEL_BG, (list_x + 8, y, W - 2 * list_x - 16, 40), border_radius=8)
                     pygame.draw.rect(canvas, ACCENT, (list_x + 8, y, W - 2 * list_x - 16, 40), 2, border_radius=8)
                 canvas.blit(f_small.render(fit(f_small, fullname, 300), True, TEXT if sel else DIM), (list_x + 20, y + 3))
-                core_label = chosen.replace("_", " ")
-                canvas.blit(f_small.render(fit(f_small, "< " + core_label + " >", 190), True, ACCENT if sel else TEXT), (W - list_x - 205, y + 14))
+                core_txt = chosen.replace("_", " ")
+                canvas.blit(f_small.render(fit(f_small, "< " + core_txt + " >", 190), True, ACCENT if sel else TEXT), (W - list_x - 205, y + 14))
             if not any(compatible_cores(sy[0]) for sy in emu_systems):
                 canvas.blit(f_row.render("No installed compatible RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
             hint = "Up/Down System   Left/Right Change compatible core   B Back"
@@ -2053,7 +2071,7 @@ def main():
                     canvas.blit(f_row.render(line, True, TEXT), (px + 15, top_y + 148 + DY // 2 + i * 26))
                 canvas.blit(f_small.render("%d %s%s" % (cnt, "port" if sid == "ports" else "game", "" if cnt == 1 else "s"), True, DIM),
                             (px + 15, top_y + 300 + DY))
-                canvas.blit(f_small.render("Native Linux games" if score == "native" else "RetroArch + mGBA", True, DIM), (px + 15, top_y + 322 + DY))
+                canvas.blit(f_small.render("Native Linux games" if score == "native" else "RetroArch + " + core_label(sid, state), True, DIM), (px + 15, top_y + 322 + DY))
             if not os.path.isdir(ROMS_DIR):
                 canvas.blit(f_small.render("ROMS partition not found.", True, ACCENT), (list_x + 18, H - 52))
             hint = "A Open   B Back   X Rescan   START+SELECT Power off"
