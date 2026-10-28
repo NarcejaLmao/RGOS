@@ -16,7 +16,7 @@ mount -t devtmpfs devtmpfs /dev 2>/dev/null
 klog() { echo "rgos-initramfs: $*" > /dev/kmsg 2>/dev/null; }
 say()  { klog "$*"; echo "RG OS: $*"; }
 
-# boot= from the kernel command line (RG OS passes boot=LABEL=RGOS; stock ROCKNIX used LABEL=ROCKNIX); only a hint, we fall back to a scan
+# boot= from the kernel command line (boot=LABEL=ROCKNIX, the stock value; the partition keeps that label); only a hint, we fall back to a scan
 WANT=""
 for a in $(cat /proc/cmdline); do case "$a" in boot=*) WANT=${a#boot=} ;; esac; done
 
@@ -34,7 +34,7 @@ find_boot() {
     case "$WANT" in /dev/*) hint=$WANT ;; *) hint=$(findfs "$WANT" 2>/dev/null) ;; esac
     [ -n "$hint" ] && try_dev "$hint" && return 0
   fi
-  for d in /dev/mmcblk*p1 /dev/sd[a-z]1 /dev/nvme*n*p1; do try_dev "$d" && return 0; done
+  for d in /dev/mmcblk*p[0-9]* /dev/sd[a-z][0-9]* /dev/nvme*n*p[0-9]*; do try_dev "$d" && return 0; done
   return 1
 }
 

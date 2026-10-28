@@ -139,7 +139,7 @@ WORK="$HERE/work/$DEVICE"; OUT="$HERE/out"; IMG="$OUT/$DEVICE-rgos.img"
 [[ "$MODE" == "update" ]] && IMG="$WORK/update-scratch.img"   # an update build never overwrites a finished SD card image
 ROOTFS="$WORK/rootfs"
 
-need=(debootstrap losetup mksquashfs unsquashfs wget gunzip md5sum python3 readelf sfdisk truncate fatlabel)
+need=(debootstrap losetup mksquashfs unsquashfs wget gunzip md5sum python3 readelf sfdisk truncate)
 [[ "$MODE" == "image" && "$PTABLE" == gpt ]] && need+=(sgdisk)
 [[ "$(uname -m)" == "aarch64" ]] || need+=(qemu-aarch64-static)
 for t in "${need[@]}"; do
@@ -162,9 +162,8 @@ fi
 echo "==> Copying stock image to $IMG"
 cp --sparse=always "$RX_IMG" "$IMG"
 LOOP="$(losetup -Pf --show "$IMG")"
-# The FAT boot partition (partition 1) is labelled ROCKNIX in the stock image; RG OS calls it RGOS.
-echo "==> Renaming the boot partition label ROCKNIX -> RGOS"
-fatlabel "${LOOP}p1" RGOS
+# The FAT boot partition (partition 1) keeps its stock label ROCKNIX. ROCKNIX's own init (the fallback if rdinit is ever ignored)
+# and its boot= argument look the partition up by that label; renaming it is what caused "ROCKNIX partition not found".
 mount "${LOOP}p1" "$WORK/mnt"
 echo "==> Stock boot partition:"; ls -la "$WORK/mnt"
 echo "==> Stock extlinux config (left untouched):"
@@ -520,7 +519,7 @@ python3 "$HERE/initramfs/mkinitramfs.py" "$BB" "$HERE/initramfs/init" "$WORK/mnt
 EXT="$WORK/mnt/extlinux/extlinux.conf"; [[ -f "$EXT" ]] || EXT="$WORK/mnt/extlinux.conf"
 [[ -f "$EXT" ]] || { echo "!! no extlinux.conf on the boot partition"; exit 1; }
 rm -f "$WORK/mnt/white.cpio.gz"                 # leftover from very old builds
-sed -i 's/LABEL=ROCKNIX/LABEL=RGOS/g' "$EXT"       # the kernel command line names the boot partition by label
+# boot=LABEL=ROCKNIX stays as shipped: the partition keeps its ROCKNIX label, so both our init and ROCKNIX's own can find it
 cp "$EXT" "$(dirname "$EXT")/extlinux.conf.stock"   # recovery: copy this over extlinux.conf from a PC to boot ROCKNIX's own init again
 echo "==> Patched extlinux config:"
 python3 "$HERE/initramfs/patch-extlinux.py" "$EXT" "/$INITRD_NAME"
@@ -566,7 +565,6 @@ if [[ "$PTABLE" == gpt ]]; then
   # device skips the card and boots Android. NEVER delete or rename it. ROMS becomes partition 4.
   echo "==> Partitions in the image (partition 3 must be 'uboot'; ROMS is created on first boot as partition 4):"
   sfdisk -l "$IMG" 2>/dev/null | grep -E '^(/|Device)' || true
-  sgdisk -c 1:RGOS "$IMG" >/dev/null 2>&1 || true   # GPT name of partition 1 (cosmetic)
   sgdisk -i 3 "$IMG" 2>/dev/null | grep -q "^Partition name: 'uboot'" || { echo "!! partition 3 of the image is not 'uboot': the device would boot Android"; exit 1; }
 else
   # MBR (RG34XXSP): partitions 1 (FAT) and 2 (STORAGE). U-Boot (SPL at 8 KiB) sits in the gap before partition 1, which was not touched

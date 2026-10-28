@@ -38,7 +38,7 @@ SYS_DEV_BLOCK = "/sys/dev/block"
 DEV_DIR = "/dev"
 PRIMARY_MOUNT = "/media/roms"
 SYSTEM_MOUNTS = ("/", "/boot", PRIMARY_MOUNT)     # whatever disk backs these is card 1
-SKIP_LABELS = ("RGBOOT", "RGOS", "rgos-root")             # partitions of an RG OS system card are never game storage
+SKIP_LABELS = ("RGBOOT", "RGOS", "ROCKNIX", "rgos-root")             # partitions of an RG OS system card are never game storage
 # Folder names under roms/ (kept in step with menu.SYSTEMS and rgos-session)
 SYSTEM_DIRS = ("gba", "nes", "snes", "gb", "gbc", "genesis", "mastersystem", "gamegear", "sg1000", "segacd", "sega32x", "segapico", "atari2600", "atari5200", "atari7800", "psx", "ngp", "ngpc", "ws", "wsc", "arcade", "neogeo", "ports")
 MOUNT_TYPES = {"exfat": ("exfat",), "vfat": ("vfat",), "ext4": ("ext4",), "ntfs": ("ntfs3", "ntfs")}
