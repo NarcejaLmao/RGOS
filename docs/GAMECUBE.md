@@ -17,3 +17,8 @@ GameCube runs through RetroArch with the **Dolphin libretro** core (`dolphin_lib
 A prebuilt aarch64 `dolphin_libretro.so` in `cores/` is used instead of building (and is deleted again for every device except `rg-rotate`). In GitHub Actions use the *build_gc* checkbox.
 
 The build is best-effort, like the other source-built cores: if it fails, a `!!` line is printed and the image is built without GameCube. It is slow under qemu emulation (plan on a long run).
+
+
+## Runtime dependency fix
+
+The Dolphin core may fail to load with `liblzo2.so.2: cannot open shared object file` when a prebuilt `dolphin_libretro.so` is used. RG OS now includes Debian's `liblzo2-2` runtime package in the base image so this dependency is present even for prebuilt cores. Rebuild the image or install `liblzo2-2` on an existing Debian-based RG OS image.

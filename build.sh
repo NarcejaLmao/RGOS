@@ -130,7 +130,7 @@ NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs
 # package: it is compiled from source in the rootfs below (NGP_SRC), or drop a prebuilt aarch64 *_libretro.so into cores/ next to build.sh.
 # Genesis Plus GX is installed best-effort after debootstrap (Debian package libretro-genesisplusgx, else built from GENESIS_REPO), because a package missing from the suite would abort debootstrap.
 # More libretro cores: EXTRA_PKGS="libretro-xyz" sudo -E ./build.sh  (Debian package names)
-EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-nestopia,libretro-beetle-wswan,libretro-core-info,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
+EMU_PKGS="retroarch,libretro-gambatte,libretro-mgba,libretro-snes9x,libretro-nestopia,libretro-beetle-wswan,libretro-core-info,liblzo2-2,libgl1-mesa-dri,libegl1,libegl-mesa0,libgles2,libgbm1,libsdl2-2.0-0"
 EXTRA_PKGS="${EXTRA_PKGS:-}"
 # The exFAT ROMS partition (partition 4) is NOT in the image: rgos/rgos-roms creates it on the device's first boot, using all the
 # free space on the card, and formats it exFAT.
