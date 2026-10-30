@@ -22,3 +22,8 @@ See `docs/BUILD-WORKFLOW.md` (GitHub Actions and build options) and `docs/UPDATE
 
 # Join the Discord!
 By joining our [Discord Server](https://discord.gg/PmQeRvpGa), you can help grow our community as well as chat with us, get support and much more.
+
+# Credits & Thanks
+- Thanks to MuOS for being the entire inspiration behind this CFW.
+- Credits to Noxwell for the ROCKNIX kernel and Device Trees for the Anbernic RG ROTATE.
+- Credits to ROCKNIX for the kernel and Device Trees.
