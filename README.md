@@ -19,3 +19,6 @@ RG OS is an open source Linux emulation distribution for retro handhelds built o
 `sudo ./build.sh` with no device only prints the usage text; nothing is downloaded, mounted or written.
 
 See `docs/BUILD-WORKFLOW.md` (GitHub Actions and build options) and `docs/UPDATES.md`.
+
+# Join the Discord!
+By joining our [Discord Server](https://discord.gg/PmQeRvpGa), you can help grow our community as well as chat with us, get support and much more.
