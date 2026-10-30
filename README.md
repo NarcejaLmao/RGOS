@@ -1,6 +1,6 @@
 # RG OS
 
-Debian + the RG OS launcher built on top of ROCKNIX to give you a seamless Linux emulation experience on the Anbernic RG Rotate.
+RG OS is an open source Linux emulation distribution for retro handhelds built on top of Debian using the ROCKNIX kernel and Device Trees.
 
 | Device | Argument | SoC | Base image | Partition table |
 |---|---|---|---|---|
