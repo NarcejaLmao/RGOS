@@ -6,7 +6,7 @@ Lists the native Linux ports in <ROMS>/roms/ports/ (the .sh launchers) and on se
 Exit code 20 = power off.
 """
 import glob
-import io, json, math, os, re, signal, subprocess, sys, threading, time
+import io, json, math, os, random, re, signal, subprocess, sys, threading, time
 import pygame
 from evpad import EvPads, CODES as EV_CODES, EV_KEY, EV_ABS
 import fbout
@@ -753,33 +753,62 @@ def xmb_icon(kind, size, color, alpha=1.0):
     return t
 
 
-# wave ribbons: (vertical position, amplitude, wavelength factor, speed, thickness, colour mix toward the accent)
-_XMB_WAVES = ((0.62, 26, 0.0085, 0.55, 34, 0.10), (0.74, 22, 0.0110, -0.42, 28, 0.14), (0.86, 18, 0.0140, 0.70, 22, 0.18))
+# PS3-style silk. Each bundle is a sheet of fine strands that sweeps across the screen, fans out and pinches together where it "twists":
+# (height at the left edge, height at the right edge (both as a fraction of H), swell amplitude, swell wave number, swell speed,
+#  max half-thickness, twist wave number, twist speed, twist phase, number of strands, brightness)
+_XMB_SILK = ((0.68, 0.43, 16, 0.0085, 0.22, 48, 0.0060, 0.10, 0.4, 18, 0.55),
+             (0.77, 0.58, 12, 0.0110, -0.18, 34, 0.0075, -0.12, 2.6, 12, 0.36))
+_XMB_SPARKS = []                               # (x, y, drift speed, phase, size) of the twinkling dust, built once
+
+
+def xmb_tint(x, y, k):
+    """The background colour at (x, y) lifted toward the text colour by k (soft light shapes that follow the gradient)."""
+    g = next(iter(_XBG.values()), None)
+    base = g.get_at((max(0, min(W - 1, int(x))), max(0, min(H - 1, int(y)))))[:3] if g else BG
+    return _mix(base, TEXT, k)
 
 
 def xmb_bg(c, t):
-    """The XMB background: a vertical gradient in the theme colours with a few slowly drifting wave ribbons."""
-    key = (BG, ACCENT, W, H)
+    """The XMB background: a diagonal gradient in the theme colours (dark top-left, glowing bottom-right), a sweeping sheet of silk
+    strands that slowly shimmers and twists, and a little twinkling dust."""
+    key = (BG, ACCENT, TEXT, W, H)
     g = _XBG.get(key)
     if g is None:
         _XBG.clear()
-        g = pygame.Surface((W, H))
-        low = _mix(BG, ACCENT, 0.30)
-        for y in range(H):
-            pygame.draw.line(g, _mix(BG, low, (y / float(H)) ** 1.5), (0, y), (W, y))
+        gw, gh = 24, 16                         # a tiny gradient, scaled up smoothly (cheap and free of banding)
+        small = pygame.Surface((gw, gh))
+        top, low = _mix(BG, ACCENT, 0.04), _mix(BG, ACCENT, 0.50)
+        for gy in range(gh):
+            for gx in range(gw):
+                v = 0.30 * (gx + 0.5) / gw + 0.70 * (gy + 0.5) / gh
+                pygame.draw.rect(small, _mix(top, low, v ** 1.15), (gx, gy, 1, 1))
+        g = pygame.transform.smoothscale(small, (W, H))
         _XBG[key] = g
+        if not _XMB_SPARKS:
+            r = random.Random(11)
+            for i in range(36):
+                _XMB_SPARKS.append((r.uniform(0, W), (r.uniform(0.10, 0.98) if i % 3 else r.uniform(0.40, 0.85)) * H,
+                                    r.uniform(3, 12), r.uniform(0, 6.28), 2 if r.random() < 0.8 else 3))
     c.blit(g, (0, 0))
-    for k, (yb, amp, freq, speed, th, mk) in enumerate(_XMB_WAVES):
-        top, bot = [], []
-        for x in range(0, W + 24, 24):
-            ph = x * freq * 6.0 + t * speed
-            yc = H * yb + amp * math.sin(ph) + amp * 0.5 * math.sin(ph * 0.5 + k * 2.1)
-            half = th * (0.65 + 0.35 * math.sin(ph * 0.7 + k))
-            top.append((x, yc - half))
-            bot.append((x, yc + half))
-        base = g.get_at((0, min(H - 1, int(H * yb))))[:3]
-        pygame.draw.polygon(c, _mix(base, ACCENT, mk), top + bot[::-1])
-        pygame.draw.lines(c, _mix(base, TEXT, mk * 1.6), False, top, 2)
+    hl = _mix(ACCENT, TEXT, 0.78)                              # what the silk reflects: nearly white with a hint of the accent
+    for yl, yr, amp, kf, sp, th, kt, st, ph, n, br in _XMB_SILK:
+        cen, half = [], []
+        for x in range(0, W + 10, 10):
+            u = x / float(W)
+            yc = H * (yl + (yr - yl) * u * u * (3 - 2 * u)) + amp * math.sin(x * kf + t * sp + ph) + amp * 0.5 * math.sin(x * kf * 2.3 - t * sp * 0.8)
+            tw = 0.5 + 0.5 * math.sin(x * kt + t * st + ph)
+            cen.append((x, yc))
+            half.append(th * (0.10 + 0.90 * tw * tw))           # fans out, then pinches to a thin line
+        base = g.get_at((W // 3, min(H - 1, int(H * (yl + yr) / 2))))[:3]
+        pygame.draw.polygon(c, _mix(base, hl, 0.12 * br / 0.55), [(x, yc - h) for (x, yc), h in zip(cen, half)] + [(x, yc + h) for (x, yc), h in zip(cen, half)][::-1])
+        for k in range(n):                                     # the fine strands; the upper ones catch the most light
+            f = k / float(n - 1) * 2.0 - 1.0
+            line = [(x, yc + h * (f + 0.09 * math.sin(x * 0.021 + t * 0.35 + k * 0.9))) for (x, yc), h in zip(cen, half)]
+            pygame.draw.aalines(c, _mix(base, hl, br * (0.30 + 0.45 * max(0.0, -f) + 0.15 * (1.0 - abs(f)))), False, line)
+        pygame.draw.lines(c, _mix(base, hl, min(1.0, br * 1.5)), False, [(x, yc - h) for (x, yc), h in zip(cen, half)], 2)    # lit upper edge
+    for x0, y0, spd, ph, sz in _XMB_SPARKS:                    # twinkling dust
+        x, y = (x0 + t * spd) % W, y0 + 4 * math.sin(t * 0.4 + ph)
+        pygame.draw.rect(c, xmb_tint(x, y, 0.22 + 0.55 * (0.5 + 0.5 * math.sin(t * 1.6 + ph))), (int(x), int(y), sz, sz))
 
 
 def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
@@ -795,7 +824,7 @@ def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
         t = max(0.0, 1.0 - abs(d))
         size = int(small + (big - small) * t)
         if t > 0.05:
-            pygame.draw.circle(c, _mix(BG, ACCENT, 0.18 * t), (x, bar_y), int(size * 0.62))
+            pygame.draw.circle(c, xmb_tint(x, bar_y, 0.09 * t), (x, bar_y), int(size * 0.62))
         c.blit(xmb_icon(cid, size, _mix(DIM, TEXT, t), 0.5 + 0.5 * t), (x - size // 2, bar_y - size // 2))
         if t > 0.3:
             lab = f_row.render(cname, True, _mix(BG, TEXT, t))
@@ -815,13 +844,13 @@ def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
             al *= max(0.0, min(1.0, (H - 44 - y) / 30.0))   # ... and the ones below near the hint line
         if al <= 0.02:
             continue
-        al *= 0.62 + 0.38 * sel_t
+        al *= 0.80 + 0.20 * sel_t
         isz = int(34 + 14 * sel_t)
         if sel_t > 0.05:
-            pygame.draw.circle(c, _mix(BG, ACCENT, 0.16 * sel_t * al), (colx, int(y)), int(isz * 0.62))
+            pygame.draw.circle(c, xmb_tint(colx, y, 0.08 * sel_t * al), (colx, int(y)), int(isz * 0.62))
         c.blit(xmb_icon(it["icon"], isz, _mix(DIM, TEXT, sel_t), al), (colx - isz // 2, int(y) - isz // 2))
         tx = colx + 40
-        lab = f_row.render(fit(f_row, it["label"], W - tx - 20), True, _mix(BG, _mix(DIM, TEXT, sel_t), al))
+        lab = f_row.render(fit(f_row, it["label"], W - tx - 20), True, _mix(BG, _mix(DIM, TEXT, 0.40 + 0.60 * sel_t), al))
         c.blit(lab, (tx, int(y) - lab.get_height() // 2 - int(10 * sel_t)))
         if sel_t > 0.2 and it.get("sub"):
             sub = f_small.render(fit(f_small, it["sub"], W - tx - 20), True, _mix(BG, DIM, al * sel_t))
@@ -1994,6 +2023,10 @@ def main():
         s = f_small.render(info, True, DIM)
         bat = rd_bat()
         right = W - 20
+        if launcher_id == "xmb":                   # translucent status pill, as on the PS3 XMB
+            pl = (W - 90 - 16 if bat else W - 20) - s.get_width() - 20
+            pygame.draw.rect(canvas, xmb_tint(W - 40, 33, 0.10), (pl, 14, W - 8 - pl, 38), border_radius=19)
+            pygame.draw.rect(canvas, xmb_tint(W - 40, 33, 0.24), (pl, 14, W - 8 - pl, 38), 1, border_radius=19)
         if bat:                                    # battery gauge at the top right (when /run/rgos/battery exists)
             pct, status = bat
             low = pct <= 15 and status.lower() != "charging"
