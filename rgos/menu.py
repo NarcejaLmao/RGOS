@@ -576,8 +576,31 @@ def make_file_manager():
 
 FM_ROWS = 7 + DY // 44                          # visible rows in the file manager list
 # rows of Settings, in order (ids)
-SETTINGS_ROWS = ["theme", "splash", "emulators", "bmap", "swapab", "wifi", "bluetooth", "ssh", "info"]
+SETTINGS_ROWS = ["theme", "launcher", "splash", "emulators", "bmap", "swapab", "wifi", "bluetooth", "ssh", "info"]
 RECENT_MAX = 20
+
+# Launchers (Settings > Launcher): the look of the home screen. "rgos" is the classic tile grid, "xmb" a PlayStation-style cross media bar
+# (categories side by side, the items of the selected one listed below it). The choice is kept in state.json ("launcher").
+LAUNCHERS = [("rgos", "RG OS", "Classic tile launcher"), ("xmb", "XMB", "PlayStation-style cross media bar")]
+DEFAULT_LAUNCHER = LAUNCHERS[0][0]
+
+
+def launcher_index(lid):
+    for i, l in enumerate(LAUNCHERS):
+        if l[0] == lid:
+            return i
+    return 0
+
+
+def dd_options(kind):
+    """Entries of a Settings dropdown as (id, name, swatch colours or None, description)."""
+    if kind == "theme":
+        return [(t[0], t[1], [t[2][k] for k in ("BG", "PANEL", "SEL_BG", "ACCENT", "TEXT")], "") for t in THEMES]
+    return [(l[0], l[1], None, l[2]) for l in LAUNCHERS]
+
+
+XMB_CATS = [("settings", "Settings"), ("games", "Games"), ("recents", "Recents"), ("favorites", "Favorites"), ("tools", "Tools"), ("power", "Power")]
+XMB_START = 1                                  # the XMB opens on Games
 
 
 def icon_games(c, cx, cy, col, bg):
@@ -635,7 +658,174 @@ def icon_tools(c, cx, cy, col, bg):
     pygame.draw.circle(c, bg, (cx + 34, cy), 2)
 
 
-ICONS = {"games": icon_games, "recents": icon_recents, "favorites": icon_favorites, "tools": icon_tools, "settings": icon_settings, "power": icon_power}
+def icon_theme(c, cx, cy, col, bg):                     # paint palette
+    pygame.draw.circle(c, col, (cx, cy), 28)
+    for dx, dy in ((-13, -9), (3, -17), (17, -4)):
+        pygame.draw.circle(c, bg, (cx + dx, cy + dy), 5)
+    pygame.draw.circle(c, bg, (cx + 10, cy + 16), 8)
+
+
+def icon_launcher(c, cx, cy, col, bg):                  # 2 x 2 grid of tiles
+    for dx in (-27, 3):
+        for dy in (-27, 3):
+            pygame.draw.rect(c, col, (cx + dx, cy + dy, 24, 24), border_radius=6)
+
+
+def icon_splash(c, cx, cy, col, bg):                    # screen with a play triangle
+    pygame.draw.rect(c, col, (cx - 32, cy - 22, 64, 44), border_radius=8)
+    pygame.draw.polygon(c, bg, [(cx - 8, cy - 12), (cx - 8, cy + 12), (cx + 14, cy)])
+
+
+def icon_emulators(c, cx, cy, col, bg):                 # chip with pins
+    pygame.draw.rect(c, col, (cx - 20, cy - 20, 40, 40), border_radius=6)
+    pygame.draw.rect(c, bg, (cx - 10, cy - 10, 20, 20), border_radius=3)
+    for i in (-1, 0, 1):
+        pygame.draw.rect(c, col, (cx - 32, cy + i * 14 - 2, 10, 4))
+        pygame.draw.rect(c, col, (cx + 22, cy + i * 14 - 2, 10, 4))
+        pygame.draw.rect(c, col, (cx + i * 14 - 2, cy - 32, 4, 10))
+        pygame.draw.rect(c, col, (cx + i * 14 - 2, cy + 22, 4, 10))
+
+
+def icon_bmap(c, cx, cy, col, bg):                      # D-pad
+    pygame.draw.rect(c, col, (cx - 10, cy - 30, 20, 60), border_radius=4)
+    pygame.draw.rect(c, col, (cx - 30, cy - 10, 60, 20), border_radius=4)
+    pygame.draw.circle(c, bg, (cx, cy), 5)
+
+
+def icon_swapab(c, cx, cy, col, bg):                    # two opposite arrows
+    pygame.draw.line(c, col, (cx - 28, cy - 12), (cx + 18, cy - 12), 5)
+    pygame.draw.polygon(c, col, [(cx + 16, cy - 24), (cx + 34, cy - 12), (cx + 16, cy)])
+    pygame.draw.line(c, col, (cx + 28, cy + 12), (cx - 18, cy + 12), 5)
+    pygame.draw.polygon(c, col, [(cx - 16, cy), (cx - 34, cy + 12), (cx - 16, cy + 24)])
+
+
+def icon_wifi(c, cx, cy, col, bg):
+    for r in (14, 26, 38):
+        pygame.draw.arc(c, col, (cx - r, cy + 16 - r, 2 * r, 2 * r), math.radians(45), math.radians(135), 5)
+    pygame.draw.circle(c, col, (cx, cy + 16), 5)
+
+
+def icon_bluetooth(c, cx, cy, col, bg):
+    pts = [(cx - 14, cy - 12), (cx + 14, cy + 12), (cx, cy + 26), (cx, cy - 26), (cx + 14, cy - 12), (cx - 14, cy + 12)]
+    pygame.draw.lines(c, col, False, pts, 5)
+
+
+def icon_ssh(c, cx, cy, col, bg):                       # terminal window
+    pygame.draw.rect(c, col, (cx - 34, cy - 24, 68, 48), 4, border_radius=6)
+    pygame.draw.lines(c, col, False, [(cx - 20, cy - 10), (cx - 8, cy), (cx - 20, cy + 10)], 4)
+    pygame.draw.line(c, col, (cx, cy + 10), (cx + 16, cy + 10), 4)
+
+
+def icon_info(c, cx, cy, col, bg):
+    pygame.draw.circle(c, col, (cx, cy), 28, 4)
+    pygame.draw.circle(c, col, (cx, cy - 13), 4)
+    pygame.draw.line(c, col, (cx, cy - 4), (cx, cy + 15), 5)
+
+
+def icon_files(c, cx, cy, col, bg):                     # folder
+    pygame.draw.rect(c, col, (cx - 32, cy - 22, 28, 12), border_radius=4)
+    pygame.draw.rect(c, col, (cx - 32, cy - 14, 64, 40), border_radius=6)
+
+
+ICONS = {"games": icon_games, "recents": icon_recents, "favorites": icon_favorites, "tools": icon_tools, "settings": icon_settings, "power": icon_power,
+         "theme": icon_theme, "launcher": icon_launcher, "splash": icon_splash, "emulators": icon_emulators, "bmap": icon_bmap,
+         "swapab": icon_swapab, "wifi": icon_wifi, "bluetooth": icon_bluetooth, "ssh": icon_ssh, "info": icon_info, "files": icon_files}
+
+# ---- XMB launcher drawing ----------------------------------------------------------------------------------------------------
+_XI = {}                                       # icon caches: white 96x96 originals and their scaled copies
+_XBG = {}                                      # cached background gradient
+
+
+def xmb_icon(kind, size, color, alpha=1.0):
+    """The icon `kind` as a size x size surface tinted `color` and faded by `alpha` (the shapes are drawn once, then scaled + cached)."""
+    base = _XI.get(kind)
+    if base is None:
+        base = pygame.Surface((96, 96), pygame.SRCALPHA)
+        ICONS[kind](base, 48, 48, (255, 255, 255, 255), (0, 0, 0, 0))
+        _XI[kind] = base
+    sc = _XI.get((kind, size))
+    if sc is None:
+        sc = _XI[(kind, size)] = pygame.transform.smoothscale(base, (size, size))
+    t = sc.copy()
+    t.fill(tuple(color) + (255,), special_flags=pygame.BLEND_RGBA_MULT)
+    if alpha < 0.99:
+        t.set_alpha(max(0, int(alpha * 255)))
+    return t
+
+
+# wave ribbons: (vertical position, amplitude, wavelength factor, speed, thickness, colour mix toward the accent)
+_XMB_WAVES = ((0.62, 26, 0.0085, 0.55, 34, 0.10), (0.74, 22, 0.0110, -0.42, 28, 0.14), (0.86, 18, 0.0140, 0.70, 22, 0.18))
+
+
+def xmb_bg(c, t):
+    """The XMB background: a vertical gradient in the theme colours with a few slowly drifting wave ribbons."""
+    key = (BG, ACCENT, W, H)
+    g = _XBG.get(key)
+    if g is None:
+        _XBG.clear()
+        g = pygame.Surface((W, H))
+        low = _mix(BG, ACCENT, 0.30)
+        for y in range(H):
+            pygame.draw.line(g, _mix(BG, low, (y / float(H)) ** 1.5), (0, y), (W, y))
+        _XBG[key] = g
+    c.blit(g, (0, 0))
+    for k, (yb, amp, freq, speed, th, mk) in enumerate(_XMB_WAVES):
+        top, bot = [], []
+        for x in range(0, W + 24, 24):
+            ph = x * freq * 6.0 + t * speed
+            yc = H * yb + amp * math.sin(ph) + amp * 0.5 * math.sin(ph * 0.5 + k * 2.1)
+            half = th * (0.65 + 0.35 * math.sin(ph * 0.7 + k))
+            top.append((x, yc - half))
+            bot.append((x, yc + half))
+        base = g.get_at((0, min(H - 1, int(H * yb))))[:3]
+        pygame.draw.polygon(c, _mix(base, ACCENT, mk), top + bot[::-1])
+        pygame.draw.lines(c, _mix(base, TEXT, mk * 1.6), False, top, 2)
+
+
+def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
+    """The XMB home: category icons along a horizontal bar (the selected one big, with its name), its items listed below.
+    cx_f / vy are the animated (float) category and item positions, fade the 0..1 fade-in of the item column."""
+    ax, bar_y, big, small, sp_x = 170, int(H * 0.26), 76, 50, 118
+    sp, gap = 56 + max(0, H - 480) // 10, 16
+    for i, (cid, cname) in enumerate(XMB_CATS):
+        d = i - cx_f
+        x = int(ax + d * sp_x + max(-1.0, min(1.0, d)) * 24)
+        if x < -60 or x > W + 60:
+            continue
+        t = max(0.0, 1.0 - abs(d))
+        size = int(small + (big - small) * t)
+        if t > 0.05:
+            pygame.draw.circle(c, _mix(BG, ACCENT, 0.18 * t), (x, bar_y), int(size * 0.62))
+        c.blit(xmb_icon(cid, size, _mix(DIM, TEXT, t), 0.5 + 0.5 * t), (x - size // 2, bar_y - size // 2))
+        if t > 0.3:
+            lab = f_row.render(cname, True, _mix(BG, TEXT, t))
+            c.blit(lab, (x - lab.get_width() // 2, bar_y + big // 2 + 8))
+    colx = int(ax + (cat_i - cx_f) * sp_x)
+    y0 = bar_y + big // 2 + 8 + 26 + sp // 2 + 6
+    for i, it in enumerate(items):
+        d = i - vy
+        if d < -1.0 or d > 7.0:
+            continue
+        y = y0 + d * sp + max(-1.0, min(1.0, d)) * gap
+        if y > H - 40:
+            continue
+        sel_t = max(0.0, 1.0 - abs(d))
+        al = (1.0 + min(0.0, d)) * fade                      # items above the selection fade out under the label
+        if d > 0:
+            al *= max(0.0, min(1.0, (H - 44 - y) / 30.0))   # ... and the ones below near the hint line
+        if al <= 0.02:
+            continue
+        al *= 0.62 + 0.38 * sel_t
+        isz = int(34 + 14 * sel_t)
+        if sel_t > 0.05:
+            pygame.draw.circle(c, _mix(BG, ACCENT, 0.16 * sel_t * al), (colx, int(y)), int(isz * 0.62))
+        c.blit(xmb_icon(it["icon"], isz, _mix(DIM, TEXT, sel_t), al), (colx - isz // 2, int(y) - isz // 2))
+        tx = colx + 40
+        lab = f_row.render(fit(f_row, it["label"], W - tx - 20), True, _mix(BG, _mix(DIM, TEXT, sel_t), al))
+        c.blit(lab, (tx, int(y) - lab.get_height() // 2 - int(10 * sel_t)))
+        if sel_t > 0.2 and it.get("sub"):
+            sub = f_small.render(fit(f_small, it["sub"], W - tx - 20), True, _mix(BG, DIM, al * sel_t))
+            c.blit(sub, (tx, int(y) + 3))
 
 
 def rd_file(path):
@@ -1126,6 +1316,7 @@ def main():
     NO_SYSTEM = ("", "", "", (), "")           # placeholder while no system has any games
     state = load_state()
     theme_id = apply_theme(state.get("theme"))
+    launcher_id = LAUNCHERS[launcher_index(state.get("launcher"))][0]
 
     _rcache = [None, None, []]
 
@@ -1142,11 +1333,65 @@ def main():
         by_path = {g["path"]: g for g in all_games}
         return [by_path[p] for p in load_favorites() if p in by_path]
 
+    def settings_text():
+        """Title and one-line status of every Settings row (shown in the Settings list and under the XMB's Settings category)."""
+        wst = wifictl.status()
+        spl = {"on": "On: video and sound", "silent": "On: video only", "off": "Off"}[splash.mode_of(state)]
+        return {"theme": ("Theme", "%s   (%d of %d)   A opens the list" % (THEMES[theme_index(theme_id)][1], theme_index(theme_id) + 1, len(THEMES))),
+                "launcher": ("Launcher", "%s   (%d of %d)   A opens the list" % (LAUNCHERS[launcher_index(launcher_id)][1], launcher_index(launcher_id) + 1, len(LAUNCHERS))),
+                "splash": ("Startup splash", spl + "   (plays once at power on)   X previews"),
+                "emulators": ("Emulators", "Choose the RetroArch core used for each system"),
+                "bmap": ("Map buttons", "Teach RG OS which physical button is A, B, D-pad, ... (if buttons are wrong)"),
+                "swapab": ("Swap A / B buttons", ("ON" if swap_ab_on() else "off") + "   A toggles it (use if A and B act the wrong way round)"),
+                "wifi": ("Wi-Fi", wifictl.status_text(wst)),
+                "bluetooth": ("Bluetooth", {None: "Pair controllers, keyboards and headsets", True: "On   A opens the device list", False: "Off   A opens the device list"}[btm.on]),
+                "ssh": ("SSH / file transfer", ("On: ssh or sftp root@%s" % wst["ip"] if wst["ip"] else "On: connect Wi-Fi to use it") if ssh_info()["running"] else "Off   A opens it"),
+                "info": ("Information", "Build, kernel, storage, battery, volume and input status")}
+
+    def xmb_items(cat):
+        """The vertical list under one XMB category: dicts with label, sub (second line), icon id and act (what A does, see the input code)."""
+        if cat == "settings":
+            txt = settings_text()
+            return [{"label": txt[r][0], "sub": txt[r][1], "icon": r, "act": ("setting", i)} for i, r in enumerate(SETTINGS_ROWS)]
+        if cat == "games":
+            if not vsys:
+                return [{"label": "No games found", "sub": "Copy ROMs to the ROMS card, then press X to rescan", "icon": "games", "act": None}]
+            return [{"label": sy[4], "sub": "%d %s" % (len(games_of(sy[0])), "port" if sy[0] == "ports" else "game") + ("" if len(games_of(sy[0])) == 1 else "s"),
+                     "icon": "games", "act": ("system", i)} for i, sy in enumerate(vsys)]
+        if cat in ("recents", "favorites"):
+            gl = recent_games() if cat == "recents" else favorite_games()
+            if not gl:
+                return [{"label": "No recent games" if cat == "recents" else "No favorites yet",
+                         "sub": "Games you play show up here" if cat == "recents" else "Press Y on a game to add it", "icon": cat, "act": None}]
+            return [{"label": g["title"], "sub": sysname.get(g["sid"], g["tag"]), "icon": "games", "act": ("launch", g)} for g in gl]
+        if cat == "tools":
+            return [{"label": t[1], "sub": t[2], "icon": "files" if t[3] == "@view:files" else "tools", "act": ("tool", t[3])} for t in TOOLS]
+        return [{"label": "Power Off", "sub": "Shut down RG OS", "icon": "power", "act": ("power",)}]
+
     # screens: home -> systems/games, recents, favorites, tools and settings
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
     bmap = None
     set_idx, tool_idx, kb = 0, 0, None
-    theme_dd = None                            # Settings > Theme dropdown: None (closed) or {"sel": index, "orig": theme id to restore on cancel}
+    dd = None                                  # Settings dropdown (Theme / Launcher): None (closed) or {"kind", "sel": index, "orig": id to restore on cancel}
+    xmb_cat, xmb_sel, xmb_cx, xmb_vy, xmb_fade = XMB_START, {}, float(XMB_START), 0.0, 1.0     # XMB: category, item per category, animated positions
+    xmb_ret = [False]                          # True while a screen opened from the XMB is showing: B goes back to the XMB, not to the parent list
+    pending_acts = []                          # buttons queued by the program itself (e.g. "A" after jumping from the XMB to a Settings row)
+    sysname = {sy[0]: sy[4] for sy in SYSTEMS}
+
+    def back_to(parent):
+        """Where B leads from a sub screen: the XMB when it was opened from there, else its parent screen."""
+        if xmb_ret[0]:
+            xmb_ret[0] = False
+            return "home"
+        return parent
+
+    def dd_set(kind, oid):
+        """Make the theme / launcher with this id the active one (used for the live preview, confirm and cancel of the dropdown)."""
+        nonlocal theme_id, launcher_id
+        if kind == "theme":
+            theme_id = apply_theme(oid)
+        else:
+            launcher_id = LAUNCHERS[launcher_index(oid)][0]
     fm, fm_pop = None, None                    # file manager (Tools > File Manager) and its popup (menu / confirm / info)
     emu_idx = 0
     wconf, wscan, wf_idx, wf_msg, wf_msg_until, wf_pending = wifictl.load_conf(), wifictl.Scanner(), 0, "", 0.0, ("", False)
@@ -1310,8 +1555,12 @@ def main():
         if pygame.mixer.get_init() and not pygame.mixer.music.get_busy() and (_music_playlist or _music_tracks()):
             _play_next_launcher_track()
         _acts = inp.poll()
+        if pending_acts:
+            _acts, pending_acts = pending_acts + list(_acts), []
         if _acts:
             last_act = time.monotonic()
+        if view == "home":
+            xmb_ret[0] = False
         for a in _acts:
             if forced:                         # first-run setup: buttons only feed the wizard (and MENU skips after 3 failures)
                 if a == "quit":
@@ -1337,10 +1586,39 @@ def main():
                 vsys = visible_systems(all_games)
                 sys_idx = next((i for i, sy in enumerate(vsys) if sy[0] == cur_sid), min(sys_idx, max(0, len(vsys) - 1)))
                 if view == "games" and not any(sy[0] == cur_sid for sy in vsys):
-                    view = "systems"           # the system lost its last game
+                    view = "home" if launcher_id == "xmb" else "systems"           # the system lost its last game
                 elif view in ("games", "recents", "favorites"):
                     n = len(recent_games() if view == "recents" else (favorite_games() if view == "favorites" else games_of(vsys[sys_idx][0] if vsys else "")))
                     idx_by[key] = min(idx, max(0, n - 1))
+            elif view == "home" and launcher_id == "xmb":      # XMB: left/right = category, up/down = item, A = open
+                cat = XMB_CATS[xmb_cat][0]
+                items = xmb_items(cat)
+                cur = min(xmb_sel.get(cat, 0), len(items) - 1)
+                if a in ("left", "right", "l", "r"):
+                    new = max(0, min(len(XMB_CATS) - 1, xmb_cat + (1 if a in ("right", "r") else -1)))
+                    if new != xmb_cat:
+                        xmb_cat, xmb_fade = new, 0.0
+                        xmb_vy = float(xmb_sel.get(XMB_CATS[new][0], 0))
+                elif a in ("up", "down"):
+                    xmb_sel[cat] = max(0, min(len(items) - 1, cur + (1 if a == "down" else -1)))
+                elif a == "a" and items and items[cur]["act"]:
+                    act = items[cur]["act"]
+                    if act[0] == "system":
+                        sys_idx, view = act[1], "games"
+                    elif act[0] == "launch":
+                        code = launch(act[1]["path"], act[1])
+                    elif act[0] == "tool":
+                        if act[1] == "@view:files":
+                            fm, fm_pop, view = make_file_manager(), None, "files"
+                            xmb_ret[0] = True
+                        else:
+                            code = launch(act[1])
+                    elif act[0] == "setting":      # jump to that Settings row and press A on it
+                        set_idx, view = act[1], "settings"
+                        xmb_ret[0] = True
+                        pending_acts.append("a")
+                    elif act[0] == "power":
+                        code = EXIT_POWER
             elif view == "home":               # HOME_COLS-column home grid
                 col, row = home_idx % HOME_COLS, home_idx // HOME_COLS
                 nrows = (len(HOME_ITEMS) + HOME_COLS - 1) // HOME_COLS
@@ -1369,7 +1647,7 @@ def main():
                     view = "home"
             elif view in ("games", "recents", "favorites"):
                 if a == "b":
-                    view = "systems" if view == "games" else "home"
+                    view = "systems" if view == "games" and launcher_id != "xmb" else "home"
                 elif n and a == "down":
                     idx_by[key] = (idx + 1) % n
                 elif n and a == "up":
@@ -1455,7 +1733,7 @@ def main():
                             fm_pop = {"kind": "info", "lines": fm.info()}
                     elif a == "b":
                         if not fm.go_up():
-                            view = "tools"
+                            view = back_to("tools")
                     elif a == "y":
                         fm.toggle_mark()
                     elif a == "x":
@@ -1474,23 +1752,29 @@ def main():
                             items.append(("info", "Details"))
                         if items:
                             fm_pop = {"kind": "menu", "items": items, "sel": 0}
-            elif view == "settings" and theme_dd is not None:      # theme dropdown is open: it takes all buttons
+            elif view == "settings" and dd is not None:             # a dropdown is open: it takes all buttons
+                opts = dd_options(dd["kind"])
                 if a in ("up", "down"):
-                    theme_dd["sel"] = (theme_dd["sel"] + (1 if a == "down" else -1)) % len(THEMES)
-                    theme_id = apply_theme(THEMES[theme_dd["sel"]][0])      # live preview while browsing
+                    dd["sel"] = (dd["sel"] + (1 if a == "down" else -1)) % len(opts)
+                    dd_set(dd["kind"], opts[dd["sel"]][0])            # live preview while browsing
                 elif a == "a":
-                    state["theme"] = theme_id = apply_theme(THEMES[theme_dd["sel"]][0])
+                    dd_set(dd["kind"], opts[dd["sel"]][0])
+                    state[dd["kind"]] = opts[dd["sel"]][0]
                     save_state(state)
-                    theme_dd = None
+                    dd = None
                 elif a == "b":
-                    theme_id = apply_theme(theme_dd["orig"])               # cancel: put the old theme back
-                    theme_dd = None
+                    dd_set(dd["kind"], dd["orig"])                    # cancel: put the old one back
+                    dd = None
             elif view == "settings":
                 if a in ("up", "down"):
                     set_idx = (set_idx + (1 if a == "down" else -1)) % len(SETTINGS_ROWS)
                 elif a in ("left", "right") and SETTINGS_ROWS[set_idx] == "theme":
                     theme_id = apply_theme(THEMES[(theme_index(theme_id) + (1 if a == "right" else -1)) % len(THEMES)][0])
                     state["theme"] = theme_id
+                    save_state(state)
+                elif a in ("left", "right") and SETTINGS_ROWS[set_idx] == "launcher":
+                    launcher_id = LAUNCHERS[(launcher_index(launcher_id) + (1 if a == "right" else -1)) % len(LAUNCHERS)][0]
+                    state["launcher"] = launcher_id
                     save_state(state)
                 elif a in ("left", "right") and SETTINGS_ROWS[set_idx] == "splash":
                     state["splash"] = splash.MODES[(splash.MODES.index(splash.mode_of(state)) + (1 if a == "right" else -1)) % len(splash.MODES)]
@@ -1502,7 +1786,9 @@ def main():
                 elif a == "a":
                     row = SETTINGS_ROWS[set_idx]
                     if row == "theme":         # A opens a dropdown listing every theme
-                        theme_dd = {"sel": theme_index(theme_id), "orig": theme_id}
+                        dd = {"kind": "theme", "sel": theme_index(theme_id), "orig": theme_id}
+                    elif row == "launcher":    # ... or every launcher
+                        dd = {"kind": "launcher", "sel": launcher_index(launcher_id), "orig": launcher_id}
                     elif row == "splash":      # A steps on -> silent -> off
                         state["splash"] = splash.MODES[(splash.MODES.index(splash.mode_of(state)) + 1) % len(splash.MODES)]
                         save_state(state)
@@ -1539,10 +1825,10 @@ def main():
                         state.setdefault("emulators", {})[sid] = cores[(pos + (1 if a == "right" else -1)) % len(cores)]
                         save_state(state)
                 elif a == "b":
-                    view = "settings"
+                    view = back_to("settings")
             elif view == "info":
                 if a == "b":
-                    view = "settings"
+                    view = back_to("settings")
             elif view == "kbd":
                 if a in ("up", "down", "left", "right"):
                     kb.move({"up": -1, "down": 1}.get(a, 0), {"left": -1, "right": 1}.get(a, 0))
@@ -1581,7 +1867,7 @@ def main():
                 elif a == "up":
                     wf_idx = (wf_idx - 1) % wn
                 elif a == "b":
-                    view = "settings"
+                    view = back_to("settings")
                 elif a == "x":
                     wscan.kick()
                 elif wf_idx == 0 and a == "a":
@@ -1614,7 +1900,7 @@ def main():
                 elif a == "up":
                     bt_idx = (bt_idx - 1) % bn
                 elif a == "b":
-                    view = "settings"
+                    view = back_to("settings")
                 elif a == "x":
                     btm.scan_now()
                 elif bt_idx == 0 and a == "a":
@@ -1632,12 +1918,12 @@ def main():
                         btm.act(btctl.pair, d["mac"], "Pairing with " + d["name"])
             elif view == "ssh":
                 if a == "b":
-                    view = "settings"
+                    view = back_to("settings")
                 elif a == "a":
                     ssh_toggle()
             elif view == "bmap":
                 if bmap.state in ("done", "fail") and a in ("a", "b"):
-                    view = "settings"          # (while mapping, buttons only feed the wizard; it times out by itself)
+                    view = back_to("settings")          # (while mapping, buttons only feed the wizard; it times out by itself)
         if view == "bmap" and bmap:
             bmap.update()
         if forced:
@@ -1668,12 +1954,15 @@ def main():
             clk_at, clk = _now, time.strftime("%H:%M")
 
         anim_moving = anim_tick()
-        canvas.fill(BG)
-        pygame.draw.rect(canvas, PANEL, (0, 0, W, 64))
-        pygame.draw.rect(canvas, ACCENT, (0, 62, W, 2))
-        rg = f_logo.render("RG", True, ACCENT)                 # place OS after the measured width of RG so they never overlap
-        canvas.blit(rg, (20, 14))
-        canvas.blit(f_logo.render("OS", True, TEXT), (20 + rg.get_width() + 4, 14))
+        if launcher_id == "xmb":                               # XMB look: wave background on every screen, no title bar
+            xmb_bg(canvas, time.time())
+        else:
+            canvas.fill(BG)
+            pygame.draw.rect(canvas, PANEL, (0, 0, W, 64))
+            pygame.draw.rect(canvas, ACCENT, (0, 62, W, 2))
+            rg = f_logo.render("RG", True, ACCENT)             # place OS after the measured width of RG so they never overlap
+            canvas.blit(rg, (20, 14))
+            canvas.blit(f_logo.render("OS", True, TEXT), (20 + rg.get_width() + 4, 14))
         if view == "games":
             info = "%s   %d %s%s   %s" % (sname, len(games), "port" if sid == "ports" else "game", "" if len(games) == 1 else "s", clk)
         elif view == "systems":
@@ -1719,7 +2008,19 @@ def main():
             right = bx - 16
         canvas.blit(s, (right - s.get_width(), 24))
 
-        if view == "home":
+        if view == "home" and launcher_id == "xmb":
+            xcat = XMB_CATS[xmb_cat][0]
+            xitems = xmb_items(xcat)
+            xmb_sel[xcat] = max(0, min(xmb_sel.get(xcat, 0), len(xitems) - 1))
+            xk = 1.0 - math.exp(-_anim_clock[1] * 14.0)                     # ease the bar and the list toward their targets
+            xmb_cx += (xmb_cat - xmb_cx) * xk
+            xmb_vy += (xmb_sel[xcat] - xmb_vy) * xk
+            xmb_fade = min(1.0, xmb_fade + _anim_clock[1] * 6.0)
+            if abs(xmb_cat - xmb_cx) > 0.01 or abs(xmb_sel[xcat] - xmb_vy) > 0.01 or xmb_fade < 1.0:
+                _anim_clock[2] = True                                       # keep the frame rate up while it moves
+            draw_xmb_home(canvas, f_row, f_small, xmb_cx, xmb_cat, xitems, xmb_vy, xmb_fade)
+            hint = "Left/Right Category   Up/Down Item   A Open   X Rescan"
+        elif view == "home":
             gap = 14
             nrows_h = (len(HOME_ITEMS) + HOME_COLS - 1) // HOME_COLS
             bw, bh = (W - 40 - (HOME_COLS - 1) * gap) // HOME_COLS, (H - top_y - 48 - (nrows_h - 1) * gap) // nrows_h
@@ -1840,17 +2141,7 @@ def main():
                                     (bx + 20, by + 14 + k * 26))
             hint = ("A Select   B Cancel" if fm_pop else "A Open   B Up   Y Mark   X Options   L/R Page")
         elif view == "settings":
-            wst = wifictl.status()
-            spl = {"on": "On: video and sound", "silent": "On: video only", "off": "Off"}[splash.mode_of(state)]
-            srows = {"theme": ("Theme", "%s   (%d of %d)   A opens the list" % (THEMES[theme_index(theme_id)][1], theme_index(theme_id) + 1, len(THEMES))),
-                     "splash": ("Startup splash", spl + "   (plays once at power on)   X previews"),
-                     "emulators": ("Emulators", "Choose the RetroArch core used for each system"),
-                     "bmap": ("Map buttons", "Teach RG OS which physical button is A, B, D-pad, ... (if buttons are wrong)"),
-                     "swapab": ("Swap A / B buttons", ("ON" if swap_ab_on() else "off") + "   A toggles it (use if A and B act the wrong way round)"),
-                     "wifi": ("Wi-Fi", wifictl.status_text(wst)),
-                     "bluetooth": ("Bluetooth", {None: "Pair controllers, keyboards and headsets", True: "On   A opens the device list", False: "Off   A opens the device list"}[btm.on]),
-                     "ssh": ("SSH / file transfer", ("On: ssh or sftp root@%s" % wst["ip"] if wst["ip"] else "On: connect Wi-Fi to use it") if ssh_info()["running"] else "Off   A opens it"),
-                     "info": ("Information", "Build, kernel, storage, battery, volume and input status")}
+            srows = settings_text()
             set_vis = max(1, PH // 86)                     # settings rows that fit above the hint line
             set_first = min(max(0, set_idx - set_vis // 2), max(0, len(SETTINGS_ROWS) - set_vis))
             for i, (nm, sub) in enumerate(srows[r] for r in SETTINGS_ROWS):
@@ -1874,34 +2165,41 @@ def main():
                 th_y = top_y + (tr_h - th_h) * set_first // max(1, len(SETTINGS_ROWS) - set_vis)
                 pygame.draw.rect(canvas, PANEL, (W - 12, top_y, 6, tr_h), border_radius=3)
                 pygame.draw.rect(canvas, ACCENT, (W - 12, th_y, 6, th_h), border_radius=3)
-            if theme_dd is not None:                        # dropdown list of themes, anchored under the Theme row
+            if dd is not None:                              # dropdown list (themes / launchers), anchored under its Settings row
+                opts = dd_options(dd["kind"])
                 dd_rh = 36
-                dd_vis = max(1, min(len(THEMES), (H - 50 - top_y - 8) // dd_rh))
-                theme_by = top_y + (SETTINGS_ROWS.index("theme") - set_first) * 86
+                dd_vis = max(1, min(len(opts), (H - 50 - top_y - 8) // dd_rh))
+                row_by = top_y + (SETTINGS_ROWS.index(dd["kind"]) - set_first) * 86
                 dd_w, dd_h = W - 2 * list_x - 48, dd_vis * dd_rh + 12
-                dd_x, dd_y = list_x + 24, min(theme_by + 80, H - 50 - dd_h)
-                dd_first = min(max(0, theme_dd["sel"] - dd_vis // 2), len(THEMES) - dd_vis)
+                dd_x, dd_y = list_x + 24, min(row_by + 80, H - 50 - dd_h)
+                dd_first = min(max(0, dd["sel"] - dd_vis // 2), len(opts) - dd_vis)
                 pygame.draw.rect(canvas, PANEL, (dd_x, dd_y, dd_w, dd_h), border_radius=10)
                 pygame.draw.rect(canvas, ACCENT, (dd_x, dd_y, dd_w, dd_h), 2, border_radius=10)
                 for slot, ti in enumerate(range(dd_first, dd_first + dd_vis)):
-                    ry, rsel = dd_y + 6 + slot * dd_rh, ti == theme_dd["sel"]
+                    ry, rsel = dd_y + 6 + slot * dd_rh, ti == dd["sel"]
                     if rsel:
                         pygame.draw.rect(canvas, SEL_BG, (dd_x + 6, ry, dd_w - 12, dd_rh - 2), border_radius=8)
-                    canvas.blit(f_small.render(fit(f_small, THEMES[ti][1] + ("   (current)" if THEMES[ti][0] == theme_dd["orig"] else ""), dd_w - 180), True, TEXT if rsel else DIM),
+                    oid, oname, oswatch, odesc = opts[ti]
+                    canvas.blit(f_small.render(fit(f_small, oname + ("   (current)" if oid == dd["orig"] else ""), dd_w - 180), True, TEXT if rsel else DIM),
                                 (dd_x + 18, ry + 8))
-                    for j, k in enumerate(("BG", "PANEL", "SEL_BG", "ACCENT", "TEXT")):
-                        sx = dd_x + dd_w - 18 - (5 - j) * 24
-                        pygame.draw.rect(canvas, THEMES[ti][2][k], (sx, ry + 6, 20, 20), border_radius=5)
-                        pygame.draw.rect(canvas, DIM, (sx, ry + 6, 20, 20), 1, border_radius=5)
-                if len(THEMES) > dd_vis:                    # little more-above / more-below markers
+                    if oswatch:
+                        for j, col in enumerate(oswatch):
+                            sx = dd_x + dd_w - 18 - (len(oswatch) - j) * 24
+                            pygame.draw.rect(canvas, col, (sx, ry + 6, 20, 20), border_radius=5)
+                            pygame.draw.rect(canvas, DIM, (sx, ry + 6, 20, 20), 1, border_radius=5)
+                    elif odesc:
+                        dt_ = f_small.render(fit(f_small, odesc, dd_w - 200), True, DIM)
+                        canvas.blit(dt_, (dd_x + dd_w - 18 - dt_.get_width(), ry + 8))
+                if len(opts) > dd_vis:                      # little more-above / more-below markers
                     if dd_first > 0:
                         pygame.draw.polygon(canvas, ACCENT, [(dd_x + dd_w - 8, dd_y + 12), (dd_x + dd_w - 14, dd_y + 18), (dd_x + dd_w - 2, dd_y + 18)])
-                    if dd_first + dd_vis < len(THEMES):
+                    if dd_first + dd_vis < len(opts):
                         pygame.draw.polygon(canvas, ACCENT, [(dd_x + dd_w - 8, dd_y + dd_h - 12), (dd_x + dd_w - 14, dd_y + dd_h - 18), (dd_x + dd_w - 2, dd_y + dd_h - 18)])
-            hint = ("Up/Down Browse   A Select   B Cancel   " if theme_dd is not None else
+            hint = ("Up/Down Browse   A Select   B Cancel   " if dd is not None else
                     "A Pick theme   " if SETTINGS_ROWS[set_idx] == "theme" else
+                    "A Pick launcher   " if SETTINGS_ROWS[set_idx] == "launcher" else
                     "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else
-                    "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + ("" if theme_dd is not None else "B Back   START+SELECT Power off")
+                    "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + ("" if dd is not None else "B Back   START+SELECT Power off")
         elif view == "emulators":
             emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch" and compatible_cores(sy[0])]
             pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
