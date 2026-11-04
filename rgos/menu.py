@@ -104,6 +104,19 @@ THEMES = [
 ]
 DEFAULT_THEME = THEMES[0][0]
 BG = PANEL = SEL_BG = ACCENT = TEXT = DIM = (0, 0, 0)
+# XMB launcher colours per theme: (gradient top-left, gradient bottom-right, silk tint). The XMB colour comes only from the chosen
+# theme (never from the date or time of day, as on a real PS3), so changing the theme recolours the whole launcher.
+XMB_COLORS = {"midnight": ((9, 11, 28), (62, 52, 130), (190, 180, 255)),
+              "ocean": ((4, 18, 34), (14, 110, 160), (170, 235, 255)),
+              "forest": ((8, 24, 12), (70, 130, 50), (205, 245, 190)),
+              "sunset": ((30, 10, 24), (190, 80, 60), (255, 215, 170)),
+              "purple": ((18, 10, 32), (120, 60, 190), (235, 205, 255)),
+              "amber": ((0, 0, 0), (140, 90, 0), (255, 220, 130)),
+              "gameboy": ((12, 46, 12), (110, 150, 30), (220, 240, 150)),
+              "paper": ((226, 223, 213), (168, 184, 214), (255, 255, 255)),
+              "mustard": ((22, 20, 14), (170, 130, 20), (255, 235, 170)),
+              "contrast": ((0, 0, 0), (50, 50, 50), (255, 255, 255))}
+XMB_TOP = XMB_LOW = XMB_SILK = (0, 0, 0)
 
 
 def theme_index(tid):
@@ -115,9 +128,10 @@ def theme_index(tid):
 
 def apply_theme(tid):
     """Make the theme with this id the active colour set (unknown ids fall back to the default) and return the id actually used."""
-    global BG, PANEL, SEL_BG, ACCENT, TEXT, DIM
+    global BG, PANEL, SEL_BG, ACCENT, TEXT, DIM, XMB_TOP, XMB_LOW, XMB_SILK
     tid, _name, c = THEMES[theme_index(tid)]
     BG, PANEL, SEL_BG, ACCENT, TEXT, DIM = c["BG"], c["PANEL"], c["SEL_BG"], c["ACCENT"], c["TEXT"], c["DIM"]
+    XMB_TOP, XMB_LOW, XMB_SILK = XMB_COLORS.get(tid, (BG, ACCENT, TEXT))
     return tid
 
 
@@ -771,13 +785,13 @@ def xmb_tint(x, y, k):
 def xmb_bg(c, t):
     """The XMB background: a diagonal gradient in the theme colours (dark top-left, glowing bottom-right), a sweeping sheet of silk
     strands that slowly shimmers and twists, and a little twinkling dust."""
-    key = (BG, ACCENT, TEXT, W, H)
+    key = (XMB_TOP, XMB_LOW, XMB_SILK, W, H)
     g = _XBG.get(key)
     if g is None:
         _XBG.clear()
         gw, gh = 24, 16                         # a tiny gradient, scaled up smoothly (cheap and free of banding)
         small = pygame.Surface((gw, gh))
-        top, low = _mix(BG, ACCENT, 0.04), _mix(BG, ACCENT, 0.50)
+        top, low = XMB_TOP, XMB_LOW
         for gy in range(gh):
             for gx in range(gw):
                 v = 0.30 * (gx + 0.5) / gw + 0.70 * (gy + 0.5) / gh
@@ -790,7 +804,7 @@ def xmb_bg(c, t):
                 _XMB_SPARKS.append((r.uniform(0, W), (r.uniform(0.10, 0.98) if i % 3 else r.uniform(0.40, 0.85)) * H,
                                     r.uniform(3, 12), r.uniform(0, 6.28), 2 if r.random() < 0.8 else 3))
     c.blit(g, (0, 0))
-    hl = _mix(ACCENT, TEXT, 0.78)                              # what the silk reflects: nearly white with a hint of the accent
+    hl = XMB_SILK                                              # what the silk reflects (a pale tint of the theme colour)
     for yl, yr, amp, kf, sp, th, kt, st, ph, n, br in _XMB_SILK:
         cen, half = [], []
         for x in range(0, W + 10, 10):
@@ -855,6 +869,40 @@ def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
         if sel_t > 0.2 and it.get("sub"):
             sub = f_small.render(fit(f_small, it["sub"], W - tx - 20), True, _mix(BG, DIM, al * sel_t))
             c.blit(sub, (tx, int(y) + 3))
+
+
+def draw_xmb_dropdown(c, f_small, dd, opts):
+    """Settings dropdown (Theme / Launcher) shown over the XMB: a translucent panel under the category bar.
+    Browsing a theme previews it live, so the XMB gradient, silk and dust recolour behind the panel."""
+    rh, top = 36, 150
+    vis = max(1, min(len(opts), (H - 50 - top - 8) // rh))
+    w, h = min(W - 60, 520), vis * rh + 12
+    x, y = (W - w) // 2, min(top, H - 50 - h)
+    first = min(max(0, dd["sel"] - vis // 2), len(opts) - vis)
+    acc = tuple(ACCENT)[:3]
+    panel = pygame.Surface((w, h), pygame.SRCALPHA)
+    pygame.draw.rect(panel, (0, 0, 0, 222), (0, 0, w, h), border_radius=12)
+    pygame.draw.rect(panel, acc + (230,), (0, 0, w, h), 2, border_radius=12)
+    for slot, ti in enumerate(range(first, first + vis)):
+        ry, rsel = 6 + slot * rh, ti == dd["sel"]
+        if rsel:
+            pygame.draw.rect(panel, acc + (70,), (6, ry, w - 12, rh - 2), border_radius=8)
+        oid, oname, oswatch, odesc = opts[ti]
+        panel.blit(f_small.render(fit(f_small, oname + ("   (current)" if oid == dd["orig"] else ""), w - 180), True, TEXT if rsel else DIM), (18, ry + 8))
+        if oswatch:
+            for j, col in enumerate(oswatch):
+                sx = w - 18 - (len(oswatch) - j) * 24
+                pygame.draw.rect(panel, col, (sx, ry + 6, 20, 20), border_radius=5)
+                pygame.draw.rect(panel, DIM, (sx, ry + 6, 20, 20), 1, border_radius=5)
+        elif odesc:
+            dt_ = f_small.render(fit(f_small, odesc, w - 200), True, DIM)
+            panel.blit(dt_, (w - 18 - dt_.get_width(), ry + 8))
+    if len(opts) > vis:                                                     # more-above / more-below markers
+        if first > 0:
+            pygame.draw.polygon(panel, acc, [(w - 8, 12), (w - 14, 18), (w - 2, 18)])
+        if first + vis < len(opts):
+            pygame.draw.polygon(panel, acc, [(w - 8, h - 12), (w - 14, h - 18), (w - 2, h - 18)])
+    c.blit(panel, (x, y))
 
 
 def rd_file(path):
@@ -1590,7 +1638,8 @@ def main():
             last_act = time.monotonic()
         if view == "home":
             xmb_ret[0] = False
-        for a in _acts:
+        _acts = list(_acts)
+        for _ai, a in enumerate(_acts):
             if forced:                         # first-run setup: buttons only feed the wizard (and MENU skips after 3 failures)
                 if a == "quit":
                     code = EXIT_POWER
@@ -1604,6 +1653,19 @@ def main():
                 n, idx = len(games), idx_by.get(key, 0)
             if a == "quit":
                 code = EXIT_POWER
+            elif dd is not None:               # a Settings dropdown (Theme / Launcher) is open, in the Settings list or on the XMB: it takes all buttons
+                opts = dd_options(dd["kind"])
+                if a in ("up", "down"):
+                    dd["sel"] = (dd["sel"] + (1 if a == "down" else -1)) % len(opts)
+                    dd_set(dd["kind"], opts[dd["sel"]][0])            # live preview while browsing
+                elif a == "a":
+                    dd_set(dd["kind"], opts[dd["sel"]][0])
+                    state[dd["kind"]] = opts[dd["sel"]][0]
+                    save_state(state)
+                    dd = None
+                elif a in ("b", "menu"):
+                    dd_set(dd["kind"], dd["orig"])                    # cancel: put the old one back
+                    dd = None
             elif a == "menu":                  # MENU / home button: back to the home screen
                 if view in ("systems", "games", "recents", "favorites", "tools", "settings", "wifi", "bt", "ssh", "info", "files"):
                     view = "home"
@@ -1630,6 +1692,8 @@ def main():
                         xmb_vy = float(xmb_sel.get(XMB_CATS[new][0], 0))
                 elif a in ("up", "down"):
                     xmb_sel[cat] = max(0, min(len(items) - 1, cur + (1 if a == "down" else -1)))
+                elif a == "y" and items and items[cur]["act"] and items[cur]["act"][0] == "setting" and SETTINGS_ROWS[items[cur]["act"][1]] == "splash":
+                    play_splash("silent" if splash.mode_of(state) == "silent" else "on")        # Y previews the startup splash (X is the rescan here)
                 elif a == "a" and items and items[cur]["act"]:
                     act = items[cur]["act"]
                     if act[0] == "system":
@@ -1642,10 +1706,22 @@ def main():
                             xmb_ret[0] = True
                         else:
                             code = launch(act[1])
-                    elif act[0] == "setting":      # jump to that Settings row and press A on it
-                        set_idx, view = act[1], "settings"
-                        xmb_ret[0] = True
-                        pending_acts.append("a")
+                    elif act[0] == "setting":      # handled right here on the XMB (the classic Settings list is never shown)
+                        row = SETTINGS_ROWS[act[1]]
+                        if row == "theme":         # A opens a dropdown over the XMB, the colours preview live
+                            dd = {"kind": "theme", "sel": theme_index(theme_id), "orig": theme_id}
+                        elif row == "launcher":
+                            dd = {"kind": "launcher", "sel": launcher_index(launcher_id), "orig": launcher_id}
+                        elif row == "splash":      # A steps on -> silent -> off
+                            state["splash"] = splash.MODES[(splash.MODES.index(splash.mode_of(state)) + 1) % len(splash.MODES)]
+                            save_state(state)
+                        elif row == "swapab":      # exchange A and B for the menu AND the emulators (done in the input hub)
+                            set_swap_ab(not swap_ab_on())
+                            restart_hub()
+                        else:                      # Emulators / Wi-Fi / Bluetooth / SSH / Information / Map buttons: a full-screen page, B returns to the XMB
+                            set_idx, view = act[1], "settings"
+                            xmb_ret[0] = True
+                            _acts.insert(_ai + 1, "a")     # press A on that row right now (same frame, so the Settings list is never drawn)
                     elif act[0] == "power":
                         code = EXIT_POWER
             elif view == "home":               # HOME_COLS-column home grid
@@ -1781,19 +1857,6 @@ def main():
                             items.append(("info", "Details"))
                         if items:
                             fm_pop = {"kind": "menu", "items": items, "sel": 0}
-            elif view == "settings" and dd is not None:             # a dropdown is open: it takes all buttons
-                opts = dd_options(dd["kind"])
-                if a in ("up", "down"):
-                    dd["sel"] = (dd["sel"] + (1 if a == "down" else -1)) % len(opts)
-                    dd_set(dd["kind"], opts[dd["sel"]][0])            # live preview while browsing
-                elif a == "a":
-                    dd_set(dd["kind"], opts[dd["sel"]][0])
-                    state[dd["kind"]] = opts[dd["sel"]][0]
-                    save_state(state)
-                    dd = None
-                elif a == "b":
-                    dd_set(dd["kind"], dd["orig"])                    # cancel: put the old one back
-                    dd = None
             elif view == "settings":
                 if a in ("up", "down"):
                     set_idx = (set_idx + (1 if a == "down" else -1)) % len(SETTINGS_ROWS)
@@ -2053,6 +2116,9 @@ def main():
                 _anim_clock[2] = True                                       # keep the frame rate up while it moves
             draw_xmb_home(canvas, f_row, f_small, xmb_cx, xmb_cat, xitems, xmb_vy, xmb_fade)
             hint = "Left/Right Category   Up/Down Item   A Open   X Rescan"
+            if dd is not None:                                              # Theme / Launcher dropdown over the XMB
+                draw_xmb_dropdown(canvas, f_small, dd, dd_options(dd["kind"]))
+                hint = "Up/Down Browse   A Select   B Cancel"
         elif view == "home":
             gap = 14
             nrows_h = (len(HOME_ITEMS) + HOME_COLS - 1) // HOME_COLS
