@@ -1,0 +1,65 @@
+RG OS
+=====
+
+Copyright (c) 2026 RG OS contributors
+
+SCOPE
+-----
+The license below (the MIT License) applies ONLY to the original RG OS
+source material in this repository, namely:
+
+  - rgos/                  launcher, input hub, Wi-Fi/Bluetooth/SSH/update tooling
+  - initramfs/             RG OS initramfs and boot patch scripts
+  - tools/                 update packaging tools
+  - build.sh, inspect-kernel.sh, .github/workflows/
+  - config/                RetroArch and gamepad configuration
+  - audio/, docs/, README.md
+  - splash/                RG OS startup animation and sound
+  - spl-flasher/*.sh, spl-flasher/*.bat, spl-flasher/README.txt
+
+It does NOT apply to anything listed in THIRD-PARTY-NOTICES.md. That
+includes the software RG OS downloads, installs or compiles when it
+builds an image (Debian packages, the ROCKNIX kernel/firmware/bootloader,
+RetroArch and the libretro cores), and the third-party files stored in
+this repository (spl-flasher/ binaries and images, music/). Each of those
+remains under its own license, which takes precedence for that component.
+
+A built RG OS image is a collection of separate programs. It is not a
+single work, and the MIT License above does not relicense any of them.
+Redistributing an image means you must also comply with the licenses in
+THIRD-PARTY-NOTICES.md, including the source-code obligations of the GPL
+and LGPL components.
+
+
+MIT LICENSE
+-----------
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the
+"Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Software, and to
+permit persons to whom the Software is furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+
+TRADEMARKS
+----------
+Anbernic, RG34XXSP, RG35XX H, RG Rotate, ROCKNIX, Debian, RetroArch,
+libretro, Allwinner, Unisoc, Nintendo, Sony and all other product or
+company names are trademarks of their respective owners. They are used
+only to identify compatible hardware and software. RG OS is not
+affiliated with or endorsed by any of them.
+
+RG OS ships no game ROMs, console BIOS files or commercial game content.
+You are responsible for having the right to use any content you add.
