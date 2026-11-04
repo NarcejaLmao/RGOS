@@ -1146,6 +1146,7 @@ def main():
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
     bmap = None
     set_idx, tool_idx, kb = 0, 0, None
+    theme_dd = None                            # Settings > Theme dropdown: None (closed) or {"sel": index, "orig": theme id to restore on cancel}
     fm, fm_pop = None, None                    # file manager (Tools > File Manager) and its popup (menu / confirm / info)
     emu_idx = 0
     wconf, wscan, wf_idx, wf_msg, wf_msg_until, wf_pending = wifictl.load_conf(), wifictl.Scanner(), 0, "", 0.0, ("", False)
@@ -1473,6 +1474,17 @@ def main():
                             items.append(("info", "Details"))
                         if items:
                             fm_pop = {"kind": "menu", "items": items, "sel": 0}
+            elif view == "settings" and theme_dd is not None:      # theme dropdown is open: it takes all buttons
+                if a in ("up", "down"):
+                    theme_dd["sel"] = (theme_dd["sel"] + (1 if a == "down" else -1)) % len(THEMES)
+                    theme_id = apply_theme(THEMES[theme_dd["sel"]][0])      # live preview while browsing
+                elif a == "a":
+                    state["theme"] = theme_id = apply_theme(THEMES[theme_dd["sel"]][0])
+                    save_state(state)
+                    theme_dd = None
+                elif a == "b":
+                    theme_id = apply_theme(theme_dd["orig"])               # cancel: put the old theme back
+                    theme_dd = None
             elif view == "settings":
                 if a in ("up", "down"):
                     set_idx = (set_idx + (1 if a == "down" else -1)) % len(SETTINGS_ROWS)
@@ -1489,10 +1501,8 @@ def main():
                     view = "home"
                 elif a == "a":
                     row = SETTINGS_ROWS[set_idx]
-                    if row == "theme":         # A also steps to the next theme
-                        theme_id = apply_theme(THEMES[(theme_index(theme_id) + 1) % len(THEMES)][0])
-                        state["theme"] = theme_id
-                        save_state(state)
+                    if row == "theme":         # A opens a dropdown listing every theme
+                        theme_dd = {"sel": theme_index(theme_id), "orig": theme_id}
                     elif row == "splash":      # A steps on -> silent -> off
                         state["splash"] = splash.MODES[(splash.MODES.index(splash.mode_of(state)) + 1) % len(splash.MODES)]
                         save_state(state)
@@ -1832,7 +1842,7 @@ def main():
         elif view == "settings":
             wst = wifictl.status()
             spl = {"on": "On: video and sound", "silent": "On: video only", "off": "Off"}[splash.mode_of(state)]
-            srows = {"theme": ("Theme", "%s   (%d of %d)   Left/Right changes it" % (THEMES[theme_index(theme_id)][1], theme_index(theme_id) + 1, len(THEMES))),
+            srows = {"theme": ("Theme", "%s   (%d of %d)   A opens the list" % (THEMES[theme_index(theme_id)][1], theme_index(theme_id) + 1, len(THEMES))),
                      "splash": ("Startup splash", spl + "   (plays once at power on)   X previews"),
                      "emulators": ("Emulators", "Choose the RetroArch core used for each system"),
                      "bmap": ("Map buttons", "Teach RG OS which physical button is A, B, D-pad, ... (if buttons are wrong)"),
@@ -1864,9 +1874,34 @@ def main():
                 th_y = top_y + (tr_h - th_h) * set_first // max(1, len(SETTINGS_ROWS) - set_vis)
                 pygame.draw.rect(canvas, PANEL, (W - 12, top_y, 6, tr_h), border_radius=3)
                 pygame.draw.rect(canvas, ACCENT, (W - 12, th_y, 6, th_h), border_radius=3)
-            hint = ("Left/Right Change theme   " if SETTINGS_ROWS[set_idx] == "theme" else
+            if theme_dd is not None:                        # dropdown list of themes, anchored under the Theme row
+                dd_rh = 36
+                dd_vis = max(1, min(len(THEMES), (H - 50 - top_y - 8) // dd_rh))
+                theme_by = top_y + (SETTINGS_ROWS.index("theme") - set_first) * 86
+                dd_w, dd_h = W - 2 * list_x - 48, dd_vis * dd_rh + 12
+                dd_x, dd_y = list_x + 24, min(theme_by + 80, H - 50 - dd_h)
+                dd_first = min(max(0, theme_dd["sel"] - dd_vis // 2), len(THEMES) - dd_vis)
+                pygame.draw.rect(canvas, PANEL, (dd_x, dd_y, dd_w, dd_h), border_radius=10)
+                pygame.draw.rect(canvas, ACCENT, (dd_x, dd_y, dd_w, dd_h), 2, border_radius=10)
+                for slot, ti in enumerate(range(dd_first, dd_first + dd_vis)):
+                    ry, rsel = dd_y + 6 + slot * dd_rh, ti == theme_dd["sel"]
+                    if rsel:
+                        pygame.draw.rect(canvas, SEL_BG, (dd_x + 6, ry, dd_w - 12, dd_rh - 2), border_radius=8)
+                    canvas.blit(f_small.render(fit(f_small, THEMES[ti][1] + ("   (current)" if THEMES[ti][0] == theme_dd["orig"] else ""), dd_w - 180), True, TEXT if rsel else DIM),
+                                (dd_x + 18, ry + 8))
+                    for j, k in enumerate(("BG", "PANEL", "SEL_BG", "ACCENT", "TEXT")):
+                        sx = dd_x + dd_w - 18 - (5 - j) * 24
+                        pygame.draw.rect(canvas, THEMES[ti][2][k], (sx, ry + 6, 20, 20), border_radius=5)
+                        pygame.draw.rect(canvas, DIM, (sx, ry + 6, 20, 20), 1, border_radius=5)
+                if len(THEMES) > dd_vis:                    # little more-above / more-below markers
+                    if dd_first > 0:
+                        pygame.draw.polygon(canvas, ACCENT, [(dd_x + dd_w - 8, dd_y + 12), (dd_x + dd_w - 14, dd_y + 18), (dd_x + dd_w - 2, dd_y + 18)])
+                    if dd_first + dd_vis < len(THEMES):
+                        pygame.draw.polygon(canvas, ACCENT, [(dd_x + dd_w - 8, dd_y + dd_h - 12), (dd_x + dd_w - 14, dd_y + dd_h - 18), (dd_x + dd_w - 2, dd_y + dd_h - 18)])
+            hint = ("Up/Down Browse   A Select   B Cancel   " if theme_dd is not None else
+                    "A Pick theme   " if SETTINGS_ROWS[set_idx] == "theme" else
                     "A Change   X Preview   " if SETTINGS_ROWS[set_idx] == "splash" else
-                    "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + "B Back   START+SELECT Power off"
+                    "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + ("" if theme_dd is not None else "B Back   START+SELECT Power off")
         elif view == "emulators":
             emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch" and compatible_cores(sy[0])]
             pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
