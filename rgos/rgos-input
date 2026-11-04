@@ -59,16 +59,10 @@ AUTO_KEY_ALIASES = {
     # Keyboard-style handheld layout (what MinUI/OnionOS-type input daemons emit): only used when the code is not
     # already claimed by a gamepad-style code on the same device.
     57: 0x131,     # KEY_SPACE -> A
-    30: 0x131,     # KEY_A -> A
     29: 0x130,     # KEY_LEFTCTRL -> B
-    48: 0x130,     # KEY_B -> B
     42: 0x133,     # KEY_LEFTSHIFT -> X
-    45: 0x133,     # KEY_X -> X
     56: 0x134,     # KEY_LEFTALT -> Y
-    21: 0x134,     # KEY_Y -> Y
-    16: 0x136,     # KEY_Q -> L
     18: 0x136,     # KEY_E -> L
-    17: 0x137,     # KEY_W -> R
     20: 0x137,     # KEY_T -> R
     15: 0x138,     # KEY_TAB -> L2
     14: 0x139,     # KEY_BACKSPACE -> R2
@@ -84,7 +78,7 @@ ORDERED_FILL = [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0
 MAP_REPORT = "/run/rgos/input-map.txt"
 EXTRA_KEYS = [114, 115]                       # KEY_VOLUMEDOWN/UP: forwarded untouched so rgos-volume still sees them when a source carries them
 HAT_KEYS = {(0x10, -1): 0x222, (0x10, 1): 0x223, (0x11, -1): 0x220, (0x11, 1): 0x221}   # ABS_HAT0X/Y -> left/right/up/down
-KBD_PAD_KEYS = {57, 30, 29, 48, 42, 45, 56, 21, 16, 17, 18, 20, 97, 28, 1, 102, 139, 15, 14}   # SPACE LCTRL LSHIFT LALT E T RCTRL ENTER ESC HOME MENU TAB BACKSPACE
+KBD_PAD_KEYS = {57, 29, 42, 56, 18, 20, 97, 28, 1, 102, 139, 15, 14}   # SPACE LCTRL LSHIFT LALT E T RCTRL ENTER ESC HOME MENU TAB BACKSPACE
 GAMEPAD_KEY_RANGE = range(0x100, 0x140)  # BTN_MISC..BTN_DIGI: the pad button codes
 NOT_PADS = ("power", "axp", "lid", "volume", "headphone", "jack", "touch", "hall", "rgos")
 

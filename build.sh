@@ -278,11 +278,6 @@ if [[ "$DEVICE" == "rg34xxsp" || "$DEVICE" == "rg35xxh" ]]; then
   RA_CFG="$HERE/config/retroarch-$DEVICE.cfg"; [[ -f "$RA_CFG" ]] || RA_CFG="$HERE/config/retroarch-rg34xxsp.cfg"
   [[ -f "$RA_CFG" ]] || { echo "!! $RA_CFG missing"; exit 1; }
   cp "$RA_CFG" "$ROOTFS/etc/rgos/retroarch-$DEVICE.cfg"
-elif [[ "$DEVICE" == "rg-rotate" ]]; then
-  # RG Rotate's GPIO gamepad can be missed by the generic capability scan on some T618 kernel builds.
-  # Pin the input hub to the handheld's gpio-keys device so the controls are merged consistently.
-  mkdir -p "$ROOTFS/etc/rgos"
-  echo '{"sources":["gpio-keys"],"auto_map_buttons":true}' > "$ROOTFS/etc/rgos/input-rg-rotate.json"
 fi
 # Startup splash (video + sound, sized for the device's canvas: splash-<device>.mjpg) and bundled launcher music. menu.py looks in /etc/rgos/splash and /opt/rgos/music;
 # music / splash added to the ROMS partition (music/, splash/splash.mjpg) is picked up as well.

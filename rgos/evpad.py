@@ -18,9 +18,8 @@ EVIOCGBIT_KEY = 0x80604521              # _IOC(_IOC_READ, 'E', 0x20 + EV_KEY, 96
 BTN_ALIASES = {0x120: 0x130, 0x121: 0x131, 0x122: 0x133, 0x123: 0x134, 0x124: 0x136, 0x125: 0x137,   # BTN_TRIGGER.. (older pad layout)
                0x128: 0x13a, 0x129: 0x13b, 0x12a: 0x13c}                                                # BTN_BASE3..5 = SELECT START MENU
 DPAD_KEYS = {103: 0x220, 108: 0x221, 105: 0x222, 106: 0x223}                                           # KEY_UP/DOWN/LEFT/RIGHT
-KBD_ALIASES = {57: 0x131, 30: 0x131, 29: 0x130, 48: 0x130, 42: 0x133, 45: 0x133,
-               56: 0x134, 21: 0x134, 16: 0x136, 18: 0x136, 17: 0x137, 20: 0x137,
-               97: 0x13a, 28: 0x13b, 1: 0x13c, 102: 0x13c, 139: 0x13c}                  # SPACE/A, CTRL/B, SHIFT/X, ALT/Y, Q/E=L, W/T=R, RCTRL=SELECT, ENTER=START, ESC/HOME/MENU=MENU
+KBD_ALIASES = {57: 0x131, 29: 0x130, 42: 0x133, 56: 0x134, 18: 0x136, 20: 0x137,                       # keyboard-style handheld layout:
+               97: 0x13a, 28: 0x13b, 1: 0x13c, 102: 0x13c, 139: 0x13c}                                  # SPACE LCTRL LSHIFT LALT E T RCTRL ENTER ESC HOME MENU
 ORDERED_FILL = [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, None, None, 0x13a, 0x13b, 0x13c]            # unknown pad: buttons in code order (L2/R2/.. unused by the menu)
 GAMEPAD_RANGE = range(0x100, 0x140)
 
