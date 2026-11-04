@@ -163,7 +163,7 @@ def has_volume_keys(path):
     try:
         buf = bytearray(96)
         fcntl.ioctl(fd, EVIOCGBIT_KEY, buf)
-        return any(buf[k // 8] & (1 << (k % 8)) for k in (KEY_VOLUMEUP, KEY_VOLUMEDOWN))
+        return any(buf[k // 8] & (1 << (k % 8)) for k in (KEY_MUTE, KEY_VOLUMEDOWN, KEY_VOLUMEUP))
     except OSError:
         return False
     finally:
