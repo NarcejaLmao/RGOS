@@ -144,6 +144,9 @@ KEYMAP = {pygame.K_UP: "up", pygame.K_DOWN: "down", pygame.K_LEFT: "left",
           pygame.K_PAGEUP: "l", pygame.K_PAGEDOWN: "r", pygame.K_TAB: "select",
           pygame.K_SPACE: "start", pygame.K_c: "x", pygame.K_y: "y"}
 REPEATABLE = {"up", "down", "left", "right", "l", "r"}
+STICK_AXES = (0x00, 0x01)                      # ABS_X / ABS_Y: the left stick, as published by the input hub (-32767..32767)
+STICK_ON, STICK_OFF = 0.55, 0.35               # fraction of full travel: push past ON to start a direction, drop below OFF to end it
+STICK_MAX = 32767.0
 
 
 def load_json(path, default):
@@ -162,6 +165,7 @@ class Input:
         self.conf = load_json(INPUT_CONF, DEFAULT_INPUT)
         self.held, self.repeat, self.last_raw = set(), {}, ""
         self.ev, self.ev_seen = EvPads(), False
+        self.stick, self.stick_dir = {0x00: 0.0, 0x01: 0.0}, None      # left stick position (-1..1 per axis) and the direction it holds
 
     def _down(self, a, out):
         if a in self.held:
@@ -182,12 +186,35 @@ class Input:
             else:
                 self._up(a)
 
+    def _stick_update(self, out):
+        """Left stick as a D-pad: the axis pushed furthest decides the direction (no diagonals), with hysteresis so a stick that
+        hovers around the threshold does not flicker. It uses the same hold / auto-repeat as the D-pad buttons."""
+        x, y = self.stick[0x00], self.stick[0x01]
+        ax, ay = abs(x), abs(y)
+        cur = self.stick_dir
+        if cur is not None:                        # holding a direction: keep it until its own axis falls back below OFF
+            mine, other = (ax, ay) if cur in ("left", "right") else (ay, ax)
+            if mine >= STICK_OFF and mine >= other:
+                return
+        if max(ax, ay) >= STICK_ON:
+            new = ("right" if x > 0 else "left") if ax >= ay else ("down" if y > 0 else "up")
+        else:
+            new = None
+        if new == cur:
+            return
+        if cur is not None:
+            self._up(cur)
+        self.stick_dir = new
+        if new is not None:
+            self._down(new, out)
+
     def poll(self):
         out = []
         evs = self.ev.read()
         if os.path.exists(SCREENOFF_FILE):         # screen asleep (rgos-hw): buttons pressed in the dark do nothing
             self.held.clear()
             self.repeat.clear()
+            self.stick, self.stick_dir = {0x00: 0.0, 0x01: 0.0}, None
             evs = []
             for e in pygame.event.get():           # keyboard events must not act in the dark either
                 if e.type == pygame.QUIT:
@@ -205,6 +232,9 @@ class Input:
                 self._dir("left", "right", v, out)
             elif t == EV_ABS and c == 0x11:
                 self._dir("up", "down", v, out)
+            elif t == EV_ABS and c in STICK_AXES:          # left stick: navigates like the D-pad
+                self.stick[c] = max(-1.0, min(1.0, v / STICK_MAX))
+                self._stick_update(out)
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 out.append("quit")
