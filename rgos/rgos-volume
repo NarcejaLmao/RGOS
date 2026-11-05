@@ -74,7 +74,8 @@ class Mixer:
     def setup(self):
         """(Re)discover the card and controls. The sound card can appear a few seconds after boot: callers retry."""
         hw = self.hwctl
-        self.card = int(self.want_card) if str(self.want_card or "").isdigit() else hw.audio_card()
+        want = "" if self.want_card is None else str(self.want_card).strip()     # card 0 is a valid card: don't use `or`
+        self.card = int(want) if want.isdigit() else hw.audio_card()
         names = re.findall(r"Simple mixer control '([^']+)',0", run(["amixer", "-c", str(self.card), "scontrols"]))
         vol = [n for n in names if "pvolume" in run(["amixer", "-c", str(self.card), "sget", n]).lower()]
         if isinstance(self.want_controls, list) and self.want_controls:

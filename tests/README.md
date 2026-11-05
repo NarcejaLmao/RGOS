@@ -12,5 +12,6 @@ Plain `unittest`, standard library only: no pygame, device or root needed (`menu
 | `test_info.py` | Settings > Information text helpers and row list. |
 | `test_stick_nav.py` | Menu navigation with the left stick: directions, threshold and hysteresis, auto-repeat, screen-off reset. |
 | `test_filemanager.py` | File manager: protected boot files stay protected (including names that start with `..`). |
+| `test_volume.py` | `rgos-volume`: the ALSA card from `hw.json` (card 0 is a real card, not "unset"). |
 
 `helpers.py` loads the real `menu.py` and `rgos-input` for the tests.
