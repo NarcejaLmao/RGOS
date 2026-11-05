@@ -1,4 +1,5 @@
 """hwctl.Motor: GPIO selection."""
+import json
 import os
 import sys
 import unittest
@@ -28,6 +29,24 @@ class MotorGpioTests(unittest.TestCase):
         for val in (None, "", False):
             m = hwctl.Motor({"rumble": {"gpio": val}}, sys_root=root, gpio_root=gpio_root)
             self.assertEqual(m.mode, "none")
+
+
+class LoadConfTests(unittest.TestCase):
+    def write(self, name, data):
+        p = os.path.join(helpers.sandbox(), name)
+        with open(p, "w") as f:
+            json.dump(data, f)
+        return p
+
+    def test_shipped_config_that_is_not_an_object_gives_none(self):
+        user = self.write("hw.json", {"audio": {"card": 1}})
+        for bad in ([1, 2], "x", 5, None):              # used to raise TypeError when a user hw.json existed
+            self.assertIsNone(hwctl.load_conf(self.write("hw-x.json", bad), user), bad)
+
+    def test_user_overrides_are_merged(self):
+        shipped = self.write("hw-x.json", {"audio": {"card": 0, "step": 5}})
+        user = self.write("hw.json", {"audio": {"card": 1}})
+        self.assertEqual(hwctl.load_conf(shipped, user), {"audio": {"card": 1, "step": 5}})
 
 
 if __name__ == "__main__":

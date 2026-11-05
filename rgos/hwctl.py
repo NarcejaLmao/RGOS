@@ -37,6 +37,8 @@ def load_conf(path=None, user=USER_CONF):
             conf = json.load(f)
     except (OSError, ValueError):
         return None
+    if not isinstance(conf, dict):                  # valid JSON that is not an object: no usable hardware config
+        return None
     try:
         with open(user) as f:
             u = json.load(f)
