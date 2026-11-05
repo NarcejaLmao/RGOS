@@ -101,13 +101,23 @@ def info():
 
 
 # ---------------------------------------------------------------- start / stop
+def read_password(path):
+    """First line of ssh-password.txt, or None if unreadable. utf-8-sig: Notepad on the FAT boot partition writes a BOM,
+    which strip() keeps and which would become part of the password."""
+    try:
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    return lines[0].strip() if lines else ""
+
+
 def apply_password():
     path = custom_password_file()
     if not path:
         return
-    try:
-        pw = open(path, encoding="utf-8", errors="replace").read().split("\n")[0].strip()
-    except OSError:
+    pw = read_password(path)
+    if pw is None:
         return
     if not pw or ":" in pw or len(pw) > 128:
         log("ssh-password.txt ignored (empty, too long, or contains ':')")
