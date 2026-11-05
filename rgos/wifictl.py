@@ -41,10 +41,21 @@ def _read_json(path, default):
         return default
 
 
+def _int(v, default=0):
+    """int(v), or `default` for anything that is not a number (a hand-edited wifi.json must not break Wi-Fi)."""
+    try:
+        return int(v)
+    except (TypeError, ValueError, OverflowError):
+        return default
+
+
 def load_conf():
     d = _read_json(CONF_FILE, {})
-    nets = [n for n in d.get("networks", []) if isinstance(n, dict) and isinstance(n.get("ssid"), str) and n["ssid"]]
-    return {"enabled": bool(d.get("enabled", True)), "prio": int(d.get("prio", 0)), "networks": nets,
+    raw = d.get("networks", [])
+    nets = [dict(n, prio=_int(n.get("prio", 0))) for n in (raw if isinstance(raw, list) else [])
+            if isinstance(n, dict) and isinstance(n.get("ssid"), str) and n["ssid"]]
+    prio = max([_int(d.get("prio", 0))] + [n["prio"] for n in nets])      # a new network must outrank every saved one
+    return {"enabled": bool(d.get("enabled", True)), "prio": prio, "networks": nets,
             "country": str(d.get("country", ""))}
 
 
