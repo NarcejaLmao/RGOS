@@ -49,5 +49,28 @@ class LoadConfTests(unittest.TestCase):
         self.assertEqual(hwctl.load_conf(shipped, user), {"audio": {"card": 1, "step": 5}})
 
 
+class AudioInitLinesTests(unittest.TestCase):
+    def lines(self, shipped_text, user):
+        d = helpers.sandbox()
+        shipped = os.path.join(d, "init.txt")
+        with open(shipped, "w") as f:
+            f.write(shipped_text)
+        u = os.path.join(d, "hw.json")
+        with open(u, "w") as f:
+            json.dump(user, f)
+        return hwctl._audio_init_lines(shipped, u)
+
+    def test_shipped_and_user_lines_are_split_like_a_shell(self):
+        got = self.lines("# comment\n\nsset 'Speaker Switch' on\n", {"audio": {"init": ["cset name='Speaker Mux' 1", 5, None]}})
+        self.assertEqual(got, [["sset", "Speaker Switch", "on"], ["cset", "name=Speaker Mux", "1"]])
+
+    def test_init_that_is_not_a_list_is_ignored(self):
+        for bad in ("sset 'Speaker Switch' on", 5, {"a": "b"}, True):   # a string used to become one command per character
+            self.assertEqual(self.lines("", {"audio": {"init": bad}}), [], bad)
+
+    def test_blank_or_unparseable_lines_give_no_command(self):
+        self.assertEqual(self.lines("   \n'unterminated\n", {"audio": {"init": [" ", "\t"]}}), [])
+
+
 if __name__ == "__main__":
     unittest.main()

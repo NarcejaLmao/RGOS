@@ -418,16 +418,19 @@ def _audio_init_lines(path, user_conf):
     try:
         with open(user_conf) as f:
             extra = (json.load(f).get("audio") or {}).get("init") or []
-        lines += [x for x in extra if isinstance(x, str)]
+        if isinstance(extra, list):                 # a bare string would otherwise be split into one command per character
+            lines += [x for x in extra if isinstance(x, str)]
     except (OSError, ValueError, AttributeError):
         pass
     out = []
     for l in lines:
         if l and not l.startswith("#"):
             try:
-                out.append(shlex.split(l))
+                args = shlex.split(l)
             except ValueError:
-                pass
+                continue
+            if args:
+                out.append(args)
     return out
 
 
