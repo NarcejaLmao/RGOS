@@ -222,7 +222,7 @@ def load_keymap(iconf):
     for k, v in (extra.items() if isinstance(extra, dict) else ()):       # a keymap that is not an object is ignored
         try:
             km[(None, 1, int(str(k), 0), 0)] = int(str(v), 0)
-        except ValueError:
+        except (ValueError, OverflowError):
             pass
     try:
         with open(BTNMAP) as f:
@@ -235,7 +235,7 @@ def load_keymap(iconf):
             name, _, rest = str(k).rpartition("|")
             t, c, sg = rest.split(":")
             km[(name or None, int(t), int(c), int(sg))] = int(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):    # OverflowError: a JSON number like 1e999
             continue
     return km
 

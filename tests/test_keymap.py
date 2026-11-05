@@ -39,6 +39,11 @@ class LoadKeymapTests(unittest.TestCase):
         self.wizard({"keys": {"a|1:2:0": 304, "oops": 1, "b|1:3:0": "x", "c|1:4:0": 306, "d|1:5:0": [1]}})
         self.assertEqual(hub.load_keymap({}), {("a", 1, 2, 0): 304, ("c", 1, 4, 0): 306})
 
+    def test_out_of_range_number_in_the_wizard_map_is_just_a_bad_entry(self):
+        with open(hub.BTNMAP, "w") as f:                          # json.load turns 1e999 into inf; int(inf) raises OverflowError
+            f.write('{"keys": {"a|1:2:0": 304, "b|1:3:0": 1e999, "c|1:4:0": 306}}')
+        self.assertEqual(hub.load_keymap({}), {("a", 1, 2, 0): 304, ("c", 1, 4, 0): 306})
+
     def test_unusable_wizard_files_give_an_empty_map(self):
         for data in ([], {"keys": 5}, {"keys": []}, {"keys": None}):
             self.wizard(data)
