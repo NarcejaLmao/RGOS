@@ -1220,6 +1220,7 @@ class ButtonMap:
         self.t0 = self.tstate = time.time()
         self.stamp, self.keys, self.used, self.last_name = None, {}, set(), ""
         self.skipped = []
+        self.failed_in = ""
         self.sticksf = os.path.join(RUN_DIR, "sticks.raw")
         self.has_sticks = False                         # decided once the hub is up (see update): L3 / R3 are only asked when True
         self.sv = {}                                    # axis code -> (value, min, max): the live raw stick values
@@ -1245,8 +1246,31 @@ class ButtonMap:
             return None
 
     def _fail(self, msg):
+        self.failed_in = self.state                     # remembered so resume() can carry on from the same place
         self.state, self.msg = "fail", msg
         self.stop()
+
+    def can_resume(self):
+        return self.state == "fail" and self.failed_in in ("wait", "prompt", "apply")
+
+    def resume(self, now=None):
+        """Carry on after a failed step: the buttons already mapped are kept and only the step that failed is asked again
+        (instead of starting the whole wizard over)."""
+        if not self.can_resume():
+            return
+        now = now or time.time()
+        was = self.failed_in
+        for f in (self.rawf, self.sticksf):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+        try:
+            open(self.flag, "w").close()
+        except OSError:
+            pass
+        self.msg, self.stamp, self.t0, self.tstate = "", None, now, now
+        self.state = "apply" if was == "apply" else "wait"      # "wait" re-arms the hub, then asks the same button again
 
     def total(self):
         """Number of button prompts on this device (L3 / R3 only count where there are sticks)."""
@@ -1423,6 +1447,8 @@ class ButtonMap:
             return ["Roll the %s around" % self.STICKS[self.sticks[self.cstick]][0], "Push it to the edge and go all the way round, slowly"]
         if self.state == "apply":
             return ["Applying...", ""]
+        if self.state == "fail" and self.can_resume():
+            return [self.msg, "Nothing is lost: only this step is asked again"]
         return [self.msg]
 
 
@@ -2357,7 +2383,9 @@ def main():
                 elif a == "a":
                     ssh_toggle()
             elif view == "bmap":
-                if bmap.state in ("done", "fail") and a in ("a", "b"):
+                if bmap.state == "fail" and a == "a" and bmap.can_resume():
+                    bmap.resume()                       # A: ask the failed step again (everything mapped so far is kept)
+                elif bmap.state in ("done", "fail") and a in ("a", "b"):
                     view = back_to("settings")          # (while mapping, buttons only feed the wizard; it times out by itself)
         if view == "bmap" and bmap:
             bmap.update()
@@ -2370,9 +2398,12 @@ def main():
             elif wiz.state == "fail":
                 if forced_t is None:
                     forced_t, forced_fails = now_f, forced_fails + 1
-                elif now_f - forced_t >= 3.0:  # retry the failed step automatically
+                elif now_f - forced_t >= 3.0:  # retry the failed step automatically (buttons mapped so far are kept)
                     forced_t = None
-                    bmap = ButtonMap()
+                    if bmap.can_resume():
+                        bmap.resume()
+                    else:
+                        bmap = ButtonMap()
         if {"start", "select"} <= inp.held:
             code = EXIT_POWER
 
@@ -2855,7 +2886,7 @@ def main():
                     pygame.draw.circle(canvas, ACCENT if (ai, sg) in sreach else PANEL, (mx, my), 8)
                     pygame.draw.circle(canvas, DIM, (mx, my), 8, 1)
                 pygame.draw.circle(canvas, TEXT, (gcx + int(sx * (gr - 10)), gcy + int(sy * (gr - 10))), 8)
-            hint = ("A/B Back" if bmap.state in ("done", "fail") else
+            hint = (("A Retry this step   B Back" if bmap.can_resume() and not forced else "A/B Back") if bmap.state in ("done", "fail") else
                     "Move the stick as shown (a stick that is not moved is skipped)" if sview else
                     "Press the button shown (wizard stops by itself if idle)")
             if forced:
