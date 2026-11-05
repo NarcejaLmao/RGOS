@@ -241,13 +241,17 @@ def load_sticks():
     try:
         with open(BTNMAP) as f:
             raw = json.load(f).get("sticks") or {}
-        for k, v in raw.items():
+        items = list(raw.items())
+    except Exception:
+        return cal
+    for k, v in items:                              # one bad entry must not throw away the good ones
+        try:
             code = int(k)
             c, lo, hi = (float(x) for x in v)
-            if code in ANALOG_AXES and lo < c < hi and min(c - lo, hi - c) >= 4:
-                cal[code] = (c, lo, hi)
-    except Exception:
-        pass
+        except (TypeError, ValueError):
+            continue
+        if code in ANALOG_AXES and lo < c < hi and min(c - lo, hi - c) >= 4:
+            cal[code] = (c, lo, hi)
     return cal
 
 

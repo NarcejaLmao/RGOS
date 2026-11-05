@@ -1,3 +1,31 @@
-.vs/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build output (build.sh): finished images, update tars and the per-device scratch/download area
+/out/
+/work/
+*.img
+*.img.gz
+*.img.xz
+rgos-update-*.tar
+
+# Local test scratch (the unit tests use temp dirs, but a manual run of the menu or hub may leave these)
+/run/
+button-map.json
+state.json
+
+# Editors and OS files
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
