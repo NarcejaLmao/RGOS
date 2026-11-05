@@ -176,7 +176,7 @@ class FileManager:
         rp = os.path.realpath(path)
         for root, names in self.protected.items():
             rel = os.path.relpath(rp, os.path.realpath(root))
-            if rel == "." or rel.startswith(".."):
+            if rel == "." or rel == ".." or rel.startswith(".." + os.sep):   # the root itself / outside it (a name like "..x" is inside)
                 continue
             if rel.split(os.sep)[0].casefold() in names:
                 return True

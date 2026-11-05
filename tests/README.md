@@ -11,5 +11,6 @@ Plain `unittest`, standard library only: no pygame, device or root needed (`menu
 | `test_hub.py` | `rgos-input`: stick scaling and deadzone, loading the calibration, the live stick feed the wizard reads, button translation. |
 | `test_info.py` | Settings > Information text helpers and row list. |
 | `test_stick_nav.py` | Menu navigation with the left stick: directions, threshold and hysteresis, auto-repeat, screen-off reset. |
+| `test_filemanager.py` | File manager: protected boot files stay protected (including names that start with `..`). |
 
 `helpers.py` loads the real `menu.py` and `rgos-input` for the tests.
