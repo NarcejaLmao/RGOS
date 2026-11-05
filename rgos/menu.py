@@ -1047,8 +1047,62 @@ def card2_info():
     return ("%.1f / %.1f GB free" % (u[0] / 1e9, u[1] / 1e9) if u else "mounted") + (" (read-only)" if st.get("ro") else "")
 
 
+def _uptime_text():
+    try:
+        sec = int(float(rd_file("/proc/uptime").split()[0]))
+    except (IndexError, ValueError):
+        return "n/a"
+    d, rem = divmod(sec, 86400)
+    h, rem = divmod(rem, 3600)
+    return ("%dd " % d if d else "") + "%dh %02dm" % (h, rem // 60)
+
+
+def _mem_text():
+    kb = {}
+    for l in rd_file("/proc/meminfo").splitlines():
+        parts = l.replace(":", " ").split()
+        if len(parts) >= 2 and parts[1].isdigit():
+            kb[parts[0]] = int(parts[1])
+    if "MemTotal" not in kb:
+        return "n/a"
+    free = kb.get("MemAvailable", kb.get("MemFree", 0))
+    return "%d / %d MB free" % (free // 1024, kb["MemTotal"] // 1024)
+
+
+def _cpu_text():
+    n = os.cpu_count() or 1
+    model = ""
+    for l in rd_file("/proc/cpuinfo").splitlines():
+        if l.lower().startswith(("model name", "hardware")) and ":" in l:
+            model = l.split(":", 1)[1].strip()
+            break
+    return ("%s x%d" % (model, n)) if model else "%d core%s" % (n, "" if n == 1 else "s")
+
+
+def _temp_text():
+    for path in sorted(glob.glob("/sys/class/thermal/thermal_zone*/temp")):
+        try:
+            return "%.0f C" % (int(rd_file(path).strip()) / 1000.0)
+        except ValueError:
+            continue
+    return "n/a"
+
+
+def _load_text():
+    p = rd_file("/proc/loadavg").split()
+    return " ".join(p[:3]) if len(p) >= 3 else "n/a"
+
+
+def _rootfs_text():
+    try:
+        st = os.statvfs("/")
+        return "%.1f / %.1f GB free" % (st.f_bavail * st.f_frsize / 1e9, st.f_blocks * st.f_frsize / 1e9)
+    except OSError:
+        return "n/a"
+
+
 def settings_info():
-    """Read-only system info lines for the Settings > Information screen."""
+    """Read-only system info lines for the Settings > Information screen (the page scrolls, so the list can be long)."""
     build = "".join(l[9:] for l in rd_file("/etc/rgos-release").splitlines() if l.startswith("BUILD_ID="))
     try:
         st = os.statvfs(ROMS_ROOT)
@@ -1060,7 +1114,11 @@ def settings_info():
             ("ROMS partition", space), ("SD card 2", card2_info()), ("Volume", "%d%%" % vol[0] if vol else "n/a"),
             ("Battery", ("%d%% %s" % (max(0, min(100, bat[0])), bat[1].lower())) if bat else "n/a"),
             ("Brightness", "%d%%" % bri[0] if bri else "n/a"),
-            ("Buttons", "mapped" if os.path.exists(BTN_MAP) else "default codes")]
+            ("Buttons", "mapped" if os.path.exists(BTN_MAP) else "default codes"),
+            ("A/B buttons", "swapped" if swap_ab_on() else "normal"),
+            ("CPU", _cpu_text()), ("CPU temp", _temp_text()), ("Load average", _load_text()),
+            ("Memory", _mem_text()), ("System storage", _rootfs_text()), ("Uptime", _uptime_text()),
+            ("Resolution", "%dx%d" % (W, H))]
 
 
 BTN_MAP = os.environ.get("RGOS_BTNMAP", "/var/lib/rgos/button-map.json")
@@ -1612,6 +1670,7 @@ def main():
             launcher_id = LAUNCHERS[launcher_index(oid)][0]
     fm, fm_pop = None, None                    # file manager (Tools > File Manager) and its popup (menu / confirm / info)
     emu_idx = 0
+    info_scroll, info_pos = 0, 0.0           # Settings > Information: first visible row, and the smoothly animated pixel offset
     wconf, wscan, wf_idx, wf_msg, wf_msg_until, wf_pending = wifictl.load_conf(), wifictl.Scanner(), 0, "", 0.0, ("", False)
     btm, bt_idx = btctl.Manager(), 0           # Settings > Bluetooth (worker thread; rows, power state, messages)
     btm.refresh()
@@ -2037,7 +2096,7 @@ def main():
                     elif row == "ssh":
                         view = "ssh"
                     elif row == "info":        # read-only system information
-                        view = "info"
+                        info_scroll, info_pos, view = 0, 0.0, "info"
                     elif row == "swapab":      # exchange A and B for the menu AND the emulators (done in the input hub)
                         set_swap_ab(not swap_ab_on())
                         restart_hub()
@@ -2062,6 +2121,14 @@ def main():
             elif view == "info":
                 if a == "b":
                     view = back_to("settings")
+                elif a == "up":
+                    info_scroll = max(0, info_scroll - 1)
+                elif a == "down":
+                    info_scroll += 1                                   # clamped when drawn
+                elif a in ("left", "l"):
+                    info_scroll = max(0, info_scroll - 5)
+                elif a in ("right", "r"):
+                    info_scroll += 5
             elif view == "kbd":
                 if a in ("up", "down", "left", "right"):
                     kb.move({"up": -1, "down": 1}.get(a, 0), {"left": -1, "right": 1}.get(a, 0))
@@ -2468,13 +2535,39 @@ def main():
                 canvas.blit(f_row.render("No installed compatible RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
             hint = "Up/Down System   Left/Right Change compatible core   B Back"
         elif view == "info":
-            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), 10)
+            ROW_H = 42
+            px, py, pw, ph = list_x, top_y, W - 2 * list_x, 336 + DY
+            ui_rect(canvas, PANEL, (px, py, pw, ph), 10)
             info_rows = settings_info()
+            vis = max(1, (ph - 20) // ROW_H)
+            max_scroll = max(0, len(info_rows) - vis)
+            info_scroll = min(max(0, info_scroll), max_scroll)
+            target = info_scroll * ROW_H
+            dt_ = _anim_clock[1]
+            if abs(target - info_pos) < 0.5:
+                info_pos = float(target)
+            else:
+                info_pos += (target - info_pos) * min(1.0, dt_ * 18.0)    # ease toward the target row
+                _anim_clock[2] = True                                       # keep animating until it arrives
+            canvas.set_clip(pygame.Rect(px, py + 4, pw, ph - 8))
             for i, (k, v) in enumerate(info_rows):
-                y = top_y + 14 + i * (46 if len(info_rows) <= 9 else 42)      # 10 rows (with SD card 2) still fit the panel
-                canvas.blit(f_row.render(k, True, DIM), (list_x + 24, y))
-                canvas.blit(f_row.render(fit(f_row, v, W - 2 * list_x - 48 - 190), True, TEXT), (list_x + 214, y))
-            hint = "B Back   START+SELECT Power off"
+                y = int(py + 14 + i * ROW_H - info_pos)
+                if y < py - ROW_H or y > py + ph:
+                    continue
+                canvas.blit(f_row.render(k, True, DIM), (px + 24, y))
+                canvas.blit(f_row.render(fit(f_row, v, pw - 48 - 190 - 14), True, TEXT), (px + 214, y))
+            canvas.set_clip(None)
+            if max_scroll > 0:                                              # scrollbar
+                track_h = ph - 24
+                bar_h = max(24, int(track_h * vis / len(info_rows)))
+                bar_y = py + 12 + int((track_h - bar_h) * (info_pos / (max_scroll * ROW_H)))
+                pygame.draw.rect(canvas, DIM, (px + pw - 10, py + 12, 4, track_h), 1, border_radius=2)
+                pygame.draw.rect(canvas, ACCENT, (px + pw - 10, bar_y, 4, bar_h), 0, border_radius=2)
+                if info_scroll < max_scroll:
+                    canvas.blit(f_tiny.render("v more", True, DIM), (px + pw - 70, py + ph - 18))
+                if info_scroll > 0:
+                    canvas.blit(f_tiny.render("^ more", True, DIM), (px + pw - 70, py + 6))
+            hint = "Up/Down Scroll   L/R Page   B Back   START+SELECT Power off"
         elif view == "wifi":
             wst, wrows = wifictl.status(), wscan.rows(wconf)
             wn = len(wrows) + 2
