@@ -14,13 +14,14 @@ case "$1" in
       done
     fi
     ip -4 addr flush dev "$interface" 2>/dev/null
+    ip route flush dev "$interface" 2>/dev/null          # before the address: this also deletes the subnet route that "addr add" creates
     ip addr add "$ip/${bits:-24}" ${broadcast:+broadcast "$broadcast"} dev "$interface"
-    ip route flush dev "$interface" 2>/dev/null
     for r in $router; do ip route add default via "$r" dev "$interface" metric 10 2>/dev/null; done
-    mkdir -p /run/rgos
-    : > /run/rgos/resolv.conf
-    for d in $dns; do echo "nameserver $d" >> /run/rgos/resolv.conf; done
-    [ -n "$domain" ] && echo "search $domain" >> /run/rgos/resolv.conf
+    run="${RGOS_RUN:-/run/rgos}"
+    mkdir -p "$run"
+    : > "$run/resolv.conf"
+    for d in $dns; do echo "nameserver $d" >> "$run/resolv.conf"; done
+    [ -n "$domain" ] && echo "search $domain" >> "$run/resolv.conf"
     ;;
 esac
 exit 0
