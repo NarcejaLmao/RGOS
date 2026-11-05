@@ -60,7 +60,11 @@ class Mixer:
         conf = read_json(USER_CONF).get("audio", {})
         if not isinstance(conf, dict):
             conf = {}
-        self.step = max(1, min(25, int(conf.get("step", 5) or 5)))
+        try:
+            step = int(conf.get("step", 5) or 5)
+        except (TypeError, ValueError):                  # e.g. "step": "big" in hw.json must not kill the daemon
+            step = 5
+        self.step = max(1, min(25, step))
         self.card = None
         self.controls = []
         self.switches = []
