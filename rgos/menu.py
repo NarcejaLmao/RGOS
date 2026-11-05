@@ -532,6 +532,41 @@ def anim_tick():
     return moving
 
 
+XMB_UI = [False]                               # True while the XMB launcher is active: pages and buttons are drawn as translucent glass over its background
+_GLASS = {}
+
+
+def _glass_tint():
+    """Glass colour for the active theme: dark glass on dark themes, white glass on light ones."""
+    return (255, 255, 255) if sum(BG) / 3.0 > 140 else (0, 0, 0)
+
+
+def _glass_face(w, h, radius, col, alpha, outline=45):
+    key = (w, h, radius, col, alpha, outline, tuple(TEXT))
+    g = _GLASS.get(key)
+    if g is None:
+        if len(_GLASS) > 160:
+            _GLASS.clear()
+        g = pygame.Surface((max(1, w), max(1, h)), pygame.SRCALPHA)
+        pygame.draw.rect(g, tuple(col[:3]) + (alpha,), (0, 0, w, h), border_radius=radius)
+        if outline:
+            pygame.draw.rect(g, tuple(TEXT[:3]) + (outline,), (0, 0, w, h), 1, border_radius=radius)
+        _GLASS[key] = g
+    return g
+
+
+def ui_rect(surf, col, rect, radius=0):
+    """A filled rounded rect in the theme colour `col` (PANEL / SEL_BG / BG). On the XMB it is translucent glass so the silk shows through."""
+    if not XMB_UI[0]:
+        pygame.draw.rect(surf, col, rect, border_radius=radius)
+        return
+    x, y, w, h = rect
+    if col == SEL_BG:
+        surf.blit(_glass_face(w, h, radius, SEL_BG, 175), (x, y))
+    else:
+        surf.blit(_glass_face(w, h, radius, _glass_tint(), 105), (x, y))
+
+
 def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
     """Draw a button that looks raised: soft shadow, darker side edge below the face, gradient face with a top highlight.
     The face occupies exactly rect; the side and shadow extend `depth` pixels below it. Selecting a button animates it:
@@ -555,6 +590,11 @@ def draw_button(surf, rect, base, radius=12, depth=4, sel=False):
     base = _mix(st[2], st[1], hl)
     lift = int(round(LIFT_PX * hl)) if h >= 80 else 0     # only the big home tiles lift; list rows keep their text aligned
     y -= lift
+    if XMB_UI[0]:                                              # XMB: flat translucent glass (no shadow or side edge), fading to the selected colour
+        surf.blit(_glass_face(w, h, radius, _mix(_glass_tint(), SEL_BG, hl), 105 + int(70 * hl)), (x, y))
+        if hl > 0:
+            pygame.draw.rect(surf, _mix(TEXT, ACCENT, hl), (x, y, w, h), 2 if h < 80 else 3, border_radius=radius)
+        return hl, lift
     side = _mix(base, (0, 0, 0), 0.55)
     sh = pygame.Surface((w, h + depth + 3), pygame.SRCALPHA)
     pygame.draw.rect(sh, (0, 0, 0, 70), (0, 3, w, h + depth), border_radius=radius)
@@ -2147,6 +2187,7 @@ def main():
             clk_at, clk = _now, time.strftime("%H:%M")
 
         anim_moving = anim_tick()
+        XMB_UI[0] = launcher_id == "xmb"
         if launcher_id == "xmb":                               # XMB look: wave background on every screen, no title bar
             xmb_bg(canvas, time.time())
         else:
@@ -2297,7 +2338,7 @@ def main():
                 bar_h = FM_ROWS * 44 - 4
                 th = max(24, int(bar_h * FM_ROWS / n_fm))
                 ty = 92 + int((bar_h - th) * first_fm / max(1, n_fm - FM_ROWS))
-                pygame.draw.rect(canvas, PANEL, (W - list_x - 6, 92, 6, bar_h), border_radius=3)
+                ui_rect(canvas, PANEL, (W - list_x - 6, 92, 6, bar_h), 3)
                 pygame.draw.rect(canvas, ACCENT, (W - list_x - 6, ty, 6, th), border_radius=3)
             status = fm.busy or fm.msg or ("%d marked" % len(fm.marked) if fm.marked else
                                            ("Clipboard: %d item%s to %s" % (len(fm.clip), "" if len(fm.clip) == 1 else "s", "move" if fm.clip_cut else "copy")) if fm.clip else "")
@@ -2366,7 +2407,7 @@ def main():
                 tr_h = set_vis * 86 - 8
                 th_h = max(24, tr_h * set_vis // len(SETTINGS_ROWS))
                 th_y = top_y + (tr_h - th_h) * set_first // max(1, len(SETTINGS_ROWS) - set_vis)
-                pygame.draw.rect(canvas, PANEL, (W - 12, top_y, 6, tr_h), border_radius=3)
+                ui_rect(canvas, PANEL, (W - 12, top_y, 6, tr_h), 3)
                 pygame.draw.rect(canvas, ACCENT, (W - 12, th_y, 6, th_h), border_radius=3)
             if dd is not None:                              # dropdown list (themes / launchers), anchored under its Settings row
                 opts = dd_options(dd["kind"])
@@ -2405,7 +2446,7 @@ def main():
                     "A Toggle   " if SETTINGS_ROWS[set_idx] == "swapab" else "A Open   ") + ("" if dd is not None else "B Back   START+SELECT Power off")
         elif view == "emulators":
             emu_systems = [sy for sy in SYSTEMS if sy[2] == "retroarch" and compatible_cores(sy[0])]
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), 10)
             emu_vis = 7 + DY // 44
             first_emu = min(max(0, emu_idx - emu_vis // 2), max(0, len(emu_systems) - emu_vis))
             for slot, sy in enumerate(emu_systems[first_emu:first_emu + emu_vis]):
@@ -2418,7 +2459,7 @@ def main():
                 y = top_y + 8 + slot * 44
                 sel = i == emu_idx
                 if sel:
-                    pygame.draw.rect(canvas, SEL_BG, (list_x + 8, y, W - 2 * list_x - 16, 40), border_radius=8)
+                    ui_rect(canvas, SEL_BG, (list_x + 8, y, W - 2 * list_x - 16, 40), 8)
                     pygame.draw.rect(canvas, ACCENT, (list_x + 8, y, W - 2 * list_x - 16, 40), 2, border_radius=8)
                 canvas.blit(f_small.render(fit(f_small, fullname, 300), True, TEXT if sel else DIM), (list_x + 20, y + 3))
                 core_txt = chosen.replace("_", " ")
@@ -2427,7 +2468,7 @@ def main():
                 canvas.blit(f_row.render("No installed compatible RetroArch cores found", True, TEXT), (list_x + 24, top_y + 20))
             hint = "Up/Down System   Left/Right Change compatible core   B Back"
         elif view == "info":
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), 10)
             info_rows = settings_info()
             for i, (k, v) in enumerate(info_rows):
                 y = top_y + 14 + i * (46 if len(info_rows) <= 9 else 42)      # 10 rows (with SD card 2) still fit the panel
@@ -2437,7 +2478,7 @@ def main():
         elif view == "wifi":
             wst, wrows = wifictl.status(), wscan.rows(wconf)
             wn = len(wrows) + 2
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), 10)
             head = wifictl.status_text(wst) if wconf["enabled"] else "Wi-Fi is off"
             canvas.blit(f_row.render(fit(f_row, head, W - 2 * list_x - 56), True, ACCENT), (list_x + 28, top_y + 8))
             if wst["state"] == "connected" and wst["rssi"] is not None:
@@ -2448,7 +2489,7 @@ def main():
                 i = first + slot
                 y, sel = top_y + 44 + slot * 40, i == wf_idx
                 if sel:
-                    pygame.draw.rect(canvas, SEL_BG, (list_x + 6, y, W - 2 * list_x - 12, 38), border_radius=8)
+                    ui_rect(canvas, SEL_BG, (list_x + 6, y, W - 2 * list_x - 12, 38), 8)
                     pygame.draw.rect(canvas, ACCENT, (list_x + 6, y, 5, 38), border_radius=3)
                 col = TEXT if sel else DIM
                 if i == 0:
@@ -2487,7 +2528,7 @@ def main():
             brows = list(btm.rows)
             bn = len(brows) + 1
             bt_idx = min(bt_idx, bn - 1)
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), 10)
             head = ("No Bluetooth adapter found (see rgos-logs.txt)" if btm.on is None and not btctl.adapter() else
                     "Starting Bluetooth..." if btm.on is None else "Bluetooth is on" if btm.on else "Bluetooth is off")
             canvas.blit(f_row.render(fit(f_row, head, W - 2 * list_x - 56), True, ACCENT), (list_x + 28, top_y + 8))
@@ -2497,7 +2538,7 @@ def main():
                 i = first + slot
                 y, sel = top_y + 44 + slot * 40, i == bt_idx
                 if sel:
-                    pygame.draw.rect(canvas, SEL_BG, (list_x + 6, y, W - 2 * list_x - 12, 38), border_radius=8)
+                    ui_rect(canvas, SEL_BG, (list_x + 6, y, W - 2 * list_x - 12, 38), 8)
                     pygame.draw.rect(canvas, ACCENT, (list_x + 6, y, 5, 38), border_radius=3)
                 col = TEXT if sel else DIM
                 if i == 0:
@@ -2527,7 +2568,7 @@ def main():
             si = ssh_info()
             wst_ = wifictl.status()
             ip_ = wst_["ip"] or "(connect Wi-Fi first)"
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), border_radius=10)
+            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 336 + DY), 10)
             canvas.blit(f_row.render("SSH / file transfer is " + ("ON" if si["running"] else "off"), True, ACCENT), (list_x + 28, top_y + 14))
             lines_ = [("Address", ip_), ("Port", str(si["port"])), ("User", si["user"]), ("Password", si["password"]),
                       ("Files", "sftp://root@%s   (WinSCP, FileZilla, scp)" % (wst_["ip"] or "<ip>")),
@@ -2542,7 +2583,7 @@ def main():
             KW = 636 + DX
             KX = (W - KW) // 2
             canvas.blit(f_small.render(kb.title, True, DIM), (KX, top_y - 4))
-            pygame.draw.rect(canvas, PANEL, (KX, top_y + 16, KW, 52), border_radius=8)
+            ui_rect(canvas, PANEL, (KX, top_y + 16, KW, 52), 8)
             pygame.draw.rect(canvas, ACCENT, (KX, top_y + 16, KW, 52), 2, border_radius=8)
             shown = kb.text if kb.show else "*" * len(kb.text)
             canvas.blit(f_row.render(tail_fit(f_row, shown, 590 + DX) + ("_" if int(time.time() * 2) % 2 == 0 else ""), True, TEXT),
@@ -2560,7 +2601,7 @@ def main():
                     canvas.blit(t, (kx + (kw - t.get_width()) // 2, ky + (70 - t.get_height()) // 2))
             hint = "A Type   B Delete   START Done" + ("   X Show/hide" if kb.secret else "")
         elif view == "bmap":
-            pygame.draw.rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 330 + DY), border_radius=14)
+            ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 330 + DY), 14)
             canvas.blit(f_big.render("Button mapping", True, ACCENT), (list_x + 28, top_y + 22))
             if bmap.state in ("prompt", "apply"):
                 n = min(bmap.step + 1, len(bmap.PROMPTS))
@@ -2587,9 +2628,9 @@ def main():
                     continue
                 y, sel, cnt = top_y + (r - sys_first) * 56, r == sys_idx, len(games_of(xid))
                 if sel:
-                    pygame.draw.rect(canvas, SEL_BG, (list_x, y, list_w, 52), border_radius=8)
+                    ui_rect(canvas, SEL_BG, (list_x, y, list_w, 52), 8)
                     pygame.draw.rect(canvas, ACCENT, (list_x, y, 5, 52), border_radius=3)
-                pygame.draw.rect(canvas, PANEL if not sel else BG, (list_x + 18, y + 6, 64, 40), border_radius=6)
+                ui_rect(canvas, PANEL if not sel else BG, (list_x + 18, y + 6, 64, 40), 6)
                 t = f_big.render(xtag, True, ACCENT if sel else DIM)
                 canvas.blit(t, (list_x + 50 - t.get_width() // 2, y + 13))
                 canvas.blit(f_row.render(fit(f_row, xname, list_w - 220), True, TEXT if sel else DIM),
@@ -2599,8 +2640,8 @@ def main():
                             (list_x + 98, y + 28))
             px, cnt = 500 + DX, len(games)
             if vsys:
-                pygame.draw.rect(canvas, PANEL, (px, top_y, 200, PH), border_radius=10)
-                pygame.draw.rect(canvas, SEL_BG, (px + 20, top_y + 20, 160, 110 + DY // 2), border_radius=8)
+                ui_rect(canvas, PANEL, (px, top_y, 200, PH), 10)
+                ui_rect(canvas, SEL_BG, (px + 20, top_y + 20, 160, 110 + DY // 2), 8)
                 ini = f_logo.render(stag, True, ACCENT)
                 canvas.blit(ini, (px + 100 - ini.get_width() // 2, top_y + 52 + DY // 4))
                 for i, line in enumerate(wrap(f_row, sname, 170)):
@@ -2637,7 +2678,7 @@ def main():
                     break
                 y = top_y + r * row_h
                 if gi == idx:
-                    pygame.draw.rect(canvas, SEL_BG, (list_x, y, list_w, row_h - 4), border_radius=8)
+                    ui_rect(canvas, SEL_BG, (list_x, y, list_w, row_h - 4), 8)
                     pygame.draw.rect(canvas, ACCENT, (list_x, y, 5, row_h - 4), border_radius=3)
                 badges = []
                 if games[gi]["path"] in favorite_paths:
@@ -2654,13 +2695,13 @@ def main():
                 bar_h = H - 64 - top_y
                 th = max(24, int(bar_h * rows / len(games)))
                 ty = top_y + int((bar_h - th) * first / max(1, len(games) - rows))
-                pygame.draw.rect(canvas, PANEL, (list_x + list_w + 6, top_y, 6, bar_h), border_radius=3)
+                ui_rect(canvas, PANEL, (list_x + list_w + 6, top_y, 6, bar_h), 3)
                 pygame.draw.rect(canvas, ACCENT, (list_x + list_w + 6, ty, 6, th), border_radius=3)
 
             g = games[idx]
             px = 500 + DX
-            pygame.draw.rect(canvas, PANEL, (px, top_y, 200, PH), border_radius=10)
-            pygame.draw.rect(canvas, SEL_BG, (px + 20, top_y + 14, 160, 130 + DY // 2), border_radius=8)
+            ui_rect(canvas, PANEL, (px, top_y, 200, PH), 10)
+            ui_rect(canvas, SEL_BG, (px + 20, top_y + 14, 160, 130 + DY // 2), 8)
             ini = f_logo.render(g["title"][:1].upper(), True, ACCENT)
             canvas.blit(ini, (px + 100 - ini.get_width() // 2, top_y + 62 + DY // 4))
             ty_ = top_y + 152 + DY // 2
