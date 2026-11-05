@@ -38,6 +38,14 @@ def inside(path, root):
     return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
+def same_entry(a, b):
+    """True if a and b are the very same directory entry (a case-only rename target on a case-insensitive filesystem)."""
+    try:
+        return os.path.samestat(os.lstat(a), os.lstat(b))
+    except OSError:
+        return False
+
+
 def unique_name(folder, name):
     """name, or 'name (copy)', 'name (copy 2)', ... so a paste never overwrites anything."""
     if not os.path.lexists(os.path.join(folder, name)):
@@ -351,7 +359,7 @@ class FileManager:
         if new_name == e["name"]:
             return True
         dst = os.path.join(os.path.dirname(e["path"]), new_name)
-        if os.path.lexists(dst):
+        if os.path.lexists(dst) and not same_entry(e["path"], dst):     # on FAT/exFAT "a.nes" -> "A.nes" is the same entry
             self.msg = "'%s' already exists" % new_name
             return False
         try:
