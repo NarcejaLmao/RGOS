@@ -1192,7 +1192,8 @@ class ButtonMap:
                ("L", 0x136, False), ("R", 0x137, False), ("SELECT", 0x13a, False), ("START", 0x13b, False),
                ("D-pad UP", 0x220, False), ("D-pad DOWN", 0x221, False), ("D-pad LEFT", 0x222, False),
                ("D-pad RIGHT", 0x223, False), ("MENU (home) button", 0x13c, True), ("L2 / left trigger", 0x138, True),
-               ("R2 / right trigger", 0x139, True)]
+               ("R2 / right trigger", 0x139, True), ("L3 (click left stick)", 0x13d, True), ("R3 (click right stick)", 0x13e, True)]
+    STICK_BTNS = (0x13d, 0x13e)                    # only asked on devices that have sticks (the hub publishes sticks.raw)
     TIMEOUT, OPT_TIMEOUT, GAP = 25.0, 5.0, 0.5
     STICKS = [("LEFT stick", (0x00, 0x01)), ("RIGHT stick", (0x03, 0x04))]    # ABS_X/ABS_Y and ABS_RX/ABS_RY
     CENTER_SETTLE, CENTER_TIME = 0.6, 2.0          # seconds: let go of the sticks, then measure the rest position
@@ -1220,6 +1221,7 @@ class ButtonMap:
         self.stamp, self.keys, self.used, self.last_name = None, {}, set(), ""
         self.skipped = []
         self.sticksf = os.path.join(RUN_DIR, "sticks.raw")
+        self.has_sticks = False                         # decided once the hub is up (see update): L3 / R3 are only asked when True
         self.sv = {}                                    # axis code -> (value, min, max): the live raw stick values
         self.sticks = []                                # indices into STICKS of the sticks this device has
         self.cstick = 0                                 # which of them is being measured
@@ -1246,8 +1248,14 @@ class ButtonMap:
         self.state, self.msg = "fail", msg
         self.stop()
 
+    def total(self):
+        """Number of button prompts on this device (L3 / R3 only count where there are sticks)."""
+        return len(self.PROMPTS) - (0 if self.has_sticks else len(self.STICK_BTNS))
+
     def _next(self, now):
         self.step += 1
+        while self.step < len(self.PROMPTS) and self.PROMPTS[self.step][1] in self.STICK_BTNS and not self.has_sticks:
+            self.step += 1                              # no sticks, so no stick clicks either
         if self.step < len(self.PROMPTS):
             self.state, self.tstate = "prompt", now
         else:
@@ -1376,6 +1384,7 @@ class ButtonMap:
         label, canon, optional = self.PROMPTS[min(self.step, len(self.PROMPTS) - 1)]
         if self.state == "wait":                        # give the hub a moment, then start
             if now - self.t0 > 1.0:
+                self.has_sticks = any(all(a in self._read_sticks() for a in axes) for _, axes in self.STICKS)
                 self.state, self.tstate = "prompt", now
                 if r:
                     self.stamp = r[0]                   # ignore a press that was already there
@@ -2827,8 +2836,8 @@ def main():
                 canvas.blit(f_small.render("Stick %d of %d" % (min(bmap.cstick + 1, len(bmap.sticks)) if bmap.state == "sroll" else 1, len(bmap.sticks)),
                                            True, DIM), (list_x + 28, top_y + 58))
             elif bmap.state in ("prompt", "apply"):
-                n = min(bmap.step + 1, len(bmap.PROMPTS))
-                canvas.blit(f_small.render("Button %d of %d" % (n, len(bmap.PROMPTS)), True, DIM), (list_x + 28, top_y + 58))
+                n = min(bmap.step + 1, bmap.total())
+                canvas.blit(f_small.render("Button %d of %d" % (n, bmap.total()), True, DIM), (list_x + 28, top_y + 58))
             text_w = W - 2 * list_x - 60 - (170 if sview else 0)
             for i, line in enumerate(bmap.lines()):
                 for j, wl in enumerate(wrap(f_big if i == 0 else f_row, line, text_w)):
