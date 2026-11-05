@@ -80,7 +80,10 @@ def menu_api():
 
 def pick_core(sid, state, default_core, compatible_cores):
     """The user's choice for this system if installed, else the system default if installed, else the first compatible core."""
-    wanted = (state.get("emulators") or {}).get(sid) or default_core(sid)
+    emus = state.get("emulators") if isinstance(state, dict) else None      # a hand-edited / damaged state.json can hold any JSON
+    wanted = emus.get(sid) if isinstance(emus, dict) else None
+    if not isinstance(wanted, str) or not wanted:
+        wanted = default_core(sid)
     for c in (wanted, default_core(sid)):
         if c and core_file(c):
             return c

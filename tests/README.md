@@ -17,5 +17,6 @@ Plain `unittest`, standard library only: no pygame, device or root needed (`menu
 | `test_btctl.py` | `btctl`: the saved Bluetooth on/off setting is applied at boot (off stays off). |
 | `test_splash.py` | `splash.read_conf`: a malformed splash.json falls back to the defaults instead of raising. |
 | `test_keymap.py` | `rgos-input` `load_keymap`: a non-object keymap is ignored and one bad button-map entry keeps the good ones. |
+| `test_launch.py` | `rgos-launch` `pick_core`: a state.json that is not the expected shape (list, null, `"emulators": "a"`, ...) falls back to the system default core instead of crashing. |
 
 `helpers.py` loads the real `menu.py` and `rgos-input` for the tests.
