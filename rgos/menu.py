@@ -413,12 +413,22 @@ def ensure_folders():
             log("could not create %s: %s" % (d, e))
 
 
+_FIT = {}                                      # (font, text, width) -> the fitted text (fit() is pure and runs for every label every frame)
+
+
 def fit(font, text, width):
-    if font.size(text)[0] <= width:
-        return text
-    while text and font.size(text + "...")[0] > width:
-        text = text[:-1]
-    return text + "..."
+    key = (font, text, width)
+    r = _FIT.get(key)
+    if r is None:
+        if len(_FIT) > 3000:
+            _FIT.clear()
+        r = text
+        if font.size(r)[0] > width:
+            while r and font.size(r + "...")[0] > width:
+                r = r[:-1]
+            r = r + "..."
+        _FIT[key] = r
+    return r
 
 
 def wrap(font, text, width):
@@ -747,11 +757,24 @@ ICONS = {"games": icon_games, "recents": icon_recents, "favorites": icon_favorit
 
 # ---- XMB launcher drawing ----------------------------------------------------------------------------------------------------
 _XI = {}                                       # icon caches: white 96x96 originals and their scaled copies
+_XIT = {}                                      # finished (tinted + faded) icons keyed by (kind, size, colour, alpha), blitted as they are
 _XBG = {}                                      # cached background gradient
+_XBG_RAW = [None]                              # the same gradient as raw RGB bytes: colour lookups without locking a surface
+_XSILK = {}                                    # silk geometry that does not change from frame to frame (see xmb_bg)
+_XFRAME = [None, -1.0]                         # the last rendered background frame and the time it was drawn
+XMB_BG_INTERVAL = 1.0 / 30.0                   # the background is redrawn at most this often (it moves slowly; menu motion can run at 60 fps)
 
 
 def xmb_icon(kind, size, color, alpha=1.0):
-    """The icon `kind` as a size x size surface tinted `color` and faded by `alpha` (the shapes are drawn once, then scaled + cached)."""
+    """The icon `kind` as a size x size surface tinted `color` and faded by `alpha` (the shapes are drawn once, then scaled + cached;
+    the tinted result is cached too, with the colour and fade rounded to steps of 4/255 that the eye cannot tell apart)."""
+    ck = tuple(min(255, (int(v) + 2) & ~3) for v in color[:3])
+    a8 = int(alpha * 255) if alpha < 0.99 else 255
+    aq = 255 if a8 >= 255 else max(0, a8) & ~3
+    key = (kind, size, ck, aq)
+    t = _XIT.get(key)
+    if t is not None:
+        return t
     base = _XI.get(kind)
     if base is None:
         base = pygame.Surface((96, 96), pygame.SRCALPHA)
@@ -761,13 +784,16 @@ def xmb_icon(kind, size, color, alpha=1.0):
     if sc is None:
         sc = _XI[(kind, size)] = pygame.transform.smoothscale(base, (size, size))
     t = sc.copy()
-    t.fill(tuple(color) + (255,), special_flags=pygame.BLEND_RGBA_MULT)
-    if alpha < 0.99:
-        t.set_alpha(max(0, int(alpha * 255)))
+    t.fill(ck + (255,), special_flags=pygame.BLEND_RGBA_MULT)
+    if aq < 255:
+        t.set_alpha(aq)
+    if len(_XIT) > 600:
+        _XIT.clear()
+    _XIT[key] = t
     return t
 
 
-# PS3-style silk. Each bundle is a sheet of fine strands that sweeps across the screen, fans out and pinches together where it "twists":
+# PS3-style silk. Each bundle is a sheet of fine strands that sweeps across the screen, fans out and pinches together where it \"twists\":
 # (height at the left edge, height at the right edge (both as a fraction of H), swell amplitude, swell wave number, swell speed,
 #  max half-thickness, twist wave number, twist speed, twist phase, number of strands, brightness)
 _XMB_SILK = ((0.68, 0.43, 16, 0.0085, 0.22, 48, 0.0060, 0.10, 0.4, 18, 0.55),
@@ -777,9 +803,39 @@ _XMB_SPARKS = []                               # (x, y, drift speed, phase, size
 
 def xmb_tint(x, y, k):
     """The background colour at (x, y) lifted toward the text colour by k (soft light shapes that follow the gradient)."""
-    g = next(iter(_XBG.values()), None)
-    base = g.get_at((max(0, min(W - 1, int(x))), max(0, min(H - 1, int(y)))))[:3] if g else BG
+    raw = _XBG_RAW[0]
+    if raw is None:
+        base = BG
+    else:
+        i = (max(0, min(H - 1, int(y))) * W + max(0, min(W - 1, int(x)))) * 3
+        base = (raw[i], raw[i + 1], raw[i + 2])
     return _mix(base, TEXT, k)
+
+
+def _xmb_silk_build(g):
+    """Everything about the silk that only depends on the theme and the screen size: the x grid, the parts of the sine waves that do not
+    depend on time (so a frame needs a handful of sin/cos instead of one per point), and the colour of every strand."""
+    hl = XMB_SILK
+    xs = list(range(0, W + 10, 10))
+    wig = ([math.sin(x * 0.021) for x in xs], [math.cos(x * 0.021) for x in xs])
+    bundles = []
+    for yl, yr, amp, kf, sp, th, kt, st, ph, n, br in _XMB_SILK:
+        yb, s1, k1, s2, k2, s3, k3 = [], [], [], [], [], [], []
+        for x in xs:
+            u = x / float(W)
+            yb.append(H * (yl + (yr - yl) * u * u * (3 - 2 * u)))
+            p1, p2, p3 = x * kf + ph, x * kf * 2.3, x * kt + ph
+            s1.append(math.sin(p1)); k1.append(math.cos(p1))
+            s2.append(math.sin(p2)); k2.append(math.cos(p2))
+            s3.append(math.sin(p3)); k3.append(math.cos(p3))
+        base = g.get_at((W // 3, min(H - 1, int(H * (yl + yr) / 2))))[:3]
+        strands = []
+        for k in range(n):                                     # the fine strands; the upper ones catch the most light
+            f = k / float(n - 1) * 2.0 - 1.0
+            strands.append((f, math.cos(k * 0.9), math.sin(k * 0.9),
+                            _mix(base, hl, br * (0.30 + 0.45 * max(0.0, -f) + 0.15 * (1.0 - abs(f))))))
+        bundles.append((yb, s1, k1, s2, k2, s3, k3, amp, sp, th, st, strands, _mix(base, hl, 0.12 * br / 0.55), _mix(base, hl, min(1.0, br * 1.5))))
+    return xs, wig, bundles
 
 
 def xmb_bg(c, t):
@@ -789,6 +845,8 @@ def xmb_bg(c, t):
     g = _XBG.get(key)
     if g is None:
         _XBG.clear()
+        _XBG_RAW[0] = None
+        _XFRAME[0] = None
         gw, gh = 24, 16                         # a tiny gradient, scaled up smoothly (cheap and free of banding)
         small = pygame.Surface((gw, gh))
         top, low = XMB_TOP, XMB_LOW
@@ -798,31 +856,50 @@ def xmb_bg(c, t):
                 pygame.draw.rect(small, _mix(top, low, v ** 1.15), (gx, gy, 1, 1))
         g = pygame.transform.smoothscale(small, (W, H))
         _XBG[key] = g
+        _XSILK.clear()
+        _XSILK["geo"] = _xmb_silk_build(g)
+        try:
+            _XBG_RAW[0] = (getattr(pygame.image, "tobytes", None) or pygame.image.tostring)(g, "RGB")
+        except Exception:
+            _XBG_RAW[0] = None
         if not _XMB_SPARKS:
             r = random.Random(11)
             for i in range(36):
                 _XMB_SPARKS.append((r.uniform(0, W), (r.uniform(0.10, 0.98) if i % 3 else r.uniform(0.40, 0.85)) * H,
                                     r.uniform(3, 12), r.uniform(0, 6.28), 2 if r.random() < 0.8 else 3))
-    c.blit(g, (0, 0))
-    hl = XMB_SILK                                              # what the silk reflects (a pale tint of the theme colour)
-    for yl, yr, amp, kf, sp, th, kt, st, ph, n, br in _XMB_SILK:
-        cen, half = [], []
-        for x in range(0, W + 10, 10):
-            u = x / float(W)
-            yc = H * (yl + (yr - yl) * u * u * (3 - 2 * u)) + amp * math.sin(x * kf + t * sp + ph) + amp * 0.5 * math.sin(x * kf * 2.3 - t * sp * 0.8)
-            tw = 0.5 + 0.5 * math.sin(x * kt + t * st + ph)
-            cen.append((x, yc))
-            half.append(th * (0.10 + 0.90 * tw * tw))           # fans out, then pinches to a thin line
-        base = g.get_at((W // 3, min(H - 1, int(H * (yl + yr) / 2))))[:3]
-        pygame.draw.polygon(c, _mix(base, hl, 0.12 * br / 0.55), [(x, yc - h) for (x, yc), h in zip(cen, half)] + [(x, yc + h) for (x, yc), h in zip(cen, half)][::-1])
-        for k in range(n):                                     # the fine strands; the upper ones catch the most light
-            f = k / float(n - 1) * 2.0 - 1.0
-            line = [(x, yc + h * (f + 0.09 * math.sin(x * 0.021 + t * 0.35 + k * 0.9))) for (x, yc), h in zip(cen, half)]
-            pygame.draw.aalines(c, _mix(base, hl, br * (0.30 + 0.45 * max(0.0, -f) + 0.15 * (1.0 - abs(f)))), False, line)
-        pygame.draw.lines(c, _mix(base, hl, min(1.0, br * 1.5)), False, [(x, yc - h) for (x, yc), h in zip(cen, half)], 2)    # lit upper edge
+    fr = _XFRAME
+    if fr[0] is not None and 0.0 <= t - fr[1] < XMB_BG_INTERVAL:   # drawn a moment ago: reuse it (menu animation can run at 60 fps)
+        c.blit(fr[0], (0, 0))
+        return
+    if fr[0] is None:
+        fr[0] = g.copy()
+    else:
+        fr[0].blit(g, (0, 0))
+    fr[1] = t
+    f = fr[0]
+    xs, (sx0, cx0), bundles = _XSILK["geo"]
+    cw, sw = math.cos(t * 0.35), math.sin(t * 0.35)
+    S = [a * cw + b * sw for a, b in zip(sx0, cx0)]            # sin(x * 0.021 + t * 0.35) for every x (shared by all strands)
+    C = [b * cw - a * sw for a, b in zip(sx0, cx0)]            # ... and its cosine
+    for yb, s1, k1, s2, k2, s3, k3, amp, sp, th, st, strands, poly_col, edge_col in bundles:
+        c1, d1 = math.cos(t * sp), math.sin(t * sp)
+        c2, d2 = math.cos(t * sp * 0.8), math.sin(t * sp * 0.8)
+        c3, d3 = math.cos(t * st), math.sin(t * st)
+        amp2 = amp * 0.5
+        rows = []
+        for x, y0, a1, b1, a2, b2, a3, b3, sn, cs in zip(xs, yb, s1, k1, s2, k2, s3, k3, S, C):
+            tw = 0.5 + 0.5 * (a3 * c3 + b3 * d3)
+            h = th * (0.10 + 0.90 * tw * tw)                   # fans out, then pinches to a thin line
+            rows.append((x, y0 + amp * (a1 * c1 + b1 * d1) + amp2 * (a2 * c2 - b2 * d2), h, 0.09 * h * sn, 0.09 * h * cs))
+        upper = [(x, yc - h) for x, yc, h, _s, _c in rows]
+        pygame.draw.polygon(f, poly_col, upper + [(x, yc + h) for x, yc, h, _s, _c in rows][::-1])
+        for sf, sck, ssk, col in strands:
+            pygame.draw.aalines(f, col, False, [(x, yc + h * sf + hs * sck + hc * ssk) for x, yc, h, hs, hc in rows])
+        pygame.draw.lines(f, edge_col, False, upper, 2)        # lit upper edge
     for x0, y0, spd, ph, sz in _XMB_SPARKS:                    # twinkling dust
         x, y = (x0 + t * spd) % W, y0 + 4 * math.sin(t * 0.4 + ph)
-        pygame.draw.rect(c, xmb_tint(x, y, 0.22 + 0.55 * (0.5 + 0.5 * math.sin(t * 1.6 + ph))), (int(x), int(y), sz, sz))
+        pygame.draw.rect(f, xmb_tint(x, y, 0.22 + 0.55 * (0.5 + 0.5 * math.sin(t * 1.6 + ph))), (int(x), int(y), sz, sz))
+    c.blit(f, (0, 0))
 
 
 def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
@@ -871,6 +948,9 @@ def draw_xmb_home(c, f_row, f_small, cx_f, cat_i, items, vy, fade):
             c.blit(sub, (tx, int(y) + 3))
 
 
+_XDD = [None, None]                            # key and finished panel of the last dropdown frame
+
+
 def draw_xmb_dropdown(c, f_small, dd, opts):
     """Settings dropdown (Theme / Launcher) shown over the XMB: a translucent panel under the category bar.
     Browsing a theme previews it live, so the XMB gradient, silk and dust recolour behind the panel."""
@@ -880,6 +960,10 @@ def draw_xmb_dropdown(c, f_small, dd, opts):
     x, y = (W - w) // 2, min(top, H - 50 - h)
     first = min(max(0, dd["sel"] - vis // 2), len(opts) - vis)
     acc = tuple(ACCENT)[:3]
+    key = (dd["sel"], dd["orig"], dd.get("kind"), first, vis, w, h, acc, tuple(TEXT), tuple(DIM), len(opts), f_small)
+    if _XDD[0] == key:                                                      # nothing changed since the last frame: reuse the panel
+        c.blit(_XDD[1], (x, y))
+        return
     panel = pygame.Surface((w, h), pygame.SRCALPHA)
     pygame.draw.rect(panel, (0, 0, 0, 222), (0, 0, w, h), border_radius=12)
     pygame.draw.rect(panel, acc + (230,), (0, 0, w, h), 2, border_radius=12)
@@ -902,6 +986,7 @@ def draw_xmb_dropdown(c, f_small, dd, opts):
             pygame.draw.polygon(panel, acc, [(w - 8, 12), (w - 14, 18), (w - 2, 18)])
         if first + vis < len(opts):
             pygame.draw.polygon(panel, acc, [(w - 8, h - 12), (w - 14, h - 18), (w - 2, h - 18)])
+    _XDD[0], _XDD[1] = key, panel
     c.blit(panel, (x, y))
 
 
@@ -1406,8 +1491,12 @@ def main():
 
     favorite_paths = set(load_favorites())
 
+    _fbp = [None, {}]                          # path -> game, rebuilt only when the ROM scan is replaced (was O(all games) per frame)
+
     def favorite_games():
-        by_path = {g["path"]: g for g in all_games}
+        if _fbp[0] is not all_games:
+            _fbp[0], _fbp[1] = all_games, {g["path"]: g for g in all_games}
+        by_path = _fbp[1]
         return [by_path[p] for p in load_favorites() if p in by_path]
 
     def settings_text():
@@ -1425,7 +1514,7 @@ def main():
                 "ssh": ("SSH / file transfer", ("On: ssh or sftp root@%s" % wst["ip"] if wst["ip"] else "On: connect Wi-Fi to use it") if ssh_info()["running"] else "Off   A opens it"),
                 "info": ("Information", "Build, kernel, storage, battery, volume and input status")}
 
-    def xmb_items(cat):
+    def _xmb_items(cat):
         """The vertical list under one XMB category: dicts with label, sub (second line), icon id and act (what A does, see the input code)."""
         if cat == "settings":
             txt = settings_text()
@@ -1444,6 +1533,18 @@ def main():
         if cat == "tools":
             return [{"label": t[1], "sub": t[2], "icon": "files" if t[3] == "@view:files" else "tools", "act": ("tool", t[3])} for t in TOOLS]
         return [{"label": "Power Off", "sub": "Shut down RG OS", "icon": "power", "act": ("power",)}]
+
+    _xic = {}                                  # category -> (time built, what it was built from, items)
+
+    def xmb_items(cat, fresh=False):
+        """_xmb_items() for the frame loop: the list is rebuilt at most 4 times a second (building it reads status files and the favorites
+        list, which was done every frame). The button handler passes fresh=True so that an action always uses the current list."""
+        key, now = (theme_id, launcher_id, id(all_games), id(vsys)), time.monotonic()
+        hit = _xic.get(cat)
+        if not fresh and hit is not None and hit[1] == key and now - hit[0] < 0.25:
+            return hit[2]
+        items = _xic[cat] = (now, key, _xmb_items(cat))
+        return items[2]
 
     # screens: home -> systems/games, recents, favorites, tools and settings
     view, home_idx, sys_idx, idx_by = "home", 0, 0, {}
@@ -1683,7 +1784,7 @@ def main():
                     idx_by[key] = min(idx, max(0, n - 1))
             elif view == "home" and launcher_id == "xmb":      # XMB: left/right = category, up/down = item, A = open
                 cat = XMB_CATS[xmb_cat][0]
-                items = xmb_items(cat)
+                items = xmb_items(cat, True)
                 cur = min(xmb_sel.get(cat, 0), len(items) - 1)
                 if a in ("left", "right", "l", "r"):
                     new = max(0, min(len(XMB_CATS) - 1, xmb_cat + (1 if a in ("right", "r") else -1)))
