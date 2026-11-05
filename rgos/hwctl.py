@@ -478,7 +478,7 @@ class Motor:
         timed = os.path.join(sys_root, "class/timed_output/vibrator/enable")
         leds = [p for p in glob.glob(os.path.join(sys_root, "class/leds/*"))
                 if re.search(r"vibr|motor|rumble", os.path.basename(p), re.I) and os.path.exists(p + "/brightness")]
-        if want in ("auto", "gpio") and gpio not in (None, "", False):
+        if want in ("auto", "gpio") and gpio is not None and gpio is not False and gpio != "":   # GPIO 0 is a valid pin (0 == False)
             self.mode, self.path = "gpio", int(gpio)
             self._gpio_prepare()
         elif want in ("auto", "timed") and os.path.exists(timed):
