@@ -1184,19 +1184,31 @@ class ButtonMap:
     """Guided button mapping. While the probe flag exists the hub (rgos-input) publishes the last raw key / hat / trigger
     press of every source device as "<n>\\t<device>\\t<type>\\t<code>\\t<sign>". We ask for one button at a time and
     store raw press -> canonical code in button-map.json, then restart the hub. Optional buttons are skipped when
-    nothing is pressed for a few seconds."""
+    nothing is pressed for a few seconds.
+    After the buttons come the analog sticks (only on devices whose hub publishes them, i.e. writes sticks.raw): first both
+    sticks are left alone to measure their centre, then each one is rolled around its edge to measure its travel. Both are
+    stored under "sticks" in button-map.json. A stick that is not moved is skipped, so a dead or missing stick never blocks setup."""
     PROMPTS = [("A", 0x131, False), ("B", 0x130, False), ("X", 0x133, False), ("Y", 0x134, False),
                ("L", 0x136, False), ("R", 0x137, False), ("SELECT", 0x13a, False), ("START", 0x13b, False),
                ("D-pad UP", 0x220, False), ("D-pad DOWN", 0x221, False), ("D-pad LEFT", 0x222, False),
                ("D-pad RIGHT", 0x223, False), ("MENU (home) button", 0x13c, True), ("L2 / left trigger", 0x138, True),
                ("R2 / right trigger", 0x139, True)]
     TIMEOUT, OPT_TIMEOUT, GAP = 25.0, 5.0, 0.5
+    STICKS = [("LEFT stick", (0x00, 0x01)), ("RIGHT stick", (0x03, 0x04))]    # ABS_X/ABS_Y and ABS_RX/ABS_RY
+    CENTER_SETTLE, CENTER_TIME = 0.6, 2.0          # seconds: let go of the sticks, then measure the rest position
+    STICK_IDLE, STICK_TIMEOUT = 8.0, 30.0          # seconds: skip a stick that is never moved / give up on one that is never finished
+    REACH, MOVED = 0.5, 0.15                       # fraction of the declared half-range: "edge reached in this direction" / "stick was moved"
+    MIN_SIDE = 0.3                                 # a side whose measured travel is below this keeps the declared range instead
 
     def __init__(self):
         self.flag, self.rawf = os.path.join(RUN_DIR, "keys.probe"), os.path.join(RUN_DIR, "keys.raw")
         try:
             os.makedirs(RUN_DIR, exist_ok=True)
             os.unlink(self.rawf)
+        except OSError:
+            pass
+        try:
+            os.unlink(os.path.join(RUN_DIR, "sticks.raw"))             # no stale values from an earlier run
         except OSError:
             pass
         try:
@@ -1207,9 +1219,16 @@ class ButtonMap:
         self.t0 = self.tstate = time.time()
         self.stamp, self.keys, self.used, self.last_name = None, {}, set(), ""
         self.skipped = []
+        self.sticksf = os.path.join(RUN_DIR, "sticks.raw")
+        self.sv = {}                                    # axis code -> (value, min, max): the live raw stick values
+        self.sticks = []                                # indices into STICKS of the sticks this device has
+        self.cstick = 0                                 # which of them is being measured
+        self.center, self.cal = {}, {}                  # axis -> measured centre / (centre, low, high)
+        self.csamples = {}
+        self.ext, self.reached, self.tgrow, self.moved = {}, set(), 0.0, False
 
     def stop(self):
-        for f in (self.flag, self.rawf):
+        for f in (self.flag, self.rawf, self.sticksf):
             try:
                 os.unlink(f)
             except OSError:
@@ -1229,7 +1248,92 @@ class ButtonMap:
 
     def _next(self, now):
         self.step += 1
-        self.state, self.tstate = ("prompt", now) if self.step < len(self.PROMPTS) else ("apply", now)
+        if self.step < len(self.PROMPTS):
+            self.state, self.tstate = "prompt", now
+        else:
+            self._start_sticks(now)
+
+    def _read_sticks(self):
+        """Refresh self.sv from the hub's sticks.raw: {axis code: (value, min, max)}."""
+        try:
+            with open(self.sticksf) as f:
+                ax = json.load(f).get("ax") or {}
+            self.sv = {int(k): (int(v[0]), int(v[1]), int(v[2])) for k, v in ax.items()}
+        except (OSError, ValueError, TypeError, IndexError, AttributeError):
+            self.sv = {}
+        return self.sv
+
+    def _start_sticks(self, now):
+        """Buttons are done: go on to the sticks if the hub publishes any (it only does so on devices with analog sticks)."""
+        self._read_sticks()
+        self.sticks = [i for i, (_, axes) in enumerate(self.STICKS) if all(a in self.sv for a in axes)]
+        if not self.sticks:
+            self.state, self.tstate = "apply", now
+            return
+        self.cstick, self.center, self.csamples, self.cal = 0, {}, {a: [] for i in self.sticks for a in self.STICKS[i][1]}, {}
+        self.state, self.tstate = "scenter", now
+
+    def _begin_roll(self, now):
+        """Measure the travel of the current stick: start every axis at its centre and wait for it to be pushed out."""
+        axes = self.STICKS[self.sticks[self.cstick]][1]
+        self.ext = {a: [self.center[a], self.center[a]] for a in axes}
+        self.reached, self.moved, self.tgrow = set(), False, now
+        self.state, self.tstate = "sroll", now
+
+    def _next_stick(self, now):
+        self.cstick += 1
+        if self.cstick < len(self.sticks):
+            self._begin_roll(now)
+        else:
+            self.state, self.tstate = "apply", now
+
+    def _half(self, a):
+        _, lo, hi = self.sv[a]
+        return max((hi - lo) / 2.0, 1.0)
+
+    def _roll_update(self, now):
+        name, axes = self.STICKS[self.sticks[self.cstick]]
+        if any(a not in self.sv for a in axes):
+            return
+        for a in axes:
+            v, c, half = self.sv[a][0], self.center[a], self._half(a)
+            e = self.ext[a]
+            if v < e[0] - 0.01 * half or v > e[1] + 0.01 * half:
+                self.tgrow = now                        # still reaching further out
+            e[0], e[1] = min(e[0], v), max(e[1], v)
+            for sign, key in ((-1, (a, -1)), (1, (a, 1))):
+                if (v - c) * sign >= self.REACH * half:
+                    self.reached.add(key)
+            if abs(v - c) >= self.MOVED * half:
+                self.moved = True
+        dirs = sum(1 for a in axes for sg in (-1, 1) if (self.ext[a][1] - self.center[a] if sg > 0 else self.center[a] - self.ext[a][0]) >= self.MOVED * self._half(a))
+        if self.moved and dirs >= 2 and now - self.tgrow >= (1.0 if len(self.reached) >= 4 else 3.0):
+            for a in axes:                              # a side that was never pushed out far enough keeps the declared range
+                c, half, (_, lo, hi) = self.center[a], self._half(a), self.sv[a]
+                e_lo = self.ext[a][0] if c - self.ext[a][0] >= self.MIN_SIDE * half else lo
+                e_hi = self.ext[a][1] if self.ext[a][1] - c >= self.MIN_SIDE * half else hi
+                self.cal[a] = (c, e_lo, e_hi)
+            return self._next_stick(now)
+        idle = now - self.tstate
+        if (not self.moved and idle > self.STICK_IDLE) or idle > self.STICK_TIMEOUT:
+            self.skipped.append(name.split(" ")[0].lower() + " stick")
+            self._next_stick(now)
+
+    def stick_view(self):
+        """For the wizard screen: (title of the stick being measured, x, y in -1..1 around its centre, set of directions reached
+        as (axis index 0/1, sign)) while a stick step is running, else None."""
+        if self.state not in ("scenter", "sroll") or not self.sticks:
+            return None
+        name, axes = self.STICKS[self.sticks[min(self.cstick, len(self.sticks) - 1)]]
+        if self.state == "scenter":
+            name, axes = "both sticks", self.STICKS[self.sticks[0]][1]
+        if any(a not in self.sv for a in axes):
+            return name, 0.0, 0.0, set()
+        def norm(a):
+            v, lo, hi = self.sv[a]
+            return max(-1.0, min(1.0, (v - (self.center.get(a, (lo + hi) / 2.0))) / self._half(a)))
+        reached = {(axes.index(a), sg) for (a, sg) in self.reached if a in axes}
+        return name, norm(axes[0]), norm(axes[1]), reached
 
     def update(self):
         now = time.time()
@@ -1238,8 +1342,11 @@ class ButtonMap:
         if self.state == "apply":
             try:
                 os.makedirs(os.path.dirname(BTN_MAP), exist_ok=True)
+                out = {"keys": self.keys}
+                if self.cal:
+                    out["sticks"] = {str(a): [round(v, 1) for v in cal] for a, cal in self.cal.items()}
                 with open(BTN_MAP + ".tmp", "w") as f:
-                    json.dump({"keys": self.keys}, f)
+                    json.dump(out, f)
                 os.replace(BTN_MAP + ".tmp", BTN_MAP)
                 set_swap_ab(False)              # a fresh mapping defines A and B exactly as pressed: no extra swap on top
                 restart_hub()
@@ -1247,8 +1354,23 @@ class ButtonMap:
                 return self._fail("Could not save: %s" % e)
             self.stop()
             self.state = "done"
-            self.msg = "Saved %d buttons%s. Press buttons in the menu to test them." % (
-                len(self.keys), (" (skipped: %s)" % ", ".join(self.skipped)) if self.skipped else "")
+            self.msg = "Saved %d buttons%s%s. Press buttons in the menu to test them." % (
+                len(self.keys), (" and %d stick%s" % (len(self.cal) // 2, "" if len(self.cal) == 2 else "s")) if self.cal else "",
+                (" (skipped: %s)" % ", ".join(self.skipped)) if self.skipped else "")
+            return
+        if self.state in ("scenter", "sroll"):
+            self._read_sticks()
+            if self.state == "scenter":                 # sticks at rest: take the median of what they report as their centre
+                if now - self.tstate >= self.CENTER_SETTLE:
+                    for a, lst in self.csamples.items():
+                        if a in self.sv:
+                            lst.append(self.sv[a][0])
+                if now - self.tstate >= self.CENTER_TIME:
+                    for a, lst in self.csamples.items():
+                        self.center[a] = sorted(lst)[len(lst) // 2] if lst else (self.sv[a][1] + self.sv[a][2]) / 2.0 if a in self.sv else 0
+                    self._begin_roll(now)
+            else:
+                self._roll_update(now)
             return
         r = self._read()
         label, canon, optional = self.PROMPTS[min(self.step, len(self.PROMPTS) - 1)]
@@ -1286,6 +1408,10 @@ class ButtonMap:
         if self.state == "prompt":
             label, _, optional = self.PROMPTS[self.step]
             return ["Press %s" % label, "(wait a few seconds to skip: this one is optional)" if optional else ""]
+        if self.state == "scenter":
+            return ["Let go of both sticks", "Leave them centred for a moment"]
+        if self.state == "sroll":
+            return ["Roll the %s around" % self.STICKS[self.sticks[self.cstick]][0], "Push it to the edge and go all the way round, slowly"]
         if self.state == "apply":
             return ["Applying...", ""]
         return [self.msg]
@@ -2695,15 +2821,34 @@ def main():
             hint = "A Type   B Delete   START Done" + ("   X Show/hide" if kb.secret else "")
         elif view == "bmap":
             ui_rect(canvas, PANEL, (list_x, top_y, W - 2 * list_x, 330 + DY), 14)
-            canvas.blit(f_big.render("Button mapping", True, ACCENT), (list_x + 28, top_y + 22))
-            if bmap.state in ("prompt", "apply"):
+            sview = bmap.stick_view()
+            canvas.blit(f_big.render("Stick calibration" if sview else "Button mapping", True, ACCENT), (list_x + 28, top_y + 22))
+            if sview:
+                canvas.blit(f_small.render("Stick %d of %d" % (min(bmap.cstick + 1, len(bmap.sticks)) if bmap.state == "sroll" else 1, len(bmap.sticks)),
+                                           True, DIM), (list_x + 28, top_y + 58))
+            elif bmap.state in ("prompt", "apply"):
                 n = min(bmap.step + 1, len(bmap.PROMPTS))
                 canvas.blit(f_small.render("Button %d of %d" % (n, len(bmap.PROMPTS)), True, DIM), (list_x + 28, top_y + 58))
+            text_w = W - 2 * list_x - 60 - (170 if sview else 0)
             for i, line in enumerate(bmap.lines()):
-                for j, wl in enumerate(wrap(f_big if i == 0 else f_row, line, W - 2 * list_x - 60)):
+                for j, wl in enumerate(wrap(f_big if i == 0 else f_row, line, text_w)):
                     canvas.blit((f_big if i == 0 else f_row).render(wl, True, TEXT if i == 0 else DIM),
                                 (list_x + 28, top_y + 110 + i * 56 + j * 26))
-            hint = "A/B Back" if bmap.state in ("done", "fail") else "Press the button shown (wizard stops by itself if idle)"
+            if sview:                                           # live picture of the stick: ring, four edge marks that light up, and a dot
+                _, sx, sy, sreach = sview
+                gcx, gcy, gr = W - list_x - 28 - 70, top_y + 165 + DY // 2, 62
+                pygame.draw.circle(canvas, BG, (gcx, gcy), gr)
+                pygame.draw.circle(canvas, DIM, (gcx, gcy), gr, 2)
+                pygame.draw.line(canvas, DIM, (gcx - gr, gcy), (gcx + gr, gcy), 1)
+                pygame.draw.line(canvas, DIM, (gcx, gcy - gr), (gcx, gcy + gr), 1)
+                for (ai, sg) in ((0, -1), (0, 1), (1, -1), (1, 1)):
+                    mx, my = gcx + (sg * gr if ai == 0 else 0), gcy + (sg * gr if ai == 1 else 0)
+                    pygame.draw.circle(canvas, ACCENT if (ai, sg) in sreach else PANEL, (mx, my), 8)
+                    pygame.draw.circle(canvas, DIM, (mx, my), 8, 1)
+                pygame.draw.circle(canvas, TEXT, (gcx + int(sx * (gr - 10)), gcy + int(sy * (gr - 10))), 8)
+            hint = ("A/B Back" if bmap.state in ("done", "fail") else
+                    "Move the stick as shown (a stick that is not moved is skipped)" if sview else
+                    "Press the button shown (wizard stops by itself if idle)")
             if forced:
                 hint = "Required first-time setup" + ("   MENU Skip" if forced_fails >= 3 else "")
         elif view == "systems":

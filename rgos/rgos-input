@@ -12,9 +12,11 @@ only, unless the device config turns "analog" on (RG34XXSP: two sticks).
   /etc/rgos/input-<device>.json (device = /etc/rgos-device) is merged over input.json.
   * "analog": true (RG34XXSP and RG35XX H; the image ships it in input-rg34xxsp.json) also publishes the two analog sticks: ABS_X/ABS_Y (left)
     and ABS_RX/ABS_RY (right) of the source device are scaled to -32767..32767 and forwarded. Off everywhere else.
+    The stick step of the menu's wizard stores a centre and the two travel limits per axis ("sticks" in button-map.json);
+    with it the centre reads 0 and the full travel reaches +-32767. Without it the source's declared range is used.
 
 usage: rgos-input                run the hub
-       rgos-input reset-buttons  forget the button mapping saved by the menu's Map buttons wizard
+       rgos-input reset-buttons  forget the button mapping and stick calibration saved by the menu's Map buttons wizard
 
 Config: optional top-level "enabled": false in /etc/rgos/input.json leaves the raw input devices alone.
 """
@@ -33,6 +35,8 @@ RULES = "/run/udev/rules.d/91-rgos-hub.rules"  # generated: hides every grabbed 
 BTNMAP = "/var/lib/rgos/button-map.json"       # written by the menu's Settings > Map buttons wizard
 SWAPAB = "/var/lib/rgos/swap-ab"               # flag file (menu: Settings > Swap A / B buttons): the hub exchanges A and B
 KEYS_PROBE, KEYS_RAW = "/run/rgos/keys.probe", "/run/rgos/keys.raw"
+STICKS_RAW = "/run/rgos/sticks.raw"            # while the wizard probes: the live raw value and range of every stick axis (JSON), for the stick calibration step
+STICK_DEADZONE = 0.04                          # calibrated sticks: this much of the travel around the centre reads as 0 (RetroArch adds its own on top)
 # the codes the pad publishes
 CANON_KEYS = [0x130, 0x131, 0x133, 0x134, 0x136, 0x137, 0x138, 0x139, 0x13a, 0x13b, 0x13c, 0x13d, 0x13e,
               0x220, 0x221, 0x222, 0x223]
@@ -230,6 +234,23 @@ def load_keymap(iconf):
     return km
 
 
+def load_sticks():
+    """{axis code: (centre, low, high)} from the wizard's button-map.json ("sticks": {"<code>": [centre, low, high]}).
+    Entries that are not three plain numbers with a usable travel on both sides are ignored (the axis then uses its declared range)."""
+    cal = {}
+    try:
+        with open(BTNMAP) as f:
+            raw = json.load(f).get("sticks") or {}
+        for k, v in raw.items():
+            code = int(k)
+            c, lo, hi = (float(x) for x in v)
+            if code in ANALOG_AXES and lo < c < hi and min(c - lo, hi - c) >= 4:
+                cal[code] = (c, lo, hi)
+    except Exception:
+        pass
+    return cal
+
+
 class Translator:
     """Turns raw source events into button events of the canonical pad (pure logic, no I/O)."""
     def __init__(self, keymap=None, legacy=False, auto_map=True):
@@ -239,6 +260,7 @@ class Translator:
         self.prof = {}                              # device name -> {"keys": {code: canon}}
         self.swap = {}                              # canonical code -> code actually published (A/B swap)
         self.analog = False                         # publish the sticks (device config "analog": true)
+        self.stick_cal = {}                         # axis code -> (centre, low, high) measured by the wizard
 
     def learn(self, name, keys):
         """Profile one source from its key capability bits (`keys` = set of codes) and say what was decided."""
@@ -300,6 +322,13 @@ class Translator:
         """An analog stick axis of the source, rescaled to -ASTICK..ASTICK (centre of the source's own range = 0). [] when analog is off."""
         if not self.analog or code not in ANALOG_AXES:
             return []
+        cal = self.stick_cal.get(code)
+        if cal:                                     # measured centre and travel: centre = 0, each side scaled by its own travel
+            c, clo, chi = cal
+            f = (value - c) / (chi - c) if value >= c else (value - c) / (c - clo)
+            mag = abs(f)
+            f = 0.0 if mag < STICK_DEADZONE else (1 if f > 0 else -1) * (mag - STICK_DEADZONE) / (1.0 - STICK_DEADZONE)
+            return [(EV_ABS, code, max(-ASTICK, min(ASTICK, int(round(f * ASTICK)))))]
         lo, hi = rng
         if hi <= lo:
             lo, hi = -AMAX, AMAX
@@ -314,6 +343,16 @@ class Source:
         self.fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
         self.rng = {}
         self.grabbed = False
+
+    def absinfo(self, c):
+        """(current value, min, max) of an absolute axis, read live; None if the device does not have it."""
+        try:
+            buf = bytearray(24)
+            fcntl.ioctl(self.fd, EVIOCGABS(c), buf)
+            v, mn, mx = struct.unpack_from("<3i", buf, 0)
+        except OSError:
+            return None
+        return (v, mn, mx) if mx > mn else None
 
     def absrange(self, c):
         r = self.rng.get(c)
@@ -460,6 +499,7 @@ class KeyProbe:
     """While the menu's button wizard runs (flag file), publish the last raw key/hat/trigger press of any source."""
     def __init__(self):
         self.n, self.next_check, self.on = 0, 0.0, False
+        self.next_stick = 0.0
         self.skip_axes = ()                         # analog stick axes: moving a stick must not be recorded as a button press
 
     def feed(self, src, t, c, v):
@@ -489,6 +529,32 @@ class KeyProbe:
             pass
 
 
+    def sticks(self, srcs):
+        """While the wizard probes: write the live raw value and range of every stick axis to STICKS_RAW (~20 times a second),
+        so the menu can calibrate the sticks. Raw = before any calibration, so a re-run always measures the real hardware."""
+        now = time.time()
+        if now < self.next_stick:
+            return
+        self.next_stick = now + 0.05
+        if now >= self.next_check:
+            self.next_check, self.on = now + 0.1, os.path.exists(KEYS_PROBE)
+        if not self.on:
+            return
+        ax = {}
+        for c in ANALOG_AXES:
+            for x in srcs.values():
+                info = x.absinfo(c)
+                if info:
+                    ax[str(c)] = list(info)
+                    break
+        try:
+            with open(STICKS_RAW + ".tmp", "w") as f:
+                json.dump({"ax": ax}, f)
+            os.replace(STICKS_RAW + ".tmp", STICKS_RAW)
+        except OSError:
+            pass
+
+
 def run():
     iconf = load_input_conf()
     signal.signal(signal.SIGTERM, _stop)
@@ -504,6 +570,8 @@ def run():
     legacy = spec == [RAW_NAME]                 # only when input.json names the raw gpio-keys-joypad device: publish its own key codes as-is
     translator = Translator(load_keymap(iconf), legacy=legacy, auto_map=bool(iconf.get("auto_map_buttons", True)))
     translator.analog = bool(iconf.get("analog", False))
+    if translator.analog:
+        translator.stick_cal = load_sticks()
     if os.path.exists(SWAPAB):
         translator.swap = {0x130: 0x131, 0x131: 0x130}
         log("A/B swap is ON (Settings > Swap A / B buttons)")
@@ -511,8 +579,8 @@ def run():
         os.unlink(MAP_REPORT)
     except OSError:
         pass
-    log("hub config: sources %s, legacy codes %s, keymap entries %d, auto-map %s, analog sticks %s" %
-        (spec, legacy, len(translator.keymap), translator.auto_map, translator.analog))
+    log("hub config: sources %s, legacy codes %s, keymap entries %d, auto-map %s, analog sticks %s (%d axes calibrated)" %
+        (spec, legacy, len(translator.keymap), translator.auto_map, translator.analog, len(translator.stick_cal)))
 
     # 1. the source devices (wait until at least one exists)
     srcs = {}
@@ -594,6 +662,10 @@ def run():
                         write_rules([x.name for x in srcs.values()])
                         udev_refresh()
             wait = 0.25
+            if translator.analog:
+                probe_keys.sticks(srcs)
+                if probe_keys.on:
+                    wait = 0.05                   # the wizard is running: keep the live stick values fresh
             if ff is not None:
                 wait = min(wait, ff.next_deadline())
             r, _, _ = select.select([x.fd for x in srcs.values()] + ([ufd] if ff is not None else []), [], [], wait)
@@ -655,7 +727,7 @@ def run():
             fcntl.ioctl(ufd, UI_DEV_DESTROY)
         except OSError:
             pass
-        for p in (FLAG, STATUS, KEYS_RAW, RULES, MAP_REPORT):
+        for p in (FLAG, STATUS, KEYS_RAW, STICKS_RAW, RULES, MAP_REPORT):
             try:
                 os.unlink(p)
             except OSError:
