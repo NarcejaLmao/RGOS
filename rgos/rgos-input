@@ -218,19 +218,25 @@ def load_keymap(iconf):
     """{(device name or None, type, code, sign): canonical code}. Sources: input.json "keymap" (any device, plain key
     codes) and the wizard's button-map.json ({"keys": {"<name>|<type>:<code>:<sign>": canonical}})."""
     km = {}
-    for k, v in (iconf.get("keymap") or {}).items():
+    extra = iconf.get("keymap")
+    for k, v in (extra.items() if isinstance(extra, dict) else ()):       # a keymap that is not an object is ignored
         try:
             km[(None, 1, int(str(k), 0), 0)] = int(str(v), 0)
         except ValueError:
             pass
     try:
         with open(BTNMAP) as f:
-            for k, v in (json.load(f).get("keys") or {}).items():
-                name, _, rest = k.rpartition("|")
-                t, c, sg = rest.split(":")
-                km[(name or None, int(t), int(c), int(sg))] = int(v)
+            raw = json.load(f).get("keys")
+        items = list(raw.items()) if isinstance(raw, dict) else []
     except Exception:
-        pass
+        return km
+    for k, v in items:                              # one bad entry must not throw away the good ones after it
+        try:
+            name, _, rest = str(k).rpartition("|")
+            t, c, sg = rest.split(":")
+            km[(name or None, int(t), int(c), int(sg))] = int(v)
+        except (TypeError, ValueError):
+            continue
     return km
 
 
