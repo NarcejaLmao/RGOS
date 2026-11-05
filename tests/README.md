@@ -14,5 +14,6 @@ Plain `unittest`, standard library only: no pygame, device or root needed (`menu
 | `test_filemanager.py` | File manager: protected boot files stay protected (including names that start with `..`). |
 | `test_volume.py` | `rgos-volume`: the ALSA card from `hw.json` (card 0 is a real card, not "unset"). |
 | `test_dhcp.py` | `rgos-wifi-dhcp`: lease script order (routes flushed before the address is added, so the default route sticks) and resolv.conf. |
+| `test_btctl.py` | `btctl`: the saved Bluetooth on/off setting is applied at boot (off stays off). |
 
 `helpers.py` loads the real `menu.py` and `rgos-input` for the tests.

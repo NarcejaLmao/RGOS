@@ -56,6 +56,11 @@ def set_enabled(on):
     run(["bluetoothctl", "power", "on" if on else "off"])
 
 
+def apply_power():
+    """Put the adapter in the saved on/off state. Off must be applied too: BlueZ powers adapters on by itself (AutoEnable)."""
+    run(["bluetoothctl", "power", "on" if enabled() else "off"])
+
+
 # ---------------------------------------------------------------- pairings kept across reboots
 def restore_pairings():
     if not os.path.exists(PAIRINGS):
@@ -143,8 +148,7 @@ def start():
     else:
         log("bluetoothd did not answer: %s" % out.strip())
         return 1
-    if enabled():
-        run(["bluetoothctl", "power", "on"])
+    apply_power()
     run(["bluetoothctl", "pairable", "on"])
     run(["bluetoothctl", "discoverable", "off"])
     rc, out = run(["bluetoothctl", "show"])
