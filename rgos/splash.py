@@ -57,6 +57,8 @@ def read_conf(path):
             conf = json.load(f)
     except Exception:
         pass
+    if not isinstance(conf, dict):                  # valid JSON that is not an object ([], null, 5, ...)
+        conf = {}
     try:
         fps = float(conf.get("fps", DEFAULT_FPS))
         if not 1 <= fps <= 60:
