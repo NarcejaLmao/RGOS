@@ -76,5 +76,21 @@ class RenameTests(unittest.TestCase):
         self.assertFalse(filemanager.same_entry(a, os.path.join(self.root, "missing")))
 
 
+class HumanSizeTests(unittest.TestCase):
+    def test_units_and_rounding(self):
+        h = filemanager.human_size
+        self.assertEqual([h(0), h(1023), h(1024), h(1536), h(1048576), h(5 * 1024 ** 3)],
+                         ["0 B", "1023 B", "1.0 KB", "1.5 KB", "1.0 MB", "5.0 GB"])
+
+    def test_a_size_that_rounds_up_moves_to_the_next_unit(self):
+        h = filemanager.human_size                      # used to show "1024.0 KB" / "1024.0 MB"
+        self.assertEqual(h(1024 ** 2 - 1), "1.0 MB")
+        self.assertEqual(h(1024 ** 3 - 1), "1.0 GB")
+        self.assertEqual(h(1024 ** 2 - 1024), "1023.0 KB")
+
+    def test_beyond_gb_stays_in_gb(self):
+        self.assertEqual(filemanager.human_size(2 * 1024 ** 4), "2048.0 GB")
+
+
 if __name__ == "__main__":
     unittest.main()

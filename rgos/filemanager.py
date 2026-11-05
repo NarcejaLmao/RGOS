@@ -19,7 +19,7 @@ def human_size(n):
     """1536 -> '1.5 KB'."""
     n = float(n)
     for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
+        if round(n, 1) < 1024 or unit == "GB":      # compare the rounded value, or 1048575 shows as "1024.0 KB"
             return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
         n /= 1024.0
 
