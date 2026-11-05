@@ -2257,6 +2257,9 @@ def main():
                 sub = f_small.render(fit(f_small, subs[hid], bw - 24), True, DIM)
                 canvas.blit(sub, (cx - sub.get_width() // 2, by + 114 + vo))
             hint = "A Open   X Rescan   START+SELECT Power off"
+            if dd is not None:                                              # Launcher preview from the XMB lands here: keep the dropdown visible
+                draw_xmb_dropdown(canvas, f_small, dd, dd_options(dd["kind"]))
+                hint = "Up/Down Browse   A Select   B Cancel"
         elif view == "tools":
             for i, (_tid, tname, tdesc, _tgt) in enumerate(TOOLS):
                 by, sel = top_y + i * 90, i == tool_idx
