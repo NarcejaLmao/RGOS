@@ -16,7 +16,7 @@ visible on the device; the full log stays in /var/log/rgos-retroarch.log. Always
 Testing on a PC: RGOS_RA_BIN, RGOS_RA_CFG, RGOS_RUN, RGOS_ROMS, RGOS_CORE_DIRS, RGOS_STATE, RGOS_RA_LOG, RGOS_NO_HW=1
 override the device paths.
 """
-import glob, shutil, json, os, re, subprocess, sys, time
+import gc, glob, shutil, json, os, re, subprocess, sys, time
 
 RA_BIN = os.environ.get("RGOS_RA_BIN", "retroarch")
 RA_CFG = os.environ.get("RGOS_RA_CFG", "/etc/rgos/retroarch.cfg")
@@ -30,6 +30,9 @@ SYS_INPUT = os.environ.get("RGOS_SYS_INPUT", "/sys/class/input")
 BOOT_DIR = os.environ.get("RGOS_BOOT_DIR", "/boot")
 HUB_NAME = "RG OS Gamepad"             # the input hub's virtual pad (rgos-input); the raw gpio-keys pad is grabbed by the hub and dead
 EARLY_FAIL_S = 6.0                     # a non-zero exit sooner than this is shown on the console
+SYS_ROOT = os.environ.get("RGOS_SYSFS", "/sys")
+GAME_FLAG = os.path.join(RUN_DIR, "ingame")      # exists while RetroArch runs: background daemons (wifictl) stop polling
+HEAVY_SYSTEMS = frozenset(("psx", "gc", "n64", "dreamcast", "saturn", "psp"))   # systems that get the performance governor by default
 
 # Used only if the menu module cannot be imported (e.g. no pygame): what this build installs and supports.
 FALLBACK_DEFAULT = {"gba": "mgba", "gb": "gambatte", "gbc": "gambatte", "nes": "nestopia"}
@@ -220,6 +223,100 @@ def device_cfg():
     return p if p and os.path.isfile(p) else None
 
 
+def perf_governor(sid):
+    """Governor to force while the game runs, or '' to leave the system's own (battery-friendly) choice alone.
+    Heavy systems (PSX, GameCube, N64, Dreamcast, Saturn, PSP) get 'performance' so the CPU/GPU/DRAM never sit at a low clock
+    while a frame is being rendered. Put one word in /boot/rgos-governor.txt to override for every system
+    (performance, schedutil, ondemand, ...; 'default' = never touch the governor)."""
+    try:
+        with open(os.path.join(BOOT_DIR, "rgos-governor.txt")) as f:
+            w = f.read().split()
+        if w and re.fullmatch(r"[a-z_]+", w[0]):
+            return "" if w[0] == "default" else w[0]
+    except OSError:
+        pass
+    return "performance" if sid in HEAVY_SYSTEMS else ""
+
+
+def governor_nodes():
+    return sorted(glob.glob(os.path.join(SYS_ROOT, "devices/system/cpu/cpu[0-9]*/cpufreq/scaling_governor"))
+                  + glob.glob(os.path.join(SYS_ROOT, "class/devfreq/*/governor")))
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def set_governor(gov):
+    """Set `gov` on every cpufreq policy and devfreq device (GPU, DRAM) that offers it. Returns {node: previous governor}
+    for restore_governor(). All previous values are read BEFORE anything is written: cores of one cpufreq policy share a
+    governor, so reading cpu1 after writing cpu0 would record 'performance' as its original."""
+    if not gov:
+        return {}
+    todo = {}
+    for node in governor_nodes():
+        d, base = os.path.split(node)
+        avail = _read(os.path.join(d, "scaling_available_governors" if base == "scaling_governor" else "available_governors"))
+        prev = _read(node)
+        if prev and prev != gov and gov in avail.split():
+            todo[node] = prev
+    for node in todo:
+        try:
+            with open(node, "w") as f:
+                f.write(gov)
+        except OSError as e:
+            log("cannot set governor on %s: %s" % (node, e))
+    if todo:
+        log("governor %s on %d nodes" % (gov, len(todo)))
+    return todo
+
+
+def restore_governor(saved):
+    for node, prev in saved.items():
+        try:
+            with open(node, "w") as f:
+                f.write(prev)
+        except OSError:
+            pass
+
+
+def set_game_flag(on):
+    try:
+        if on:
+            os.makedirs(RUN_DIR, exist_ok=True)
+            open(GAME_FLAG, "w").close()
+        else:
+            os.remove(GAME_FLAG)
+    except OSError:
+        pass
+
+
+def ra_verbose():
+    """RetroArch's --verbose log costs CPU and SD-card writes every frame it logs. Off by default; touch
+    /boot/retroarch-verbose.txt (or set RGOS_RA_VERBOSE=1) to get the full log for a bug report."""
+    return bool(os.environ.get("RGOS_RA_VERBOSE")) or os.path.exists(os.path.join(BOOT_DIR, "retroarch-verbose.txt"))
+
+
+def game_priority():
+    """preexec for RetroArch: a higher scheduling priority than the background daemons (Wi-Fi, Bluetooth, input hub)."""
+    try:
+        os.setpriority(os.PRIO_PROCESS, 0, -5)
+    except OSError:
+        pass
+
+
+def unload_menu():
+    """menu.py is only imported for its core tables. Drop it (and pygame) before RetroArch starts: this process stays alive
+    for the whole game and would otherwise keep the Python heap of a 168 KB module plus pygame resident on a 1 GB device."""
+    for name in [m for m in sys.modules if m == "menu" or m == "pygame" or m.startswith("pygame.")]:
+        del sys.modules[name]
+    gc.collect()
+
+
 def build_command(core_path, content, roms_root, cfg_run):
     appends = [cfg_run]
     dev_cfg = device_cfg()
@@ -228,7 +325,7 @@ def build_command(core_path, content, roms_root, cfg_run):
     user = os.path.join(roms_root, "config", "retroarch.cfg")
     if os.path.isfile(user):
         appends.append(user)
-    cmd = [RA_BIN, "--verbose", "--log-file", LOG, "--config", RA_CFG, "--appendconfig", "|".join(appends)]
+    cmd = [RA_BIN] + (["--verbose"] if ra_verbose() else []) + ["--log-file", LOG, "--config", RA_CFG, "--appendconfig", "|".join(appends)]
     if core_path:
         cmd += ["-L", core_path]
     if content:
@@ -273,11 +370,18 @@ def launch_retroarch(sid, core, core_path, content):
         os.makedirs("/tmp/retroarch", exist_ok=True)
     log("starting: %s" % " ".join(cmd))
     t0 = time.monotonic()
+    hw = not os.environ.get("RGOS_NO_HW") or os.environ.get("RGOS_SYSFS")
+    saved = set_governor(perf_governor(sid)) if hw else {}
+    set_game_flag(True)
     try:
-        rc = subprocess.call(cmd, env=env, stdin=subprocess.DEVNULL)
+        rc = subprocess.call(cmd, env=env, stdin=subprocess.DEVNULL,
+                             preexec_fn=None if os.environ.get("RGOS_NO_HW") else game_priority)
     except OSError as e:
         show_error("RG OS: cannot start RetroArch", str(e))
         return 1
+    finally:
+        set_game_flag(False)
+        restore_governor(saved)
     dt = time.monotonic() - t0
     log("retroarch exited rc=%s after %.1fs" % (rc, dt))
     save_report(pads, idx, drv, cmd, rc)
@@ -309,6 +413,8 @@ def main(argv):
                    "Looked for cores in: %s" % ", ".join(CORE_DIRS))
         return 0
     log("%s: system=%s core=%s" % (target, sid, core))
+    default_core = compatible_cores = None            # they point into menu.py; release it before the game starts
+    unload_menu()
     if core == "dolphin":
         ensure_dolphin_sys(ROMS_ROOT)
     launch_retroarch(sid, core, core_file(core), target)

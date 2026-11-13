@@ -16,6 +16,7 @@ import hashlib, json, os, re, shutil, signal, subprocess, sys, threading, time
 CONF_FILE = os.environ.get("RGOS_WIFI_CONF", "/var/lib/rgos/wifi.json")
 SYS_CONF = os.environ.get("RGOS_WIFI_SYS", "/etc/rgos/wifi.json")
 RUN_DIR = os.environ.get("RGOS_RUN", "/run/rgos")
+GAME_FLAG = os.path.join(RUN_DIR, "ingame")         # exists while a game runs (rgos-launch): no polling, no forks
 SLEEP_FLAG = os.path.join(RUN_DIR, "sleeping")     # exists while the device sleeps (written by rgos-hw)
 STATUS_FILE = os.path.join(RUN_DIR, "wifi.status")
 WPA_CONF = os.path.join(RUN_DIR, "wpa_supplicant.conf")
@@ -483,8 +484,9 @@ class Daemon:
             run(["ip", "link", "set", iface, "down"])
             write_status({"state": "off", "iface": iface})
             return
-        run(["rfkill", "unblock", "wifi"])
-        run(["ip", "link", "set", iface, "up"])
+        if self.last_state != "connected":                            # steady state: skip two forks every cycle
+            run(["rfkill", "unblock", "wifi"])
+            run(["ip", "link", "set", iface, "up"])
         if self.wpa is None or self.wpa.poll() is not None:
             self.start_wpa(iface)
             time.sleep(1)
@@ -511,11 +513,13 @@ class Daemon:
         seen = [0.0]
         log("daemon start")
         while not self.stop:
-            try:
-                self.step(seen)
-            except Exception as e:                                     # never die: a broken adapter must not stop the device
-                log("error: %r" % (e,))
-            time.sleep(2)
+            ingame = os.path.exists(GAME_FLAG) and not os.path.exists(SLEEP_FLAG) and self.last_state != ""
+            if not ingame:                                             # in a game wpa_supplicant/udhcpc keep the link up on their own
+                try:
+                    self.step(seen)
+                except Exception as e:                                 # never die: a broken adapter must not stop the device
+                    log("error: %r" % (e,))
+            time.sleep(5 if ingame else (6 if self.last_state == "connected" else 2))
         self.children_stop()
 
 
