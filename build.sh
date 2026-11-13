@@ -489,7 +489,16 @@ if ! chroot "$ROOTFS" python3 -c 'import pygame; print("pygame", pygame.version.
   chroot "$ROOTFS" python3 -c 'import pygame; print("pygame", pygame.version.ver)' \
     || { echo "!! pygame still cannot be imported: the RG OS launcher would not start. Aborting the build." >&2; exit 1; }
 fi
-rm -rf "$ROOTFS/var/cache/apt" "$ROOTFS/var/lib/apt/lists" "$ROOTFS/usr/share/doc" "$ROOTFS/usr/share/man"
+rm -rf "$ROOTFS/var/cache/apt" "$ROOTFS/var/lib/apt/lists" "$ROOTFS/usr/share/doc" "$ROOTFS/usr/share/man" "$ROOTFS/usr/share/info" "$ROOTFS/usr/share/lintian"
+# smaller image = less to read from the SD card at boot: keep only the English locale
+find "$ROOTFS/usr/share/locale" -mindepth 1 -maxdepth 1 ! -name 'en*' ! -name locale.alias -exec rm -rf {} + 2>/dev/null || true
+
+# Precompile Python bytecode. The session runs with PYTHONDONTWRITEBYTECODE=1 on a read-only squashfs, so without this every boot
+# re-parses the 168 KB menu.py and pygame's modules from source. checked-hash pycs stay valid regardless of file mtimes and are
+# still rejected if a source file is edited on the device.
+echo "==> Precompiling Python bytecode"
+chroot "$ROOTFS" python3 -m compileall -q --invalidation-mode checked-hash /opt/rgos /usr/lib/python3 /usr/lib/python3/dist-packages >/dev/null 2>&1 \
+  || echo "   (bytecode precompile reported errors; continuing, the sources still work)"
 
 # 4. new SYSTEM ------------------------------------------------------------------
 echo "==> Building SYSTEM squashfs"

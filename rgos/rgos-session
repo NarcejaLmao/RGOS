@@ -35,19 +35,27 @@ for b in /sys/class/backlight/*; do [ -w "$b/brightness" ] && cat "$b/max_bright
 # the menu looks for the Debian font path
 mkdir -p /usr/share/fonts/truetype/dejavu
 [ -e /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf ] || ln -sf /usr/share/fonts/dejavu/DejaVuSans.ttf /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+# Module listing: /lib/modules is walked ONCE (it holds thousands of files; this used to be walked 5+ times per boot) and
+# every filter below greps the cached list. load_mods skips modules that are already loaded, which saves one fork+exec of
+# modprobe per module on every pass.
+MODLIST=/run/rgos-modules.list
+if [ -d /lib/modules ]; then find /lib/modules -name '*.ko*' 2>/dev/null > $MODLIST; else : > $MODLIST; fi
+mod_names() {   # stdin: module paths -> unique module names
+    sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u
+}
+load_mods() {   # args: module names; logs failures to $AUDLOG when it is set
+    for m in "$@"; do
+        [ -d "/sys/module/$(echo "$m" | tr - _)" ] && continue
+        if [ -n "$AUDLOG" ]; then out=$(modprobe "$m" 2>&1) || echo "modprobe $m: ${out:-failed}" >> $AUDLOG
+        else modprobe "$m" 2>/dev/null; fi
+    done
+}
 # input drivers (ROCKNIX ships them as modules): gpio-keys / PWM / joypad (the button driver) / uinput / evdev
-if [ -d /lib/modules ]; then
-    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -iE 'joypad|pwm|gpio-keys|evdev|uinput' \
-               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
-fi
+load_mods $(grep -iE 'joypad|pwm|gpio-keys|evdev|uinput' $MODLIST | mod_names)
 # GPU + sound for the emulators: the GPU driver and the audio codec. Built into some kernels (then nothing is found
 # and this does nothing), modules in others (then there is no udev to load them for us). Dependencies come in via modules.dep.
-if [ -d /lib/modules ]; then
-    for m in $(find /lib/modules -name '*.ko*' 2>/dev/null | grep -E '/drivers/gpu/drm/' \
-               | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi' \
-               | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u); do modprobe "$m" 2>/dev/null; done
-    # sound is loaded by load_audio_modules below (after the GPU loop), not by a /sound/ path filter
-fi
+load_mods $(grep -E '/drivers/gpu/drm/' $MODLIST | grep -iE 'panfrost|gpu-sched|drm_shmem|drm_kms|sun4i|sun8i|sun50i|sunxi' | mod_names)
+# sound is loaded by load_audio_modules below (after the GPU loop), not by a /sound/ path filter
 # Sound stack. On the Unisoc T618 the ASoC card (vbc-rxpx-codec-sc27xx) is built in and defers its probe until EVERY piece it names
 # exists: the VBC CPU DAI, MCDT, the agcp DMA, the digital codec, the AGDSP mailbox / boot driver and the AW87391 amp. Those drivers
 # do not all live under sound/ (the mailbox, DMA and AGDSP boot drivers are in drivers/), so a path filter on /sound/ left the card
@@ -55,18 +63,13 @@ fi
 # re-triggers the deferred card probe), and log what was tried so a missing module is visible in rgos-logs.txt.
 AUDLOG=/var/log/rgos-audio-load.log
 audio_mod_names() {
-    find /lib/modules -name '*.ko*' 2>/dev/null \
-      | grep -E '/sound/|sprd|sc27|sc2730|agdsp|agcp|audcp|audio|mcdt|vbc|aw87|aw873|asoc|snd|codec|mailbox|i2s|iis|dmaengine|virt-dma' \
-      | grep -vE 'wcn|wlan|btsprd|marlin|sdiohal|bluetooth|/net/|/gpu/|/media/|/usb/|/input/|/video/|/staging/' \
-      | sed -E 's#.*/##; s#\.ko(\..*)?$##' | sort -u
+    grep -E '/sound/|sprd|sc27|sc2730|agdsp|agcp|audcp|audio|mcdt|vbc|aw87|aw873|asoc|snd|codec|mailbox|i2s|iis|dmaengine|virt-dma' $MODLIST \
+      | grep -vE 'wcn|wlan|btsprd|marlin|sdiohal|bluetooth|/net/|/gpu/|/media/|/usb/|/input/|/video/|/staging/' | mod_names
 }
-load_audio_modules() {
-    for m in $(audio_mod_names); do
-        out=$(modprobe "$m" 2>&1) || echo "modprobe $m: ${out:-failed}" >> $AUDLOG
-    done
-}
+AUDMODS=$(audio_mod_names)   # computed once: the list cannot change during boot
+load_audio_modules() { AUDLOG=$AUDLOG load_mods $AUDMODS; }
 if [ -d /lib/modules ]; then
-    { echo "== audio module candidates"; audio_mod_names | tr '\n' ' '; echo; } > $AUDLOG 2>&1
+    { echo "== audio module candidates"; echo $AUDMODS; } > $AUDLOG 2>&1
     for pass in 1 2 3; do
         echo "== pass $pass $(date +%T)" >> $AUDLOG
         load_audio_modules
@@ -174,7 +177,7 @@ python3 /opt/rgos/rgos-volume >> /var/log/rgos-volume.log 2>&1 &
 # input hub: gpio-keys buttons -> one virtual button pad
 python3 /opt/rgos/rgos-input >> /var/log/rgos-input.log 2>&1 &
 # diagnostics for the PC: copy the logs to the FAT boot partition (rgos-logs.txt) at 8, 28 and 58 s
-( prev=0; for t in 8 28 58; do sleep $((t-prev)); prev=$t
+( command -v renice >/dev/null 2>&1 && renice -n 19 -p "$(sh -c 'echo $PPID')" >/dev/null 2>&1; prev=0; for t in 8 28 58; do sleep $((t-prev)); prev=$t
     if ! mountpoint -q /boot; then for d in /dev/mmcblk*p1; do [ -b "$d" ] && mount -t vfat "$d" /boot 2>/dev/null && break; done; fi
     mountpoint -q /boot || continue
     { echo "== $(date) kernel $(uname -r) t=$t"; echo "--- pygame"
