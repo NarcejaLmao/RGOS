@@ -47,12 +47,27 @@ until find_boot; do
 done
 klog "boot partition found after $n tries (boot=$WANT)"
 
+# Boot trace for a PC: written to the FAT partition as rgos-initramfs.txt, so a card that fails to boot leaves evidence of how far it
+# got. File present  -> U-Boot/extlinux/kernel did start this initramfs; read it to see which step failed.
+# File missing       -> the initrd never ran (U-Boot did not load it, the kernel ignored it, or rdinit failed): copy
+#                       extlinux/extlinux.conf.stock over extlinux/extlinux.conf to boot ROCKNIX's own init instead.
+# rgos-bootinfo.txt / rgos-logs.txt (written later by the Debian side) missing while this file exists -> the failure is after switch_root.
+TRACE=/flash/rgos-initramfs.txt
+trace() { echo "[$(cut -d' ' -f1 /proc/uptime 2>/dev/null)] $*" >> "$TRACE" 2>/dev/null; }
+{ echo "RG OS initramfs trace"; echo "cmdline: $(cat /proc/cmdline)"; echo "kernel: $(uname -r 2>/dev/null)"
+  echo "boot partition: $(awk '$2=="/flash"{print $1; exit}' /proc/mounts) (tries: $n, boot=$WANT)"
+  echo "--- /proc/partitions"; cat /proc/partitions 2>&1; } > "$TRACE" 2>/dev/null
+
 n=0
 until mount -t squashfs -o ro,loop /flash/SYSTEM /sysroot 2>/dev/null; do
   n=$((n + 1))
-  [ "$n" -eq 5 ] && say "cannot mount /flash/SYSTEM (card error? re-flash the image)"
+  [ "$n" -eq 5 ] && { say "cannot mount /flash/SYSTEM (card error? re-flash the image)"
+    trace "cannot mount /flash/SYSTEM as squashfs after $n tries; SYSTEM is $(ls -l /flash/SYSTEM 2>&1)"
+    { echo "--- /proc/filesystems"; cat /proc/filesystems; echo "--- /dev/loop*"; ls -l /dev/loop* 2>&1
+      echo "--- dmesg (tail)"; dmesg 2>&1 | tail -n 40; } >> "$TRACE" 2>/dev/null; sync; }
   sleep 1
 done
+trace "SYSTEM mounted on /sysroot after $n retries"
 
 for d in flash proc sys dev; do mkdir -p "/sysroot/$d" 2>/dev/null; done
 mount -o move /flash /sysroot/flash
@@ -61,7 +76,8 @@ mount -o move /sys   /sysroot/sys
 mount -o move /dev   /sysroot/dev
 
 for i in /usr/sbin/rgos-init /sbin/init; do
-  [ -x "/sysroot$i" ] && exec switch_root /sysroot "$i"
+  [ -x "/sysroot$i" ] && { trace "switch_root to $i"; sync; exec switch_root /sysroot "$i"; }
 done
+trace "no init found in SYSTEM"; sync
 say "no init found in SYSTEM"
 while :; do sleep 3600; done
