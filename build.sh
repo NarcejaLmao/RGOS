@@ -122,6 +122,13 @@ PSX_REPO="${PSX_REPO:-https://github.com/libretro/pcsx_rearmed.git}"   # PlaySta
 GENESIS_REPO="${GENESIS_REPO:-https://github.com/libretro/Genesis-Plus-GX.git}"   # Genesis Plus GX (Mega Drive / Master System / Game Gear / SG-1000 / Sega CD), built from source only if Debian has no package; GENESIS_REPO=none skips that fallback
 GC_REPO="${GC_REPO:-https://github.com/libretro/dolphin.git}"   # Nintendo GameCube core (Dolphin libretro, built from source). RG Rotate ONLY (other devices never get it); GC_REPO=none skips it
 [[ "$DEVICE" == "rg-rotate" ]] || GC_REPO=none
+# RGOS_INITRD=1  boot through the RG OS initramfs: extlinux.conf gets an INITRD line and rdinit=/rgos-init (fast, no 60 s wait).
+# RGOS_INITRD=0  leave extlinux.conf exactly as ROCKNIX shipped it: U-Boot loads no initrd and ROCKNIX's own init mounts SYSTEM and
+#                switch_roots into /usr/lib/systemd/systemd (a symlink to rgos-init). Needs nothing from U-Boot but what stock ROCKNIX needs.
+# Default: 1, except the RG Rotate (0). Its U-Boot only ever booted stock ROCKNIX, which has no INITRD line. If the card's U-Boot cannot load an
+# initrd (e.g. ramdisk_addr_r is not set) extlinux fails and the device falls through to Android. Use RGOS_INITRD=1 once that is known to work.
+if [[ "$DEVICE" == "rg-rotate" ]]; then RGOS_INITRD="${RGOS_INITRD:-0}"; else RGOS_INITRD="${RGOS_INITRD:-1}"; fi
+[[ "$RGOS_INITRD" == 0 || "$RGOS_INITRD" == 1 ]] || { echo "RGOS_INITRD must be 0 or 1" >&2; exit 1; }
 NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
 # Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),
 # with Mesa (Panfrost) for KMS output and SDL2 for input.
@@ -530,10 +537,15 @@ EXT="$WORK/mnt/extlinux/extlinux.conf"; [[ -f "$EXT" ]] || EXT="$WORK/mnt/extlin
 rm -f "$WORK/mnt/white.cpio.gz"                 # leftover from very old builds
 # boot=LABEL=ROCKNIX stays as shipped: the partition keeps its ROCKNIX label, so both our init and ROCKNIX's own can find it
 cp "$EXT" "$(dirname "$EXT")/extlinux.conf.stock"   # recovery: copy this over extlinux.conf from a PC to boot ROCKNIX's own init again
-echo "==> Patched extlinux config:"
-python3 "$HERE/initramfs/patch-extlinux.py" "$EXT" "/$INITRD_NAME"
-grep -qi "^[[:space:]]*initrd[[:space:]]\+/$INITRD_NAME" "$EXT" && grep -q 'rdinit=/rgos-init' "$EXT" \
-  || { echo "!! extlinux.conf was not patched correctly"; exit 1; }
+if [[ "$RGOS_INITRD" == 1 ]]; then
+  echo "==> Patched extlinux config:"
+  python3 "$HERE/initramfs/patch-extlinux.py" "$EXT" "/$INITRD_NAME"
+  grep -qi "^[[:space:]]*initrd[[:space:]]\+/$INITRD_NAME" "$EXT" && grep -q 'rdinit=/rgos-init' "$EXT" \
+    || { echo "!! extlinux.conf was not patched correctly"; exit 1; }
+else
+  echo "==> RGOS_INITRD=0: extlinux.conf left exactly as shipped (no INITRD, no rdinit); ROCKNIX's own init starts RG OS"
+  echo "    (rgos-initrd.cpio is still copied to the card, unused, so offline updates keep working; RGOS_INITRD=1 enables the RG OS initramfs)"
+fi
 
 # update mode: keep the files an offline update replaces (see rgos/rgos-update); the image itself is not needed
 if [[ "$MODE" == "update" ]]; then

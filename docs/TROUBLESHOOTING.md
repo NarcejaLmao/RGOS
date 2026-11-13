@@ -9,6 +9,14 @@ RG OS leaves up to four evidence files on the FAT boot partition (the one labell
 | `rgos-logs.txt` | `rgos-session`, at 8, 28 and 58 s | the session never started, or it died early |
 | `rgos-retroarch.txt` | `rgos-launch`, after every game | no game was launched yet |
 
+## RG Rotate boots Android instead of RG OS
+
+Android does not always mean the SPL failed to find U-Boot. The boot chain falls through to the internal Android whenever the card's U-Boot cannot start Linux, for example when extlinux fails because U-Boot cannot load the `INITRD` file (no `ramdisk_addr_r` in its environment). Stock ROCKNIX has no INITRD line, so this U-Boot may never have been asked to load one.
+
+Tell the two cases apart with the stock ROCKNIX T618 image (the same one `build.sh` downloads): if it also ends up in Android, the SPL or the card is the problem; if it boots, U-Boot is fine and RG OS's boot files are.
+
+Since this cannot be told from the code, `build.sh rg-rotate` now defaults to `RGOS_INITRD=0`: `extlinux.conf` stays exactly as ROCKNIX shipped it and ROCKNIX's own init starts RG OS. `RGOS_INITRD=1 sudo -E ./build.sh rg-rotate` brings the RG OS initramfs back (the default on the H700 devices). To try it without rebuilding, copy `extlinux/extlinux.conf.stock` over `extlinux/extlinux.conf`.
+
 ## Nothing is written at all (RG Rotate: boots Android, or stays black)
 
 1. Android again: the SPL did not find U-Boot. Partition 3 of the card must be the GPT partition named `uboot` (`sgdisk -p /dev/sdX`); re-flash the image and the SPL.
