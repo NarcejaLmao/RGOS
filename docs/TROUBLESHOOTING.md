@@ -15,7 +15,15 @@ Android does not always mean the SPL failed to find U-Boot. The boot chain falls
 
 Tell the two cases apart with the stock ROCKNIX T618 image (the same one `build.sh` downloads): if it also ends up in Android, the SPL or the card is the problem; if it boots, U-Boot is fine and RG OS's boot files are.
 
-Since this cannot be told from the code, `build.sh rg-rotate` now defaults to `RGOS_INITRD=0`: `extlinux.conf` stays exactly as ROCKNIX shipped it and ROCKNIX's own init starts RG OS. `RGOS_INITRD=1 sudo -E ./build.sh rg-rotate` brings the RG OS initramfs back (the default on the H700 devices). To try it without rebuilding, copy `extlinux/extlinux.conf.stock` over `extlinux/extlinux.conf`.
+`build.sh` now uses the RG OS initramfs on every device (`RGOS_INITRD=1`, the default), so the card boots straight into RG OS and ROCKNIX's own init and boot screen never run. If this U-Boot cannot load the initrd and the Rotate falls through to Android, copy `extlinux/extlinux.conf.stock` over `extlinux/extlinux.conf` on the FAT partition (ROCKNIX's init then starts RG OS, with its boot screen), or rebuild with `RGOS_INITRD=0 sudo -E ./build.sh rg-rotate`.
+
+## ROCKNIX boot screen shows before RG OS (card built with RGOS_INITRD=0)
+
+An older RG Rotate build left `extlinux.conf` untouched, so ROCKNIX's init ran first. Without rebuilding, patch the card from a PC (`rgos-initrd.cpio` is already on the FAT partition):
+
+    python3 initramfs/patch-extlinux.py <FAT partition>/extlinux/extlinux.conf /rgos-initrd.cpio
+
+or flash a new image.
 
 ## Nothing is written at all (RG Rotate: boots Android, or stays black)
 

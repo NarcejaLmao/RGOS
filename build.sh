@@ -125,9 +125,10 @@ GC_REPO="${GC_REPO:-https://github.com/libretro/dolphin.git}"   # Nintendo GameC
 # RGOS_INITRD=1  boot through the RG OS initramfs: extlinux.conf gets an INITRD line and rdinit=/rgos-init (fast, no 60 s wait).
 # RGOS_INITRD=0  leave extlinux.conf exactly as ROCKNIX shipped it: U-Boot loads no initrd and ROCKNIX's own init mounts SYSTEM and
 #                switch_roots into /usr/lib/systemd/systemd (a symlink to rgos-init). Needs nothing from U-Boot but what stock ROCKNIX needs.
-# Default: 1, except the RG Rotate (0). Its U-Boot only ever booted stock ROCKNIX, which has no INITRD line. If the card's U-Boot cannot load an
-# initrd (e.g. ramdisk_addr_r is not set) extlinux fails and the device falls through to Android. Use RGOS_INITRD=1 once that is known to work.
-if [[ "$DEVICE" == "rg-rotate" ]]; then RGOS_INITRD="${RGOS_INITRD:-0}"; else RGOS_INITRD="${RGOS_INITRD:-1}"; fi
+# Default: 1 on every device, so the card boots straight into RG OS and ROCKNIX's own init (its boot screen / "NEVER TOUCH boot=...")
+# never runs. RGOS_INITRD=0 is only a fallback for a U-Boot that cannot load an initrd (e.g. ramdisk_addr_r is not set): there extlinux
+# fails and the RG Rotate falls through to Android. Then build with RGOS_INITRD=0, or copy extlinux/extlinux.conf.stock over extlinux.conf.
+RGOS_INITRD="${RGOS_INITRD:-1}"
 [[ "$RGOS_INITRD" == 0 || "$RGOS_INITRD" == 1 ]] || { echo "RGOS_INITRD must be 0 or 1" >&2; exit 1; }
 NGP_SRC="${NGP_SRC:-https://github.com/libretro/beetle-ngp-libretro/archive/refs/heads/master.tar.gz}"   # Neo Geo Pocket core (mednafen_ngp); NGP_SRC=none skips it
 # Emulation: RetroArch (aarch64) + Gambatte (Game Boy / Game Boy Color) + mGBA (Game Boy Advance, also a GB/GBC alternative),

@@ -157,7 +157,7 @@ jobs:
             if [[ "$ptable" == dos ]]; then
               test -s "$mnt/dtb.img" || { echo "$img: boot partition is missing dtb.img" >&2; rc=1; }
             fi
-            # either the RG OS initramfs is wired in, or (RGOS_INITRD=0, the RG Rotate default) extlinux.conf is byte-for-byte the stock one
+            # either the RG OS initramfs is wired in, or (only when built with RGOS_INITRD=0) extlinux.conf is byte-for-byte the stock one
             grep -q 'rdinit=/rgos-init' "$mnt/extlinux/extlinux.conf" || cmp -s "$mnt/extlinux/extlinux.conf" "$mnt/extlinux/extlinux.conf.stock" \
               || { echo "$img: extlinux.conf has no rdinit=/rgos-init and is not the stock one" >&2; rc=1; }
             sudo umount "$mnt"; sudo losetup -d "$loop"
